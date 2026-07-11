@@ -25,3 +25,23 @@ def test_provider_unknown_raises():
     object.__setattr__(bad, "provider", "unknown")
     with pytest.raises(ValueError, match="Unknown provider"):
         provider.get_llm(bad)
+
+
+def test_provider_dispatches_to_qwen(monkeypatch):
+    import agentteam.models.adapters.qwen as qwen
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "k")
+    monkeypatch.setattr(qwen, "_load_chat_class", lambda: type("F", (), {"__init__": lambda self, **k: None}))
+
+    llm = ModelProvider().get_llm(ModelRef(provider="qwen", name="qwen-max"))
+    assert llm is not None
+
+
+def test_provider_dispatches_to_openai(monkeypatch):
+    import agentteam.models.adapters.openai_adapter as mod
+
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setattr(mod, "_load_chat_class", lambda: type("F", (), {"__init__": lambda self, **k: None}))
+
+    llm = ModelProvider().get_llm(ModelRef(provider="openai", name="gpt-4o"))
+    assert llm is not None
