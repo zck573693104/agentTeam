@@ -28,3 +28,11 @@ class TeamState(TypedDict):
     current_step: int
     worker_outputs: Annotated[dict[str, str], merge_dicts]
     audit_events: Annotated[list, operator.add]
+    run_id: str
+    pending_approval: dict | None
+
+
+def is_rejected(state: dict) -> bool:
+    """检查状态中是否有被拒绝的审批。"""
+    pending = state.get("pending_approval")
+    return pending is not None and not pending.get("approved", True)
