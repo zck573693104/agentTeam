@@ -68,3 +68,9 @@ class FakeModelProvider:
 @pytest.fixture
 def fake_llm() -> FakeLLM:
     return FakeLLM()
+
+
+@pytest.fixture
+def fake_trace_writer():
+    from agentteam.runtime.trace import FakeTraceWriter
+    return FakeTraceWriter()

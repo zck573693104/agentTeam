@@ -158,3 +158,61 @@ def test_leader_review_marks_step_done_and_advances(fake_llm):
     assert result["current_step"] == 1
     assert len(result["messages"]) == 1
     assert len(result["audit_events"]) == 1
+
+
+def test_leader_plan_emits_trace_event(fake_llm, fake_trace_writer):
+    """leader_plan 节点 emit leader_plan 轨迹事件。"""
+    fake_llm.set_structured_responses(
+        [Plan(steps=[PlanStep(worker="w1", instruction="do x")])]
+    )
+    leader = Leader(name="leader", system_prompt="test")
+    node = make_leader_plan_node(leader, fake_llm, trace_writer=fake_trace_writer)
+    state = {"task": "test task", "run_id": "run-1"}
+    node(state)
+    assert len(fake_trace_writer.events) == 1
+    assert fake_trace_writer.events[0]["event_type"] == "leader_plan"
+    assert fake_trace_writer.events[0]["actor"] == "leader"
+    assert fake_trace_writer.events[0]["run_id"] == "run-1"
+
+
+def test_worker_node_emits_start_and_end_events(fake_llm, fake_trace_writer):
+    """worker 节点 emit worker_start 和 worker_end 轨迹事件。"""
+    fake_llm.set_invoke_responses([AIMessage(content="done")])
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    node = make_worker_node(worker, fake_llm, [], trace_writer=fake_trace_writer)
+    state = {
+        "plan": [{"worker": "w1", "instruction": "do x", "status": "pending"}],
+        "current_step": 0,
+        "run_id": "run-1",
+    }
+    node(state)
+    event_types = [e["event_type"] for e in fake_trace_writer.events]
+    assert "worker_start" in event_types
+    assert "worker_end" in event_types
+
+
+def test_leader_review_emits_trace_event(fake_llm, fake_trace_writer):
+    """leader_review 节点 emit leader_review 轨迹事件。"""
+    fake_llm.set_invoke_responses([AIMessage(content="good job")])
+    leader = Leader(name="leader", system_prompt="test")
+    node = make_leader_review_node(leader, fake_llm, trace_writer=fake_trace_writer)
+    state = {
+        "plan": [{"worker": "w1", "instruction": "do x", "status": "done"}],
+        "current_step": 0,
+        "worker_outputs": {"w1": "done"},
+        "run_id": "run-1",
+    }
+    node(state)
+    assert len(fake_trace_writer.events) == 1
+    assert fake_trace_writer.events[0]["event_type"] == "leader_review"
+
+
+def test_node_without_trace_writer_works(fake_llm):
+    """不传 trace_writer 时节点正常工作（向后兼容）。"""
+    fake_llm.set_structured_responses(
+        [Plan(steps=[PlanStep(worker="w1", instruction="do x")])]
+    )
+    leader = Leader(name="leader", system_prompt="test")
+    node = make_leader_plan_node(leader, fake_llm)
+    result = node({"task": "test", "run_id": "run-1"})
+    assert "plan" in result
