@@ -251,3 +251,241 @@ def test_compile_accepts_trace_writer_and_audit_repo(fake_llm, fake_trace_writer
         team, trace_writer=fake_trace_writer, audit_repo=audit_repo
     )
     assert graph is not None
+
+
+def _make_initial_state(task="test task", run_id="run-e2e"):
+    """构建 E2E 测试用的初始状态。"""
+    return {
+        "messages": [],
+        "task": task,
+        "plan": [],
+        "current_step": 0,
+        "worker_outputs": {},
+        "audit_events": [],
+        "run_id": run_id,
+        "pending_approval": None,
+    }
+
+
+def test_e2e_step_approval_interrupt_resume(fake_llm, fake_trace_writer):
+    """E2E：step 级审批 → interrupt → resume → 完成。"""
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    fake_llm.set_structured_responses(
+        [Plan(steps=[PlanStep(worker="w1", instruction="do x")])]
+    )
+    fake_llm.set_invoke_responses(
+        [AIMessage(content="task done"), AIMessage(content="good job")]
+    )
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t",
+        description="test",
+        leader=Leader(
+            name="leader", system_prompt="test",
+            approval_policy=ApprovalPolicy(level="step"),
+        ),
+        workers=[Worker(name="w1", role="r", description="", system_prompt="test")],
+        default_model=ModelRef(provider="qwen", name="qwen-max"),
+    )
+    graph = compiler.compile(
+        team, checkpointer=MemorySaver(), trace_writer=fake_trace_writer
+    )
+
+    config = {"configurable": {"thread_id": "e2e-step"}}
+    initial = _make_initial_state()
+
+    # 第一次 invoke：应在 step_gate 处 interrupt
+    result = graph.invoke(initial, config)
+    state = graph.get_state(config)
+    assert state.next, "图应该在 step_gate 处暂停"
+
+    # Resume：批准
+    result = graph.invoke(
+        Command(resume={"approved": True, "decider": "tester"}), config
+    )
+    state = graph.get_state(config)
+    assert not state.next, "图应该已完成"
+
+    # 验证 worker 产出
+    values = state.values
+    assert "w1" in values.get("worker_outputs", {})
+
+    # 验证轨迹事件
+    event_types = [e["event_type"] for e in fake_trace_writer.events]
+    assert "leader_plan" in event_types
+    assert "approval_requested" in event_types
+    assert "approval_decided" in event_types
+    assert "worker_start" in event_types
+    assert "worker_end" in event_types
+
+
+def test_e2e_worker_approval_interrupt_resume(fake_llm, fake_trace_writer):
+    """E2E：worker 级审批 → interrupt → resume → 完成。"""
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    fake_llm.set_structured_responses(
+        [Plan(steps=[PlanStep(worker="w1", instruction="do x")])]
+    )
+    fake_llm.set_invoke_responses(
+        [AIMessage(content="task done"), AIMessage(content="good job")]
+    )
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t",
+        description="test",
+        leader=Leader(name="leader", system_prompt="test"),
+        workers=[
+            Worker(
+                name="w1", role="r", description="", system_prompt="test",
+                approval_policy=ApprovalPolicy(level="worker"),
+            )
+        ],
+        default_model=ModelRef(provider="qwen", name="qwen-max"),
+    )
+    graph = compiler.compile(
+        team, checkpointer=MemorySaver(), trace_writer=fake_trace_writer
+    )
+
+    config = {"configurable": {"thread_id": "e2e-worker"}}
+    initial = _make_initial_state()
+
+    # 第一次 invoke：应在 worker_gate 处 interrupt
+    result = graph.invoke(initial, config)
+    state = graph.get_state(config)
+    assert state.next, "图应该在 worker_gate 处暂停"
+
+    # Resume：批准
+    result = graph.invoke(
+        Command(resume={"approved": True, "decider": "tester"}), config
+    )
+    state = graph.get_state(config)
+    assert not state.next, "图应该已完成"
+
+    values = state.values
+    assert "w1" in values.get("worker_outputs", {})
+
+
+def test_e2e_step_approval_rejection_terminates(fake_llm, fake_trace_writer):
+    """E2E：step 级审批被拒绝 → 图终止。"""
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    fake_llm.set_structured_responses(
+        [Plan(steps=[PlanStep(worker="w1", instruction="do x")])]
+    )
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t",
+        description="test",
+        leader=Leader(
+            name="leader", system_prompt="test",
+            approval_policy=ApprovalPolicy(level="step"),
+        ),
+        workers=[Worker(name="w1", role="r", description="", system_prompt="test")],
+        default_model=ModelRef(provider="qwen", name="qwen-max"),
+    )
+    graph = compiler.compile(
+        team, checkpointer=MemorySaver(), trace_writer=fake_trace_writer
+    )
+
+    config = {"configurable": {"thread_id": "e2e-reject"}}
+    initial = _make_initial_state()
+
+    # 第一次 invoke：interrupt
+    graph.invoke(initial, config)
+    state = graph.get_state(config)
+    assert state.next
+
+    # Resume：拒绝
+    graph.invoke(
+        Command(resume={"approved": False, "decider": "tester"}), config
+    )
+    state = graph.get_state(config)
+    assert not state.next, "图应该已终止"
+
+    # worker 不应该执行
+    values = state.values
+    assert "w1" not in values.get("worker_outputs", {})
+
+
+def test_e2e_no_policy_runs_without_interrupt(fake_llm, fake_trace_writer):
+    """E2E：无审批策略时，图直接运行完成（无 interrupt）。"""
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    fake_llm.set_structured_responses(
+        [Plan(steps=[PlanStep(worker="w1", instruction="do x")])]
+    )
+    fake_llm.set_invoke_responses(
+        [AIMessage(content="done"), AIMessage(content="ok")]
+    )
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t",
+        description="test",
+        leader=Leader(name="leader", system_prompt="test"),
+        workers=[Worker(name="w1", role="r", description="", system_prompt="test")],
+        default_model=ModelRef(provider="qwen", name="qwen-max"),
+    )
+    graph = compiler.compile(
+        team, checkpointer=MemorySaver(), trace_writer=fake_trace_writer
+    )
+
+    config = {"configurable": {"thread_id": "e2e-nopolicy"}}
+    result = graph.invoke(_make_initial_state(), config)
+
+    state = graph.get_state(config)
+    assert not state.next, "图应该直接完成"
+    assert "w1" in state.values.get("worker_outputs", {})
+
+    # 无审批事件
+    event_types = [e["event_type"] for e in fake_trace_writer.events]
+    assert "approval_requested" not in event_types
