@@ -69,3 +69,82 @@ def test_team_compiler_produces_runnable_graph():
     assert "leader_review" in node_names
     assert "worker_coder" in node_names
     assert "worker_tester" in node_names
+
+
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import MemorySaver
+
+from agentteam.runtime.nodes import Plan, PlanStep
+
+
+def test_end_to_end_run_two_steps():
+    """Leader 拆 2 步 → coder 执行 → review → tester 执行 → review → 结束。"""
+    team = _make_team()
+
+    # Leader LLM：1 次结构化输出（拆计划）+ 2 次 invoke（点评）
+    leader_llm = FakeLLM()
+    leader_llm.set_structured_responses([Plan(steps=[
+        PlanStep(worker="coder", instruction="写 hello world"),
+        PlanStep(worker="tester", instruction="写测试"),
+    ])])
+    leader_llm.set_invoke_responses([
+        AIMessage(content="coder 干得不错"),
+        AIMessage(content="tester 测试到位，全部完成"),
+    ])
+
+    # Worker LLM：coder 1 次 + tester 1 次（都直接给最终答案，不调工具）
+    worker_llm = FakeLLM()
+    worker_llm.set_invoke_responses([
+        AIMessage(content="print('hello world')"),
+        AIMessage(content="assert True"),
+    ])
+
+    provider = FakeModelProvider({
+        "leader-model": leader_llm,
+        "worker-model": worker_llm,
+    })
+    compiler = TeamCompiler(provider, ToolRegistry())
+    graph = compiler.compile(team, checkpointer=MemorySaver())
+
+    result = graph.invoke(
+        {"task": "开发 hello world"},
+        config={"configurable": {"thread_id": "t1"}},
+    )
+
+    # 计划 2 步全部完成
+    assert len(result["plan"]) == 2
+    assert result["plan"][0]["status"] == "done"
+    assert result["plan"][1]["status"] == "done"
+
+    # 两个 worker 都有产出
+    assert result["worker_outputs"]["coder"] == "print('hello world')"
+    assert result["worker_outputs"]["tester"] == "assert True"
+
+    # current_step 推进到末尾
+    assert result["current_step"] == 2
+
+    # 消息历史包含 leader_plan + coder + review + tester + review
+    assert len(result["messages"]) >= 5
+
+    # audit_events 累积：leader_plan + worker_end×2 + leader_review×2 = 5
+    assert len(result["audit_events"]) == 5
+
+
+def test_end_to_end_empty_plan_ends_immediately():
+    """Leader 拆出空计划 → 立即结束。"""
+    team = _make_team()
+
+    leader_llm = FakeLLM()
+    leader_llm.set_structured_responses([Plan(steps=[])])
+
+    provider = FakeModelProvider({"leader-model": leader_llm, "worker-model": FakeLLM()})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    graph = compiler.compile(team, checkpointer=MemorySaver())
+
+    result = graph.invoke(
+        {"task": "啥也不用做"},
+        config={"configurable": {"thread_id": "t2"}},
+    )
+
+    assert result["plan"] == []
+    assert result["worker_outputs"] == {}
