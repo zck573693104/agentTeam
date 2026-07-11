@@ -1,11 +1,4 @@
 import sqlite3
-from datetime import datetime, timezone
-
-import pytest
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def test_create_and_get_run(tmp_db: sqlite3.Connection):
