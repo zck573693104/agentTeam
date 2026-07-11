@@ -103,35 +103,27 @@ def test_worker_node_react_with_tool(fake_llm, tmp_path):
 
 
 def test_worker_node_respects_max_iterations(fake_llm):
-    # LLM 始终返回 tool_call，永不给最终答案
-    fake_llm.set_invoke_responses([
-        AIMessage(content="", tool_calls=[{
-            "name": "read_file",
-            "args": {"path": "x"},
-            "id": f"tc{i}",
-        }]) for i in range(3)
-    ])
-
-    from agentteam.tools.skills.file_ops import read_file
-
-    worker = Worker(
-        name="coder",
-        role="代码工程师",
-        description="写代码",
-        system_prompt="你是代码工程师",
-        tools=["read_file"],
-        max_iterations=3,
+    """max_iterations 到达时强制结束，LLM 被调用恰好 max_iterations 次。"""
+    # 每次都返回 tool_calls，永不给出最终答案
+    tool_call_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "x"}, "id": "tc1", "type": "tool_call"}],
     )
-    node = make_worker_node(worker, fake_llm, [read_file])
-
+    fake_llm.set_invoke_responses([tool_call_response] * 100)
+    worker = Worker(
+        name="w1", role="r", description="", system_prompt="test", max_iterations=3
+    )
+    node = make_worker_node(worker, fake_llm, [])
     state = {
-        "plan": [{"worker": "coder", "instruction": "读文件", "status": "pending"}],
+        "plan": [{"worker": "w1", "instruction": "do x", "status": "pending"}],
         "current_step": 0,
+        "run_id": "r1",
     }
     result = node(state)
-
-    # 达到 max_iterations 后强制结束，worker_outputs 仍有值
-    assert "coder" in result["worker_outputs"]
+    # LLM 应该被调用恰好 3 次（max_iterations=3）
+    assert fake_llm._inv_idx == 3
+    # 最终答案应该是非 None（强制结束时取最后一条消息）
+    assert result["worker_outputs"]["w1"] is not None
 
 
 def test_leader_review_marks_step_done_and_advances(fake_llm):
