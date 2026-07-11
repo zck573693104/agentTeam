@@ -46,7 +46,10 @@ def init_db(path: str | Path = "data/agentteam.db") -> sqlite3.Connection:
     """初始化 SQLite 数据库，创建 schema，返回连接。"""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
+    # check_same_thread=False: the connection may be shared with SqliteSaver,
+    # which writes checkpoints from worker threads and serializes access via
+    # its own lock. Safe for single-threaded use as well.
+    conn = sqlite3.connect(str(p), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     conn.commit()
