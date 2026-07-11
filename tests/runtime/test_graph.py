@@ -145,3 +145,109 @@ def test_end_to_end_empty_plan_ends_immediately():
 
     assert result["plan"] == []
     assert result["worker_outputs"] == {}
+
+
+def test_compile_with_step_policy_adds_step_gate(fake_llm):
+    """有 step 级策略时，编译出的图包含 step_gate 节点。"""
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t",
+        description="test",
+        leader=Leader(system_prompt="test", approval_policy=ApprovalPolicy(level="step")),
+        workers=[Worker(name="w1", role="r", description="", system_prompt="test")],
+        default_model=ModelRef(provider="qwen", name="qwen-max"),
+    )
+    graph = compiler.compile(team)
+    node_names = set(graph.get_graph().nodes.keys())
+    assert "step_gate" in node_names
+
+
+def test_compile_without_policy_has_no_gates(fake_llm):
+    """无策略时，编译出的图不含任何 gate 节点（与 M2 一致）。"""
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t",
+        description="test",
+        leader=Leader(system_prompt="test"),
+        workers=[Worker(name="w1", role="r", description="", system_prompt="test")],
+        default_model=ModelRef(provider="qwen", name="qwen-max"),
+    )
+    graph = compiler.compile(team)
+    node_names = set(graph.get_graph().nodes.keys())
+    assert "step_gate" not in node_names
+    assert not any(n.startswith("worker_gate") for n in node_names)
+
+
+def test_compile_with_worker_policy_adds_worker_gate(fake_llm):
+    """有 worker 级策略时，编译出的图包含 worker_gate 节点。"""
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t",
+        description="test",
+        leader=Leader(system_prompt="test"),
+        workers=[
+            Worker(
+                name="w1",
+                role="r",
+                description="",
+                system_prompt="test",
+                approval_policy=ApprovalPolicy(level="worker"),
+            )
+        ],
+        default_model=ModelRef(provider="qwen", name="qwen-max"),
+    )
+    graph = compiler.compile(team)
+    node_names = set(graph.get_graph().nodes.keys())
+    assert "worker_gate_w1" in node_names
+
+
+def test_compile_accepts_trace_writer_and_audit_repo(fake_llm, fake_trace_writer, tmp_db):
+    """compile 接受 trace_writer 和 audit_repo 参数。"""
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.storage.audit import AuditRepo
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t",
+        description="test",
+        leader=Leader(system_prompt="test"),
+        workers=[Worker(name="w1", role="r", description="", system_prompt="test")],
+        default_model=ModelRef(provider="qwen", name="qwen-max"),
+    )
+    audit_repo = AuditRepo(tmp_db)
+    graph = compiler.compile(
+        team, trace_writer=fake_trace_writer, audit_repo=audit_repo
+    )
+    assert graph is not None
