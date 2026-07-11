@@ -34,3 +34,98 @@ def test_leader_plan_empty_plan(fake_llm):
     result = node({"task": "啥也不用做", "messages": []})
     assert result["plan"] == []
     assert result["current_step"] == 0
+
+
+from langchain_core.messages import AIMessage
+
+from agentteam.domain.worker import Worker
+from agentteam.runtime.nodes import make_worker_node
+
+
+def test_worker_node_direct_answer(fake_llm):
+    fake_llm.set_invoke_responses([AIMessage(content="hello world")])
+
+    worker = Worker(
+        name="coder",
+        role="代码工程师",
+        description="写代码",
+        system_prompt="你是代码工程师",
+    )
+    node = make_worker_node(worker, fake_llm, [])
+
+    state = {
+        "plan": [{"worker": "coder", "instruction": "写 hello", "status": "pending"}],
+        "current_step": 0,
+    }
+    result = node(state)
+
+    assert result["worker_outputs"] == {"coder": "hello world"}
+    assert len(result["messages"]) == 1
+    assert "coder" in result["messages"][0].content
+
+
+def test_worker_node_react_with_tool(fake_llm, tmp_path):
+    from agentteam.tools.skills.file_ops import write_file
+
+    target = tmp_path / "out.txt"
+    fake_llm.set_invoke_responses([
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "write_file",
+                "args": {"path": str(target), "content": "hi"},
+                "id": "tc1",
+            }],
+        ),
+        AIMessage(content="已写入文件"),
+    ])
+
+    worker = Worker(
+        name="coder",
+        role="代码工程师",
+        description="写代码",
+        system_prompt="你是代码工程师",
+        tools=["write_file"],
+    )
+    node = make_worker_node(worker, fake_llm, [write_file])
+
+    state = {
+        "plan": [{"worker": "coder", "instruction": "写文件", "status": "pending"}],
+        "current_step": 0,
+    }
+    result = node(state)
+
+    assert target.read_text(encoding="utf-8") == "hi"
+    assert result["worker_outputs"] == {"coder": "已写入文件"}
+
+
+def test_worker_node_respects_max_iterations(fake_llm):
+    # LLM 始终返回 tool_call，永不给最终答案
+    fake_llm.set_invoke_responses([
+        AIMessage(content="", tool_calls=[{
+            "name": "read_file",
+            "args": {"path": "x"},
+            "id": f"tc{i}",
+        }]) for i in range(3)
+    ])
+
+    from agentteam.tools.skills.file_ops import read_file
+
+    worker = Worker(
+        name="coder",
+        role="代码工程师",
+        description="写代码",
+        system_prompt="你是代码工程师",
+        tools=["read_file"],
+        max_iterations=3,
+    )
+    node = make_worker_node(worker, fake_llm, [read_file])
+
+    state = {
+        "plan": [{"worker": "coder", "instruction": "读文件", "status": "pending"}],
+        "current_step": 0,
+    }
+    result = node(state)
+
+    # 达到 max_iterations 后强制结束，worker_outputs 仍有值
+    assert "coder" in result["worker_outputs"]
