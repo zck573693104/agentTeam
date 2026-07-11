@@ -129,3 +129,32 @@ def test_worker_node_respects_max_iterations(fake_llm):
 
     # 达到 max_iterations 后强制结束，worker_outputs 仍有值
     assert "coder" in result["worker_outputs"]
+
+
+from agentteam.runtime.nodes import make_leader_review_node
+
+
+def test_leader_review_marks_step_done_and_advances(fake_llm):
+    fake_llm.set_invoke_responses([AIMessage(content="做得好")])
+
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [
+            {"worker": "coder", "instruction": "写代码", "status": "running"},
+            {"worker": "tester", "instruction": "写测试", "status": "pending"},
+        ],
+        "current_step": 0,
+        "worker_outputs": {"coder": "print('hi')"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    assert result["plan"][0]["status"] == "done"
+    assert result["plan"][1]["status"] == "pending"
+    assert result["current_step"] == 1
+    assert len(result["messages"]) == 1
+    assert len(result["audit_events"]) == 1

@@ -93,3 +93,33 @@ def make_worker_node(worker: Worker, llm: BaseChatModel, tools: list[BaseTool]):
         }
 
     return worker_react
+
+
+def make_leader_review_node(leader: Leader, llm: BaseChatModel):
+    """创建 leader_review 节点：点评 worker 产出，标记步骤完成，推进 current_step。"""
+
+    def leader_review(state: TeamState) -> dict:
+        current = state["current_step"]
+        plan = list(state["plan"])
+        plan[current] = {**plan[current], "status": "done"}
+        worker_name = plan[current]["worker"]
+        outputs = state.get("worker_outputs", {})
+        review_response = llm.invoke([
+            SystemMessage(content=leader.system_prompt),
+            HumanMessage(
+                content=(
+                    f"Worker {worker_name} 完成了步骤 {current}，"
+                    f"产出：{outputs.get(worker_name, '')}。请简要点评。"
+                )
+            ),
+        ])
+        return {
+            "plan": plan,
+            "current_step": current + 1,
+            "messages": [
+                AIMessage(content=f"[Leader] {review_response.content}", name=leader.name)
+            ],
+            "audit_events": [{"event_type": "leader_review", "actor": leader.name}],
+        }
+
+    return leader_review
