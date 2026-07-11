@@ -9,6 +9,7 @@ from ..provider import ModelRef
 
 
 def _load_chat_class() -> Callable:
+    """懒加载 ChatOllama，缺失依赖时给清晰错误。"""
     try:
         from langchain_ollama import ChatOllama
     except ImportError as e:  # pragma: no cover
@@ -26,9 +27,10 @@ class OllamaAdapter:
     def build(self, ref: ModelRef) -> BaseChatModel:
         ChatOllama = _load_chat_class()
         base_url = self._config.get("ollama_base_url") or os.environ.get("OLLAMA_BASE_URL")
-        kwargs: dict = {
+        kwargs: dict[str, object] = {
             "model": ref.name,
             "temperature": ref.temperature,
+            "streaming": ref.streaming,
         }
         if base_url:
             kwargs["base_url"] = base_url

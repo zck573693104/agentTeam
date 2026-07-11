@@ -19,6 +19,7 @@ def test_ollama_adapter_builds(monkeypatch):
     assert isinstance(llm, FakeChatOllama)
     assert captured["model"] == "llama3"
     assert captured["temperature"] == 0.8
+    assert captured["streaming"] is False
     # Ollama 本地运行，无需 api_key
     assert "api_key" not in captured
 

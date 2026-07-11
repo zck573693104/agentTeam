@@ -9,6 +9,7 @@ from ..provider import ModelRef
 
 
 def _load_chat_class() -> Callable:
+    """懒加载 ChatOpenAI，缺失依赖时给清晰错误。"""
     try:
         from langchain_openai import ChatOpenAI
     except ImportError as e:  # pragma: no cover

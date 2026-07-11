@@ -9,6 +9,7 @@ from ..provider import ModelRef
 
 
 def _load_chat_class() -> Callable:
+    """懒加载 ChatAnthropic，缺失依赖时给清晰错误。"""
     try:
         from langchain_anthropic import ChatAnthropic
     except ImportError as e:  # pragma: no cover

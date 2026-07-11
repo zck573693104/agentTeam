@@ -19,7 +19,6 @@ def test_model_ref_is_frozen():
 
 def test_provider_unknown_raises():
     provider = ModelProvider()
-    ref = ModelRef(provider="qwen", name="qwen-max")  # provider 合法但未注入适配器时由分发处理
     # 用一个非法 provider 值绕过 Literal 检查
     bad = ModelRef(provider="qwen", name="x")
     object.__setattr__(bad, "provider", "unknown")
