@@ -1,9 +1,12 @@
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END
 
 from agentteam.domain.team import Leader, Team
 from agentteam.domain.worker import Worker
 from agentteam.models.provider import ModelRef
 from agentteam.runtime.graph import TeamCompiler, route_from_plan, route_from_review
+from agentteam.runtime.nodes import Plan, PlanStep
 from agentteam.tools.registry import ToolRegistry
 from tests.conftest import FakeLLM, FakeModelProvider
 
@@ -69,12 +72,6 @@ def test_team_compiler_produces_runnable_graph():
     assert "leader_review" in node_names
     assert "worker_coder" in node_names
     assert "worker_tester" in node_names
-
-
-from langchain_core.messages import AIMessage
-from langgraph.checkpoint.memory import MemorySaver
-
-from agentteam.runtime.nodes import Plan, PlanStep
 
 
 def test_end_to_end_run_two_steps():

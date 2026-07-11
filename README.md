@@ -13,6 +13,8 @@ pip install -e ".[qwen,dev]"
 - `agentteam.models` —— 多供应商模型抽象（Qwen/OpenAI/Anthropic/Ollama）
 - `agentteam.tools` —— ToolRegistry + 原生技能（read_file/write_file/list_dir）
 - `agentteam.storage` —— SQLite 持久化（runs / run_events / approvals）
+- `agentteam.domain` —— 领域模型（Team/Worker/Leader/ApprovalPolicy）
+- `agentteam.runtime` —— TeamCompiler + LangGraph StateGraph 编译执行
 
 ## 快速示例
 
@@ -39,7 +41,7 @@ run_id = RunRepo(conn).create_run("dev_team", "示例任务")
 ## 状态
 
 - [x] M1 基础设施层
-- [ ] M2 领域与编译（Team/Worker/TeamCompiler/LangGraph）
+- [x] M2 领域与编译（Team/Worker/TeamCompiler/LangGraph）
 - [ ] M3 审批与轨迹
 - [ ] M4 MCP 集成
 - [ ] M5 API + Web UI

@@ -1,6 +1,15 @@
+from langchain_core.messages import AIMessage
+
 from agentteam.domain.team import Leader
+from agentteam.domain.worker import Worker
 from agentteam.models.provider import ModelRef
-from agentteam.runtime.nodes import Plan, PlanStep, make_leader_plan_node
+from agentteam.runtime.nodes import (
+    Plan,
+    PlanStep,
+    make_leader_plan_node,
+    make_leader_review_node,
+    make_worker_node,
+)
 
 
 def test_leader_plan_produces_plan(fake_llm):
@@ -34,12 +43,6 @@ def test_leader_plan_empty_plan(fake_llm):
     result = node({"task": "啥也不用做", "messages": []})
     assert result["plan"] == []
     assert result["current_step"] == 0
-
-
-from langchain_core.messages import AIMessage
-
-from agentteam.domain.worker import Worker
-from agentteam.runtime.nodes import make_worker_node
 
 
 def test_worker_node_direct_answer(fake_llm):
@@ -129,9 +132,6 @@ def test_worker_node_respects_max_iterations(fake_llm):
 
     # 达到 max_iterations 后强制结束，worker_outputs 仍有值
     assert "coder" in result["worker_outputs"]
-
-
-from agentteam.runtime.nodes import make_leader_review_node
 
 
 def test_leader_review_marks_step_done_and_advances(fake_llm):
