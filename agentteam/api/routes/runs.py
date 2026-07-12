@@ -1,7 +1,4 @@
-"""GET/POST /api/runs 端点 + trace + approvals 列表 + SSE stream。
-
-approve 端点在后续 Task 中添加。
-"""
+"""GET/POST /api/runs 端点 + trace + approvals 列表 + SSE stream + approve。"""
 from __future__ import annotations
 
 import asyncio
@@ -167,5 +164,21 @@ def runs_router(
                 event_bus.unsubscribe(run_id, q)
 
         return EventSourceResponse(event_generator())
+
+    @router.post("/{run_id}/approve")
+    def approve_run(run_id: str, body: dict):
+        run = run_repo.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+        if run["status"] != "interrupted":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Run '{run_id}' is not interrupted (status={run['status']})",
+            )
+
+        approved = body.get("approved", False)
+        reason = body.get("reason")
+        run_manager.resume_run(run_id, approved, reason)
+        return {"ok": True}
 
     return router
