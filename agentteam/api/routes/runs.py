@@ -24,6 +24,11 @@ class CreateRunRequest(BaseModel):
     task: str
 
 
+class ApproveRequest(BaseModel):
+    approved: bool
+    reason: str | None = None
+
+
 def run_to_dict(row) -> dict:
     """将 runs 表行转为 API 响应 dict：id → run_id（与 POST 响应一致）。
 
@@ -166,7 +171,7 @@ def runs_router(
         return EventSourceResponse(event_generator())
 
     @router.post("/{run_id}/approve")
-    def approve_run(run_id: str, body: dict):
+    def approve_run(run_id: str, req: ApproveRequest):
         run = run_repo.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
@@ -176,9 +181,11 @@ def runs_router(
                 detail=f"Run '{run_id}' is not interrupted (status={run['status']})",
             )
 
-        approved = body.get("approved", False)
-        reason = body.get("reason")
-        run_manager.resume_run(run_id, approved, reason)
+        try:
+            run_manager.resume_run(run_id, req.approved, req.reason)
+        except ValueError as e:
+            # run 在 DB 中为 interrupted 但内存中 graph/config 已丢失（如服务重启后）
+            raise HTTPException(status_code=409, detail=str(e))
         return {"ok": True}
 
     return router

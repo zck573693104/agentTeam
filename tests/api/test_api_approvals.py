@@ -83,8 +83,6 @@ def test_approve_non_interrupted_run_returns_400(make_client):
 
 
 def test_approve_nonexistent_run_returns_404(make_client):
-    from tests.conftest import FakeLLM, FakeModelProvider
-
     client = make_client(FakeModelProvider({"qwen-max": FakeLLM()}))
     resp = client.post(
         f"/api/runs/nonexistent/approve", json={"approved": True}
