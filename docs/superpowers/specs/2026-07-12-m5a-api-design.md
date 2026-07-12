@@ -187,8 +187,8 @@ def _run_in_background(self, run_id, graph, config, task):
 | GET | `/api/runs/{id}` | — | `Run` | 获取 run 状态 |
 | GET | `/api/runs/{id}/stream` | — | `text/event-stream` | SSE 实时事件流 |
 | GET | `/api/runs/{id}/trace` | — | `AuditEvent[]` | 完整执行轨迹（读 SQLite） |
-| GET | `/api/runs/{id}/approvals` | — | `Approval[]` | 列出 run 的审批记录 |
-| POST | `/api/runs/{id}/approvals/{aid}` | `{approved, reason?}` | `{ok}` | 提交审批决策 + 自动续跑 |
+| GET | `/api/runs/{id}/approvals` | — | `Approval[]` | 列出 run 的审批记录（已决策的，由 gate 节点在 resume 时写入） |
+| POST | `/api/runs/{id}/approve` | `{approved, reason?}` | `{ok}` | 提交审批决策 + 自动续跑 |
 | GET | `/api/dashboard` | — | `DashboardStats` | 用量统计 |
 
 `DashboardStats` 响应格式：
@@ -203,9 +203,11 @@ def _run_in_background(self, run_id, graph, config, task):
 }
 ```
 
-### 4.2 设计决策：合并 /resume
+### 4.2 设计决策：合并 /resume + 简化审批 URL
 
-原设计的 `POST /api/runs/{id}/resume` 合并进 `POST /api/runs/{id}/approvals/{aid}`。原因：本框架所有 interrupt 都是审批触发（step 级 / worker 级 / tool 级），审批端点既记录决策又用 `Command(resume=...)` 续跑，避免语义重复。
+原设计的 `POST /api/runs/{id}/resume` 合并进审批端点。原因：本框架所有 interrupt 都是审批触发（step 级 / worker 级 / tool 级），审批端点既记录决策又用 `Command(resume=...)` 续跑，避免语义重复。
+
+URL 从 `POST /api/runs/{id}/approvals/{aid}` 简化为 `POST /api/runs/{id}/approve`（无 `{aid}`）。原因：审批记录由 gate 节点在 resume 后创建（M3 设计：所有 DB 副作用在 `interrupt()` 之后），中断时数据库中尚无 approval_id。客户端通过 `run_interrupted` SSE 事件或 `GET /api/runs/{id}` 检查 status=="interrupted" 得知需要审批，直接 POST `/approve` 续跑。
 
 ### 4.3 Team JSON 格式
 
@@ -315,11 +317,11 @@ Client GET /api/runs/{id}/stream
 ### 6.3 审批续跑
 
 ```
-Client POST /api/runs/{id}/approvals/{aid} {approved: true}
-  → AuditRepo.decide_approval(aid, "approved", "user", reason)
-  → RunManager.resume_run(run_id, approved)  // Command(resume=...) 启新线程
+Client POST /api/runs/{id}/approve {approved: true, reason: "..."}
+  → RunRepo.get_run(run_id) → 检查 status == "interrupted"
+  → RunManager.resume_run(run_id, approved, reason)  // Command(resume=...) 启新线程
   → return {ok}
-  // 后台续跑 → 事件继续推到 EventBus → 已订阅的 SSE 客户端自动收到
+  // 后台续跑 → gate 节点创建 approval 记录 + emit 事件 → 事件推到 EventBus → 已订阅的 SSE 客户端自动收到
 ```
 
 ## 7. 错误处理
@@ -331,7 +333,7 @@ Client POST /api/runs/{id}/approvals/{aid} {approved: true}
 | 团队不存在 | 404 | `GET/DELETE /api/teams/{name}`、`POST /api/runs` 时 |
 | Run 不存在 | 404 | `GET /api/runs/{id}/*` |
 | 团队 JSON 格式错误 | 422 | FastAPI/Pydantic 自动校验 + TeamSerializer 手动校验 |
-| Run 已结束仍尝试审批 | 400 | `POST /approvals/{aid}` 时 run 状态非 `interrupted` |
+| Run 已结束仍尝试审批 | 400 | `POST /api/runs/{id}/approve` 时 run 状态非 `interrupted` |
 | 无 pending approval | 400 | RunManager 检测无 interrupt |
 | MCP 加载失败 | 400 | compile 时异常，返回给 `POST /api/runs` |
 | 图执行异常 | 200 + `error` SSE 事件 | 后台线程 catch → run 状态 `failed` → 发 error 事件 |
