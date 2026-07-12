@@ -304,24 +304,27 @@ def make_worker_node(
     llm: BaseChatModel,
     tools: list[BaseTool],
     trace_writer: TraceWriter | None = None,
+    audit_repo=None,
 ):
-    """向后兼容包装器：返回可调用函数，内部使用子图。
+    """返回可调用节点函数，内部使用子图。
 
-    注意：此包装器不传 checkpointer，不支持 interrupt/resume。
-    仅用于无工具级审批的场景和单元测试。
-    工具级审批需通过 TeamCompiler 编译完整图（含 checkpointer）。
+    剥离共享累加器字段（messages/audit_events/worker_outputs）后传入子图，
+    避免子图 reducer 与父图 reducer 双重累积导致重复。
+    透传 config 以支持子图内 interrupt/resume（工具级审批）。
     """
-    subgraph = make_worker_subgraph(worker, llm, tools, trace_writer)
+    subgraph = make_worker_subgraph(worker, llm, tools, trace_writer, audit_repo)
 
     # 共享累加器字段：子图不需要读取它们（只用 react_messages 内部通信），
     # 但若传入，子图的 reducer 会累积它们，返回时父图 reducer 再次累积 → 重复。
     # 因此从输入中剥离，让子图只产出自己的增量。
     _ACCUMULATOR_KEYS = frozenset({"messages", "audit_events", "worker_outputs"})
 
-    def worker_node(state: TeamState) -> dict:
+    def worker_node(state: TeamState, config=None) -> dict:
         subgraph_input = {
             k: v for k, v in state.items() if k not in _ACCUMULATOR_KEYS
         }
+        if config is not None:
+            return subgraph.invoke(subgraph_input, config)
         return subgraph.invoke(subgraph_input)
 
     return worker_node

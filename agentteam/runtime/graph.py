@@ -66,6 +66,10 @@ class TeamCompiler:
     ):
         graph = StateGraph(TeamState)
 
+        # 加载 MCP 工具到 registry（编译时 eager loading）
+        for server in team.mcp_servers:
+            self._tr.register_mcp_tools(server)
+
         leader_model = team.leader.model or team.default_model
         leader_llm = self._mp.get_llm(leader_model)
         graph.add_node(
@@ -92,7 +96,7 @@ class TeamCompiler:
             tools = self._tr.get_tools(worker.tools) if worker.tools else []
             graph.add_node(
                 f"worker_{worker.name}",
-                make_worker_node(worker, llm, tools, trace_writer),
+                make_worker_node(worker, llm, tools, trace_writer, audit_repo),
             )
 
             wp = worker.approval_policy
