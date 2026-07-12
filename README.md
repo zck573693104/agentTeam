@@ -11,15 +11,15 @@ pip install -e ".[qwen,dev]"
 ## 模块
 
 - `agentteam.models` —— 多供应商模型抽象（Qwen/OpenAI/Anthropic/Ollama）
-- `agentteam.tools` —— ToolRegistry + 原生技能（read_file/write_file/list_dir）
+- `agentteam.tools` —— ToolRegistry + 原生技能（read_file/write_file/list_dir）+ MCP 工具加载
 - `agentteam.storage` —— SQLite 持久化（runs / run_events / approvals）
-- `agentteam.domain` —— 领域模型（Team/Worker/Leader/ApprovalPolicy）
+- `agentteam.domain` —— 领域模型（Team/Worker/Leader/ApprovalPolicy/MCPServer）
 - `agentteam.runtime` —— 执行内核（TeamCompiler + LangGraph StateGraph 编译执行）
-  - `state.py` — TeamState 状态 schema（含 run_id、pending_approval）
-  - `nodes.py` — leader_plan / worker ReAct / leader_review 节点工厂
-  - `graph.py` — TeamCompiler（Team → StateGraph 编译，含审批门）
+  - `state.py` — TeamState / WorkerState 状态 schema
+  - `nodes.py` — leader_plan / worker ReAct 子图 / leader_review 节点工厂
+  - `graph.py` — TeamCompiler（Team → StateGraph 编译，含审批门 + MCP 加载）
   - `trace.py` — TraceWriter 协议（SQLite / Fake 实现）
-  - `approval.py` — 审批门节点（step 级 / worker 级，interrupt 实现）
+  - `approval.py` — 审批门节点（step 级 / worker 级 / tool 级，interrupt 实现）
 
 ## 快速示例
 
@@ -48,6 +48,6 @@ run_id = RunRepo(conn).create_run("dev_team", "示例任务")
 - [x] M1 基础设施层
 - [x] M2 领域与编译（Team/Worker/TeamCompiler/LangGraph）
 - [x] M3 审批与轨迹
-- [ ] M4 MCP 集成
+- [x] M4 MCP 集成（子图 ReAct + 工具级审批 + MCP 工具加载）
 - [ ] M5 API + Web UI
 - [ ] M6 示例团队 + 测试
