@@ -83,3 +83,26 @@ def test_is_rejected_helper():
     assert is_rejected({"pending_approval": {"approved": True}}) is False
     assert is_rejected({"pending_approval": {"approved": False}}) is True
     assert is_rejected({}) is False
+
+
+def test_worker_state_typeddict_accepts_fields():
+    """WorkerState 包含共享字段和 worker 内部字段。"""
+    from agentteam.runtime.state import WorkerState
+
+    state: WorkerState = {
+        "messages": [],
+        "plan": [],
+        "current_step": 0,
+        "run_id": "run-1",
+        "pending_approval": None,
+        "audit_events": [],
+        "worker_outputs": {},
+        "react_messages": [],
+        "tool_calls": [],
+        "iteration": 0,
+        "final_answer": "",
+    }
+    assert state["iteration"] == 0
+    assert state["final_answer"] == ""
+    assert state["tool_calls"] == []
+    assert state["react_messages"] == []
