@@ -1,11 +1,16 @@
-"""GET/POST /api/runs 端点 + trace + approvals 列表。
+"""GET/POST /api/runs 端点 + trace + approvals 列表 + SSE stream。
 
-SSE stream 和 approve 端点在后续 Task 中添加。
+approve 端点在后续 Task 中添加。
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import queue as queue_mod
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
 
 from agentteam.api.events import BroadcastTraceWriter, EventBus
 from agentteam.api.run_manager import RunManager
@@ -99,53 +104,46 @@ def runs_router(
 
     @router.get("/{run_id}/stream")
     async def stream_run(run_id: str, request: Request):
-        from sse_starlette.sse import EventSourceResponse
-        import asyncio
-        import json
-        import queue as queue_mod
-
         run = run_repo.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
         async def event_generator():
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             # 1. 先订阅 EventBus（防丢）
             q = event_bus.subscribe(run_id)
-
-            # 2. 回放 SQLite 历史事件
-            history = audit_repo.list_events(run_id)
-            last_id = 0
-            for row in history:
-                event_data = dict(row)
-                eid = event_data.get("id", 0)
-                last_id = max(last_id, eid)
-                yield {
-                    "event": row["event_type"],
-                    "data": json.dumps(event_data, default=str, ensure_ascii=False),
-                }
-
-            # 3. 检查 run 当前状态
-            run_status = run_repo.get_run(run_id)
-            if run_status and run_status["status"] == "interrupted":
-                # run 已中断。run_interrupted 是纯控制信号（只推 EventBus 不写 SQLite），
-                # 若客户端在中断后才连接，需在此补发，否则客户端不知道要弹审批框。
-                yield {
-                    "event": "run_interrupted",
-                    "data": json.dumps(
-                        {"event_type": "run_interrupted", "run_id": run_id},
-                        ensure_ascii=False,
-                    ),
-                }
-                event_bus.unsubscribe(run_id, q)
-                return
-            if run_status and run_status["status"] in ("completed", "failed"):
-                event_bus.unsubscribe(run_id, q)
-                return
-
-            # 4. 直播模式：从 Queue 读事件
             try:
+                # 2. 回放 SQLite 历史事件
+                history = audit_repo.list_events(run_id)
+                last_id = 0
+                for row in history:
+                    event_data = dict(row)
+                    eid = event_data.get("id", 0)
+                    last_id = max(last_id, eid)
+                    yield {
+                        "event": row["event_type"],
+                        "data": json.dumps(event_data, default=str, ensure_ascii=False),
+                    }
+
+                # 3. 检查 run 当前状态
+                run_status = run_repo.get_run(run_id)
+                if run_status and run_status["status"] == "interrupted":
+                    # run 已中断。run_interrupted 是纯控制信号（只推 EventBus 不写 SQLite），
+                    # 若客户端在中断后才连接，需在此补发，否则客户端不知道要弹审批框。
+                    yield {
+                        "event": "run_interrupted",
+                        "data": json.dumps(
+                            {"event_type": "run_interrupted", "run_id": run_id},
+                            default=str,
+                            ensure_ascii=False,
+                        ),
+                    }
+                    return
+                if run_status and run_status["status"] in ("completed", "failed"):
+                    return
+
+                # 4. 直播模式：从 Queue 读事件
                 while True:
                     if await request.is_disconnected():
                         break
@@ -155,8 +153,8 @@ def runs_router(
                         )
                     except queue_mod.Empty:
                         continue
-                    # 去重：跳过已回放的事件
-                    if event.get("id", 0) <= last_id:
+                    # 去重：仅对有 id 的 SQLite 事件去重；run_interrupted 等控制信号无 id，直接放行
+                    if "id" in event and event["id"] <= last_id:
                         continue
                     yield {
                         "event": event.get("event_type", "message"),

@@ -155,3 +155,24 @@ def test_sse_for_interrupted_run(make_client):
     assert resp.status_code == 200
     text = resp.text
     assert "run_interrupted" in text
+
+
+def test_sse_connects_while_run_is_running(make_client):
+    """客户端在 run 执行中连 SSE，应通过直播模式收到事件并在 run_end 后关闭。
+
+    不调用 _wait_for_run — 直接在 POST 后连 SSE，可能命中直播模式或回放模式，
+    取决于后台线程执行速度。两种路径都应正常返回 run_start + run_end。
+    """
+    provider = _make_provider_with_plan()
+    client = make_client(provider)
+    client.post("/api/teams", json=make_team_json())
+
+    resp = client.post("/api/runs", json={"team_name": "dev", "task": "live sse"})
+    run_id = resp.json()["run_id"]
+
+    # 不等 run 完成就连 SSE — 测试直播/回放两种路径
+    sse_resp = client.get(f"/api/runs/{run_id}/stream")
+    assert sse_resp.status_code == 200
+    text = sse_resp.text
+    assert "run_start" in text
+    assert "run_end" in text
