@@ -97,4 +97,77 @@ def runs_router(
         rows = audit_repo.list_approvals(run_id)
         return [dict(r) for r in rows]
 
+    @router.get("/{run_id}/stream")
+    async def stream_run(run_id: str, request: Request):
+        from sse_starlette.sse import EventSourceResponse
+        import asyncio
+        import json
+        import queue as queue_mod
+
+        run = run_repo.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+        async def event_generator():
+            loop = asyncio.get_event_loop()
+
+            # 1. 先订阅 EventBus（防丢）
+            q = event_bus.subscribe(run_id)
+
+            # 2. 回放 SQLite 历史事件
+            history = audit_repo.list_events(run_id)
+            last_id = 0
+            for row in history:
+                event_data = dict(row)
+                eid = event_data.get("id", 0)
+                last_id = max(last_id, eid)
+                yield {
+                    "event": row["event_type"],
+                    "data": json.dumps(event_data, default=str, ensure_ascii=False),
+                }
+
+            # 3. 检查 run 当前状态
+            run_status = run_repo.get_run(run_id)
+            if run_status and run_status["status"] == "interrupted":
+                # run 已中断。run_interrupted 是纯控制信号（只推 EventBus 不写 SQLite），
+                # 若客户端在中断后才连接，需在此补发，否则客户端不知道要弹审批框。
+                yield {
+                    "event": "run_interrupted",
+                    "data": json.dumps(
+                        {"event_type": "run_interrupted", "run_id": run_id},
+                        ensure_ascii=False,
+                    ),
+                }
+                event_bus.unsubscribe(run_id, q)
+                return
+            if run_status and run_status["status"] in ("completed", "failed"):
+                event_bus.unsubscribe(run_id, q)
+                return
+
+            # 4. 直播模式：从 Queue 读事件
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        event = await loop.run_in_executor(
+                            None, lambda: q.get(timeout=2.0)
+                        )
+                    except queue_mod.Empty:
+                        continue
+                    # 去重：跳过已回放的事件
+                    if event.get("id", 0) <= last_id:
+                        continue
+                    yield {
+                        "event": event.get("event_type", "message"),
+                        "data": json.dumps(event, default=str, ensure_ascii=False),
+                    }
+                    # run_end / error 后关闭（run_interrupted 不关闭——等审批续跑）
+                    if event.get("event_type") in ("run_end", "error"):
+                        break
+            finally:
+                event_bus.unsubscribe(run_id, q)
+
+        return EventSourceResponse(event_generator())
+
     return router
