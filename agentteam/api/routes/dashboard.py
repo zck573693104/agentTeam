@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from agentteam.api.routes.runs import run_to_dict
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.runs import RunRepo
 
@@ -23,11 +24,7 @@ def dashboard_router(run_repo: RunRepo, audit_repo: AuditRepo) -> APIRouter:
             by_team[t] = by_team.get(t, 0) + 1
             total_tokens += run["total_tokens"] or 0
 
-        recent = []
-        for r in all_runs[:10]:
-            d = dict(r)
-            d["run_id"] = d.pop("id")
-            recent.append(d)
+        recent = [run_to_dict(r) for r in all_runs[:10]]
         return {
             "total_runs": len(all_runs),
             "total_tokens": total_tokens,

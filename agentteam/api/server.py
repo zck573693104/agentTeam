@@ -41,6 +41,7 @@ def create_app(
 
     saver = SqliteSaver(conn)
     saver.lock = conn_lock  # 让 SqliteSaver 也用同一把锁
+    assert saver.lock is conn_lock  # 防御：若 langgraph 改名 lock 属性则静默失效
     saver.setup()
 
     app.include_router(teams_router(team_store))

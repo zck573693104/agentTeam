@@ -22,8 +22,11 @@ class CreateRunRequest(BaseModel):
     task: str
 
 
-def _run_to_dict(row) -> dict:
-    """将 runs 表行转为 API 响应 dict：id → run_id（与 POST 响应一致）。"""
+def run_to_dict(row) -> dict:
+    """将 runs 表行转为 API 响应 dict：id → run_id（与 POST 响应一致）。
+
+    公开供 dashboard 等其他路由复用，避免 id→run_id 重映射逻辑分散。
+    """
     d = dict(row)
     d["run_id"] = d.pop("id")
     return d
@@ -69,14 +72,14 @@ def runs_router(
     @router.get("")
     def list_runs():
         rows = run_repo.list_runs()
-        return [_run_to_dict(r) for r in rows]
+        return [run_to_dict(r) for r in rows]
 
     @router.get("/{run_id}")
     def get_run(run_id: str):
         run = run_repo.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
-        return _run_to_dict(run)
+        return run_to_dict(run)
 
     @router.get("/{run_id}/trace")
     def get_trace(run_id: str):

@@ -60,7 +60,7 @@ def test_list_runs(make_client):
 
     resp = client.get("/api/runs")
     assert resp.status_code == 200
-    assert len(resp.json()) >= 2
+    assert len(resp.json()) == 2
 
 
 def test_get_run_status(make_client):
