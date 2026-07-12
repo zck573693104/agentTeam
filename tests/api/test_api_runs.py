@@ -1,31 +1,13 @@
-import time
-
-from langchain_core.messages import AIMessage
-
-from agentteam.runtime.nodes import Plan, PlanStep
-from tests.api.conftest import make_team_json
+from tests.api.conftest import (
+    _wait_for_run,
+    make_provider_with_plan,
+    make_team_json,
+)
 from tests.conftest import FakeLLM, FakeModelProvider
 
 
-def _wait_for_run(client, run_id, timeout=10.0):
-    """轮询 GET /api/runs/{id} 直到状态非 running/pending。"""
-    for _ in range(int(timeout * 10)):
-        resp = client.get(f"/api/runs/{run_id}")
-        if resp.json()["status"] in ("completed", "failed", "interrupted"):
-            return resp.json()["status"]
-        time.sleep(0.1)
-    return None
-
-
-def _make_provider_with_plan():
-    llm = FakeLLM()
-    llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    llm.set_invoke_responses([AIMessage(content="done"), AIMessage(content="ok")])
-    return FakeModelProvider({"qwen-max": llm})
-
-
 def test_submit_run(make_client):
-    provider = _make_provider_with_plan()
+    provider = make_provider_with_plan()
     client = make_client(provider)
 
     # 注册团队
@@ -51,7 +33,7 @@ def test_submit_run_team_not_found(make_client):
 
 
 def test_list_runs(make_client):
-    provider = _make_provider_with_plan()
+    provider = make_provider_with_plan()
     client = make_client(provider)
     client.post("/api/teams", json=make_team_json())
 
@@ -64,7 +46,7 @@ def test_list_runs(make_client):
 
 
 def test_get_run_status(make_client):
-    provider = _make_provider_with_plan()
+    provider = make_provider_with_plan()
     client = make_client(provider)
     client.post("/api/teams", json=make_team_json())
 
@@ -85,7 +67,7 @@ def test_get_run_not_found(make_client):
 
 
 def test_get_run_trace(make_client):
-    provider = _make_provider_with_plan()
+    provider = make_provider_with_plan()
     client = make_client(provider)
     client.post("/api/teams", json=make_team_json())
 
@@ -103,7 +85,7 @@ def test_get_run_trace(make_client):
 
 
 def test_get_run_approvals(make_client):
-    provider = _make_provider_with_plan()
+    provider = make_provider_with_plan()
     client = make_client(provider)
     client.post("/api/teams", json=make_team_json())
 
@@ -118,7 +100,7 @@ def test_get_run_approvals(make_client):
 
 def test_sse_replay_after_run_completes(make_client):
     """run 完成后连 SSE，应收到全部历史事件后关闭。"""
-    provider = _make_provider_with_plan()
+    provider = make_provider_with_plan()
     client = make_client(provider)
     client.post("/api/teams", json=make_team_json())
 
@@ -163,7 +145,7 @@ def test_sse_connects_while_run_is_running(make_client):
     不调用 _wait_for_run — 直接在 POST 后连 SSE，可能命中直播模式或回放模式，
     取决于后台线程执行速度。两种路径都应正常返回 run_start + run_end。
     """
-    provider = _make_provider_with_plan()
+    provider = make_provider_with_plan()
     client = make_client(provider)
     client.post("/api/teams", json=make_team_json())
 
