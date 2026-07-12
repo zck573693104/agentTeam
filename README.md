@@ -20,6 +20,13 @@ pip install -e ".[qwen,dev]"
   - `graph.py` — TeamCompiler（Team → StateGraph 编译，含审批门 + MCP 加载）
   - `trace.py` — TraceWriter 协议（SQLite / Fake 实现）
   - `approval.py` — 审批门节点（step 级 / worker 级 / tool 级，interrupt 实现）
+- `agentteam.api` —— FastAPI 后端 API（团队注册、任务提交、SSE 实时推送、审批续跑、用量统计）
+  - `server.py` — FastAPI app 工厂（create_app）
+  - `serializer.py` — Team JSON ↔ dataclass 转换
+  - `store.py` — TeamStore 内存注册表
+  - `events.py` — EventBus + BroadcastTraceWriter
+  - `run_manager.py` — 后台线程执行 + interrupt/resume
+  - `routes/` — teams / runs / dashboard 路由
 
 ## 快速示例
 
@@ -43,11 +50,26 @@ conn = init_db("data/agentteam.db")
 run_id = RunRepo(conn).create_run("dev_team", "示例任务")
 ```
 
+## 启动 API 服务
+
+```bash
+pip install -e ".[dev]"
+uvicorn agentteam.api.server:create_app --factory
+```
+
+API 端点：
+- `GET/POST /api/teams` — 团队管理
+- `POST /api/runs` — 提交任务
+- `GET /api/runs/{id}/stream` — SSE 实时事件流
+- `POST /api/runs/{id}/approve` — 审批续跑
+- `GET /api/dashboard` — 用量统计
+
 ## 状态
 
 - [x] M1 基础设施层
 - [x] M2 领域与编译（Team/Worker/TeamCompiler/LangGraph）
 - [x] M3 审批与轨迹
 - [x] M4 MCP 集成（子图 ReAct + 工具级审批 + MCP 工具加载）
-- [ ] M5 API + Web UI
+- [x] M5a API（FastAPI + SSE + RunManager）
+- [ ] M5b Web UI
 - [ ] M6 示例团队 + 测试
