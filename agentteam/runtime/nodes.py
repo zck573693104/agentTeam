@@ -58,6 +58,96 @@ def make_leader_plan_node(
     return leader_plan
 
 
+def make_init_worker(
+    worker: Worker,
+    trace_writer: TraceWriter | None = None,
+):
+    """创建 init_worker 节点：初始化 ReAct 循环的 react_messages 和计数器。"""
+
+    def init_worker(state: TeamState) -> dict:
+        run_id = state.get("run_id", "")
+        step = state["plan"][state["current_step"]]
+        instruction = step["instruction"]
+
+        if trace_writer:
+            trace_writer.emit(run_id, "worker_start", worker.name)
+
+        return {
+            "react_messages": [
+                SystemMessage(content=worker.system_prompt),
+                HumanMessage(content=instruction),
+            ],
+            "tool_calls": [],
+            "iteration": 0,
+            "final_answer": "",
+        }
+
+    return init_worker
+
+
+def make_agent_step(
+    worker: Worker,
+    llm: BaseChatModel,
+    tools: list[BaseTool],
+):
+    """创建 agent_step 节点：LLM 决策调用工具或给出最终答案。"""
+
+    llm_with_tools = llm.bind_tools(tools) if tools else llm
+
+    def agent_step(state: dict) -> dict:
+        react_messages = state.get("react_messages", [])
+        response = llm_with_tools.invoke(react_messages)
+
+        tool_calls = getattr(response, "tool_calls", None)
+        if tool_calls:
+            return {
+                "react_messages": [response],
+                "tool_calls": tool_calls,
+                "final_answer": "",
+            }
+        return {
+            "react_messages": [response],
+            "tool_calls": [],
+            "final_answer": response.content,
+        }
+
+    return agent_step
+
+
+def make_finalize(
+    worker: Worker,
+    trace_writer: TraceWriter | None = None,
+):
+    """创建 finalize 节点：写 worker_outputs、汇总 messages、emit worker_end。"""
+
+    def finalize(state: dict) -> dict:
+        run_id = state.get("run_id", "")
+        final_answer = state.get("final_answer", "")
+
+        # max_iterations 达上限时，用最后一条 AIMessage 兜底
+        if not final_answer:
+            react_messages = state.get("react_messages", [])
+            for msg in reversed(react_messages):
+                if isinstance(msg, AIMessage):
+                    final_answer = msg.content
+                    break
+
+        if trace_writer:
+            trace_writer.emit(
+                run_id, "worker_end", worker.name,
+                {"answer_length": len(final_answer)},
+            )
+        return {
+            "worker_outputs": {worker.name: final_answer},
+            "messages": [
+                AIMessage(content=f"[{worker.name}] {final_answer}", name=worker.name)
+            ],
+            "audit_events": [{"event_type": "worker_end", "actor": worker.name}],
+        }
+
+    return finalize
+
+
 def make_worker_node(
     worker: Worker,
     llm: BaseChatModel,

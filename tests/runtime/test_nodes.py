@@ -1,4 +1,4 @@
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agentteam.domain.team import Leader
 from agentteam.domain.worker import Worker
@@ -6,6 +6,9 @@ from agentteam.models.provider import ModelRef
 from agentteam.runtime.nodes import (
     Plan,
     PlanStep,
+    make_agent_step,
+    make_finalize,
+    make_init_worker,
     make_leader_plan_node,
     make_leader_review_node,
     make_worker_node,
@@ -208,3 +211,146 @@ def test_node_without_trace_writer_works(fake_llm):
     node = make_leader_plan_node(leader, fake_llm)
     result = node({"task": "test", "run_id": "run-1"})
     assert "plan" in result
+
+
+def test_init_worker_sets_react_messages(fake_llm):
+    """init_worker 从 plan/current_step 取 instruction，初始化 react_messages。"""
+    worker = Worker(name="coder", role="r", description="", system_prompt="你是代码工程师")
+    node = make_init_worker(worker)
+    state = {
+        "plan": [{"worker": "coder", "instruction": "写 hello", "status": "pending"}],
+        "current_step": 0,
+    }
+    result = node(state)
+    assert len(result["react_messages"]) == 2
+    assert isinstance(result["react_messages"][0], SystemMessage)
+    assert isinstance(result["react_messages"][1], HumanMessage)
+    assert result["react_messages"][0].content == "你是代码工程师"
+    assert result["react_messages"][1].content == "写 hello"
+
+
+def test_init_worker_resets_iteration_and_tool_calls(fake_llm):
+    """init_worker 初始化 iteration=0, tool_calls=[], final_answer=""。"""
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    node = make_init_worker(worker)
+    state = {
+        "plan": [{"worker": "w1", "instruction": "do x", "status": "pending"}],
+        "current_step": 0,
+    }
+    result = node(state)
+    assert result["iteration"] == 0
+    assert result["tool_calls"] == []
+    assert result["final_answer"] == ""
+
+
+def test_init_worker_emits_worker_start_trace(fake_llm, fake_trace_writer):
+    """init_worker emit worker_start 轨迹事件。"""
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    node = make_init_worker(worker, trace_writer=fake_trace_writer)
+    state = {
+        "plan": [{"worker": "w1", "instruction": "do x", "status": "pending"}],
+        "current_step": 0,
+        "run_id": "run-1",
+    }
+    node(state)
+    assert len(fake_trace_writer.events) == 1
+    assert fake_trace_writer.events[0]["event_type"] == "worker_start"
+    assert fake_trace_writer.events[0]["actor"] == "w1"
+
+
+def test_agent_step_with_tool_calls(fake_llm):
+    """agent_step 有 tool_calls 时写入 tool_calls，追加 AIMessage 到 react_messages。"""
+    fake_llm.set_invoke_responses([
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "read_file", "args": {"path": "x"}, "id": "tc1", "type": "tool_call"}],
+        ),
+    ])
+    worker = Worker(name="w1", role="r", description="", system_prompt="test", max_iterations=5)
+    from agentteam.tools.skills.file_ops import read_file
+    node = make_agent_step(worker, fake_llm, [read_file])
+    state = {
+        "react_messages": [SystemMessage(content="test"), HumanMessage(content="do x")],
+        "iteration": 0,
+    }
+    result = node(state)
+    assert len(result["react_messages"]) == 1  # AIMessage appended
+    assert result["tool_calls"] == [{"name": "read_file", "args": {"path": "x"}, "id": "tc1", "type": "tool_call"}]
+    assert result["final_answer"] == ""
+
+
+def test_agent_step_with_final_answer(fake_llm):
+    """agent_step 无 tool_calls 时写入 final_answer。"""
+    fake_llm.set_invoke_responses([AIMessage(content="任务完成")])
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    node = make_agent_step(worker, fake_llm, [])
+    state = {
+        "react_messages": [SystemMessage(content="test"), HumanMessage(content="do x")],
+        "iteration": 0,
+    }
+    result = node(state)
+    assert result["final_answer"] == "任务完成"
+    assert result["tool_calls"] == []
+
+
+def test_agent_step_appends_ai_message_to_react(fake_llm):
+    """agent_step 始终追加 AIMessage 到 react_messages（不论有无 tool_calls）。"""
+    fake_llm.set_invoke_responses([AIMessage(content="思考中...")])
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    node = make_agent_step(worker, fake_llm, [])
+    state = {
+        "react_messages": [SystemMessage(content="test")],
+        "iteration": 0,
+    }
+    result = node(state)
+    assert len(result["react_messages"]) == 1
+    assert isinstance(result["react_messages"][0], AIMessage)
+
+
+def test_finalize_writes_worker_output(fake_llm):
+    """finalize 写 worker_outputs 和汇总 messages。"""
+    worker = Worker(name="coder", role="r", description="", system_prompt="test")
+    node = make_finalize(worker)
+    state = {
+        "final_answer": "print('hello')",
+        "react_messages": [],
+        "run_id": "run-1",
+    }
+    result = node(state)
+    assert result["worker_outputs"] == {"coder": "print('hello')"}
+    assert len(result["messages"]) == 1
+    assert "coder" in result["messages"][0].content
+    assert len(result["audit_events"]) == 1
+    assert result["audit_events"][0]["event_type"] == "worker_end"
+
+
+def test_finalize_fallback_to_last_ai_message(fake_llm):
+    """final_answer 为空时（max_iterations 达上限），用最后一条 AIMessage 兜底。"""
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    node = make_finalize(worker)
+    state = {
+        "final_answer": "",
+        "react_messages": [
+            SystemMessage(content="test"),
+            HumanMessage(content="do x"),
+            AIMessage(content="还在思考..."),
+        ],
+        "run_id": "run-1",
+    }
+    result = node(state)
+    assert result["worker_outputs"]["w1"] == "还在思考..."
+
+
+def test_finalize_emits_worker_end_trace(fake_llm, fake_trace_writer):
+    """finalize emit worker_end 轨迹事件。"""
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    node = make_finalize(worker, trace_writer=fake_trace_writer)
+    state = {
+        "final_answer": "done",
+        "react_messages": [],
+        "run_id": "run-1",
+    }
+    node(state)
+    assert len(fake_trace_writer.events) == 1
+    assert fake_trace_writer.events[0]["event_type"] == "worker_end"
+    assert fake_trace_writer.events[0]["actor"] == "w1"
