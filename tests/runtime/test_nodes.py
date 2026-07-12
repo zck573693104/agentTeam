@@ -11,6 +11,7 @@ from agentteam.runtime.nodes import (
     make_init_worker,
     make_leader_plan_node,
     make_leader_review_node,
+    make_tool_step,
     make_worker_node,
 )
 
@@ -354,3 +355,164 @@ def test_finalize_emits_worker_end_trace(fake_llm, fake_trace_writer):
     assert len(fake_trace_writer.events) == 1
     assert fake_trace_writer.events[0]["event_type"] == "worker_end"
     assert fake_trace_writer.events[0]["actor"] == "w1"
+
+
+def test_tool_step_executes_tools(fake_llm, tmp_path):
+    """tool_step 执行工具，回灌 ToolMessage，递增 iteration，清空 tool_calls。"""
+    from agentteam.tools.skills.file_ops import write_file
+
+    target = tmp_path / "out.txt"
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    tool_calls = [{"name": "write_file", "args": {"path": str(target), "content": "hi"}, "id": "tc1", "type": "tool_call"}]
+    node = make_tool_step(worker, [write_file], approval_policy=None)
+    state = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1"}
+    result = node(state)
+
+    assert target.read_text(encoding="utf-8") == "hi"
+    assert len(result["react_messages"]) == 1
+    assert result["iteration"] == 1
+    assert result["tool_calls"] == []
+
+
+def test_tool_step_handles_missing_tool(fake_llm):
+    """工具不存在时回灌错误消息，不抛异常。"""
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    tool_calls = [{"name": "nope", "args": {}, "id": "tc1", "type": "tool_call"}]
+    node = make_tool_step(worker, [], approval_policy=None)
+    state = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1"}
+    result = node(state)
+    assert "不存在" in result["react_messages"][0].content
+
+
+def test_tool_step_handles_tool_exception(fake_llm):
+    """工具执行出错时回灌错误消息，不抛异常。"""
+    from langchain_core.tools import StructuredTool
+
+    def boom():
+        raise RuntimeError("boom")
+
+    bad_tool = StructuredTool.from_function(name="boom", description="fails", func=boom)
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    tool_calls = [{"name": "boom", "args": {}, "id": "tc1", "type": "tool_call"}]
+    node = make_tool_step(worker, [bad_tool], approval_policy=None)
+    state = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1"}
+    result = node(state)
+    assert "boom" in result["react_messages"][0].content
+
+
+def test_tool_step_approval_approved_executes_tool(fake_llm, tmp_path):
+    """工具级审批：interrupt → resume approved → 工具执行。"""
+    from langchain_core.tools import StructuredTool
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.runtime.state import WorkerState
+
+    executed = []
+
+    def dangerous_tool(x: str) -> str:
+        executed.append(x)
+        return f"executed: {x}"
+
+    tool = StructuredTool.from_function(name="dangerous", description="d", func=dangerous_tool)
+    worker = Worker(
+        name="w1", role="r", description="", system_prompt="test",
+        approval_policy=ApprovalPolicy(level="tool", targets=["dangerous"]),
+    )
+    tool_calls = [{"name": "dangerous", "args": {"x": "data"}, "id": "tc1", "type": "tool_call"}]
+
+    # 用最小子图测试 interrupt/resume
+    sg = StateGraph(WorkerState)
+    sg.add_node("tool_step", make_tool_step(worker, [tool], worker.approval_policy))
+    sg.add_edge(START, "tool_step")
+    sg.add_edge("tool_step", END)
+    compiled = sg.compile(checkpointer=MemorySaver())
+
+    config = {"configurable": {"thread_id": "t1"}}
+    initial = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1", "react_messages": []}
+
+    # 第一次 invoke：应 interrupt
+    compiled.invoke(initial, config)
+    state = compiled.get_state(config)
+    assert state.next, "应在 tool_step interrupt"
+
+    # Resume：批准
+    result = compiled.invoke(Command(resume={"approved": True, "decider": "user"}), config)
+    assert len(executed) == 1, "工具应被执行一次"
+    assert "executed: data" in result["react_messages"][-1].content
+
+
+def test_tool_step_approval_rejected_skips_tool(fake_llm):
+    """工具级审批：interrupt → resume rejected → 工具跳过，回灌拒绝消息。"""
+    from langchain_core.tools import StructuredTool
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.runtime.state import WorkerState
+
+    executed = []
+
+    def dangerous_tool(x: str) -> str:
+        executed.append(x)
+        return "should not reach"
+
+    tool = StructuredTool.from_function(name="dangerous", description="d", func=dangerous_tool)
+    worker = Worker(
+        name="w1", role="r", description="", system_prompt="test",
+        approval_policy=ApprovalPolicy(level="tool", targets=["dangerous"]),
+    )
+    tool_calls = [{"name": "dangerous", "args": {"x": "data"}, "id": "tc1", "type": "tool_call"}]
+
+    sg = StateGraph(WorkerState)
+    sg.add_node("tool_step", make_tool_step(worker, [tool], worker.approval_policy))
+    sg.add_edge(START, "tool_step")
+    sg.add_edge("tool_step", END)
+    compiled = sg.compile(checkpointer=MemorySaver())
+
+    config = {"configurable": {"thread_id": "t2"}}
+    initial = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1", "react_messages": []}
+
+    compiled.invoke(initial, config)
+    state = compiled.get_state(config)
+    assert state.next, "应 interrupt"
+
+    result = compiled.invoke(Command(resume={"approved": False, "decider": "user"}), config)
+    assert len(executed) == 0, "工具不应执行"
+    assert "拒绝" in result["react_messages"][-1].content
+    assert result["iteration"] == 1
+
+
+def test_tool_step_no_approval_for_unlisted_tool(fake_llm):
+    """工具不在 targets 列表中时不触发审批，直接执行。"""
+    from langchain_core.tools import StructuredTool
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.runtime.state import WorkerState
+
+    executed = []
+
+    def safe_tool(x: str) -> str:
+        executed.append(x)
+        return "ok"
+
+    tool = StructuredTool.from_function(name="safe", description="s", func=safe_tool)
+    worker = Worker(
+        name="w1", role="r", description="", system_prompt="test",
+        approval_policy=ApprovalPolicy(level="tool", targets=["dangerous"]),
+    )
+    tool_calls = [{"name": "safe", "args": {"x": "data"}, "id": "tc1", "type": "tool_call"}]
+
+    sg = StateGraph(WorkerState)
+    sg.add_node("tool_step", make_tool_step(worker, [tool], worker.approval_policy))
+    sg.add_edge(START, "tool_step")
+    sg.add_edge("tool_step", END)
+    compiled = sg.compile(checkpointer=MemorySaver())
+
+    config = {"configurable": {"thread_id": "t3"}}
+    initial = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1", "react_messages": []}
+
+    result = compiled.invoke(initial, config)
+    assert len(executed) == 1, "工具应直接执行（无需审批）"

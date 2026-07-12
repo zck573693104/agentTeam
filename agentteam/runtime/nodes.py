@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from agentteam.domain.approval import ApprovalPolicy
 from agentteam.domain.team import Leader
 from agentteam.domain.worker import Worker
 from agentteam.runtime.state import TeamState
@@ -146,6 +147,103 @@ def make_finalize(
         }
 
     return finalize
+
+
+def make_tool_step(
+    worker: Worker,
+    tools: list[BaseTool],
+    approval_policy: ApprovalPolicy | None = None,
+    trace_writer: TraceWriter | None = None,
+    audit_repo=None,
+):
+    """创建 tool_step 节点：检查工具级审批 → interrupt → 执行工具 → 回灌结果。
+
+    审批按批次：批次中任一工具匹配 targets 则触发一次 interrupt。
+    所有副作用（DB 写、trace、工具执行）放在 interrupt() 之后。
+    """
+    from langgraph.types import interrupt
+    from agentteam.runtime.approval import _should_approve
+
+    tool_map = {t.name: t for t in tools}
+
+    def tool_step(state: dict) -> dict:
+        run_id = state.get("run_id", "")
+        tool_calls = state.get("tool_calls", [])
+        iteration = state.get("iteration", 0)
+        new_messages = []
+
+        # 检查是否需要工具级审批
+        needs_approval = (
+            approval_policy is not None
+            and approval_policy.level == "tool"
+            and any(_should_approve(approval_policy, tc["name"]) for tc in tool_calls)
+        )
+
+        if needs_approval:
+            decision = interrupt({
+                "gate": "tool",
+                "worker": worker.name,
+                "tool_calls": [{"name": tc["name"], "args": tc["args"]} for tc in tool_calls],
+                "message": f"Worker {worker.name} 请求调用工具: {[tc['name'] for tc in tool_calls]}",
+            })
+            approved = decision.get("approved", False)
+            decider = decision.get("decider", "unknown")
+
+            # 副作用在 interrupt 之后
+            if audit_repo is not None:
+                approval_id = audit_repo.add_approval(run_id)
+                audit_repo.decide_approval(
+                    approval_id, "approved" if approved else "rejected", decider
+                )
+            if trace_writer is not None:
+                trace_writer.emit(
+                    run_id, "approval_requested", "system",
+                    {"gate": "tool", "worker": worker.name,
+                     "tools": [tc["name"] for tc in tool_calls]},
+                )
+                trace_writer.emit(
+                    run_id, "approval_decided", decider,
+                    {"gate": "tool", "approved": approved},
+                )
+
+            if not approved:
+                for tc in tool_calls:
+                    new_messages.append(
+                        ToolMessage(content="工具调用已被拒绝", tool_call_id=tc["id"])
+                    )
+                return {
+                    "react_messages": new_messages,
+                    "tool_calls": [],
+                    "iteration": iteration + 1,
+                }
+
+        # 执行工具
+        if trace_writer is not None:
+            trace_writer.emit(
+                run_id, "tool_call", worker.name,
+                {"tools": [tc["name"] for tc in tool_calls]},
+            )
+
+        for tc in tool_calls:
+            tool = tool_map.get(tc["name"])
+            if tool is None:
+                result = f"工具 {tc['name']} 不存在"
+            else:
+                try:
+                    result = tool.invoke(tc["args"])
+                except Exception as e:
+                    result = f"工具执行出错：{type(e).__name__}: {e}"
+            new_messages.append(
+                ToolMessage(content=str(result), tool_call_id=tc["id"])
+            )
+
+        return {
+            "react_messages": new_messages,
+            "tool_calls": [],
+            "iteration": iteration + 1,
+        }
+
+    return tool_step
 
 
 def make_worker_node(
