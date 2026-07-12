@@ -6,6 +6,7 @@ from agentteam.runtime.nodes import (
     make_leader_plan_node,
     make_leader_review_node,
     make_worker_node,
+    make_worker_subgraph,
 )
 from agentteam.runtime.state import TeamState, is_rejected
 from agentteam.runtime.trace import FakeTraceWriter, SqliteTraceWriter, TraceWriter
@@ -22,4 +23,5 @@ __all__ = [
     "make_step_gate",
     "make_worker_gate",
     "make_worker_node",
+    "make_worker_subgraph",
 ]

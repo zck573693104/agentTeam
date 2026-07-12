@@ -13,6 +13,7 @@ from agentteam.runtime.nodes import (
     make_leader_review_node,
     make_tool_step,
     make_worker_node,
+    make_worker_subgraph,
 )
 
 
@@ -516,3 +517,85 @@ def test_tool_step_no_approval_for_unlisted_tool(fake_llm):
 
     result = compiled.invoke(initial, config)
     assert len(executed) == 1, "工具应直接执行（无需审批）"
+
+
+# ── make_worker_subgraph 集成测试 ──
+
+
+def test_worker_subgraph_direct_answer(fake_llm):
+    """子图：LLM 直接给最终答案（不调工具）→ finalize。"""
+    fake_llm.set_invoke_responses([AIMessage(content="hello world")])
+    worker = Worker(name="coder", role="r", description="", system_prompt="你是代码工程师")
+    subgraph = make_worker_subgraph(worker, fake_llm, [])
+
+    state = {
+        "plan": [{"worker": "coder", "instruction": "写 hello", "status": "pending"}],
+        "current_step": 0,
+    }
+    result = subgraph.invoke(state)
+
+    assert result["worker_outputs"] == {"coder": "hello world"}
+    assert len(result["messages"]) == 1
+    assert "coder" in result["messages"][0].content
+
+
+def test_worker_subgraph_react_with_tool(fake_llm, tmp_path):
+    """子图：LLM 调工具 → 工具执行 → LLM 给最终答案。"""
+    from agentteam.tools.skills.file_ops import write_file
+
+    target = tmp_path / "out.txt"
+    fake_llm.set_invoke_responses([
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "write_file", "args": {"path": str(target), "content": "hi"}, "id": "tc1", "type": "tool_call"}],
+        ),
+        AIMessage(content="已写入文件"),
+    ])
+    worker = Worker(name="coder", role="r", description="", system_prompt="test", tools=["write_file"])
+    subgraph = make_worker_subgraph(worker, fake_llm, [write_file])
+
+    state = {
+        "plan": [{"worker": "coder", "instruction": "写文件", "status": "pending"}],
+        "current_step": 0,
+    }
+    result = subgraph.invoke(state)
+
+    assert target.read_text(encoding="utf-8") == "hi"
+    assert result["worker_outputs"]["coder"] == "已写入文件"
+
+
+def test_worker_subgraph_respects_max_iterations(fake_llm):
+    """子图：max_iterations 到达时强制结束，LLM 被调用恰好 max_iterations 次。"""
+    tool_call_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "x"}, "id": "tc1", "type": "tool_call"}],
+    )
+    fake_llm.set_invoke_responses([tool_call_response] * 100)
+    worker = Worker(name="w1", role="r", description="", system_prompt="test", max_iterations=3)
+    subgraph = make_worker_subgraph(worker, fake_llm, [])
+
+    state = {
+        "plan": [{"worker": "w1", "instruction": "do x", "status": "pending"}],
+        "current_step": 0,
+        "run_id": "r1",
+    }
+    result = subgraph.invoke(state)
+    assert fake_llm._inv_idx == 3
+    assert result["worker_outputs"]["w1"] is not None
+
+
+def test_worker_subgraph_emits_trace_events(fake_llm, fake_trace_writer):
+    """子图：emit worker_start 和 worker_end 轨迹事件。"""
+    fake_llm.set_invoke_responses([AIMessage(content="done")])
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    subgraph = make_worker_subgraph(worker, fake_llm, [], trace_writer=fake_trace_writer)
+
+    state = {
+        "plan": [{"worker": "w1", "instruction": "do x", "status": "pending"}],
+        "current_step": 0,
+        "run_id": "run-1",
+    }
+    subgraph.invoke(state)
+    event_types = [e["event_type"] for e in fake_trace_writer.events]
+    assert "worker_start" in event_types
+    assert "worker_end" in event_types

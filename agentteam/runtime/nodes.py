@@ -246,61 +246,85 @@ def make_tool_step(
     return tool_step
 
 
+def make_worker_subgraph(
+    worker: Worker,
+    llm: BaseChatModel,
+    tools: list[BaseTool],
+    trace_writer: TraceWriter | None = None,
+    audit_repo=None,
+):
+    """编译 Worker ReAct 子图：init_worker → agent_step → tool_step → 循环 → finalize。
+
+    返回 compiled subgraph，可直接作为父图的节点。
+    """
+    from langgraph.graph import END, START, StateGraph
+    from agentteam.runtime.state import WorkerState
+
+    approval_policy = worker.approval_policy
+
+    sg = StateGraph(WorkerState)
+    sg.add_node("init_worker", make_init_worker(worker, trace_writer))
+    sg.add_node("agent_step", make_agent_step(worker, llm, tools))
+    sg.add_node(
+        "tool_step",
+        make_tool_step(worker, tools, approval_policy, trace_writer, audit_repo),
+    )
+    sg.add_node("finalize", make_finalize(worker, trace_writer))
+
+    # 边
+    sg.add_edge(START, "init_worker")
+    sg.add_edge("init_worker", "agent_step")
+
+    # agent_step → tool_step（有 tool_calls）或 finalize（无 tool_calls）
+    def route_after_agent(state: dict) -> str:
+        if state.get("final_answer"):
+            return "finalize"
+        if not state.get("tool_calls"):
+            return "finalize"
+        return "tool_step"
+
+    sg.add_conditional_edges("agent_step", route_after_agent)
+
+    # tool_step → agent_step（未达上限）或 finalize（达上限）
+    max_iter = worker.max_iterations
+
+    def route_after_tool(state: dict) -> str:
+        if state.get("iteration", 0) >= max_iter:
+            return "finalize"
+        return "agent_step"
+
+    sg.add_conditional_edges("tool_step", route_after_tool)
+    sg.add_edge("finalize", END)
+
+    return sg.compile()
+
+
 def make_worker_node(
     worker: Worker,
     llm: BaseChatModel,
     tools: list[BaseTool],
     trace_writer: TraceWriter | None = None,
 ):
-    """创建 worker 节点：内部跑 ReAct 循环（LLM 调工具直到给出最终答案）。"""
+    """向后兼容包装器：返回可调用函数，内部使用子图。
 
-    def worker_react(state: TeamState) -> dict:
-        run_id = state.get("run_id", "")
-        if trace_writer:
-            trace_writer.emit(run_id, "worker_start", worker.name)
+    注意：此包装器不传 checkpointer，不支持 interrupt/resume。
+    仅用于无工具级审批的场景和单元测试。
+    工具级审批需通过 TeamCompiler 编译完整图（含 checkpointer）。
+    """
+    subgraph = make_worker_subgraph(worker, llm, tools, trace_writer)
 
-        step = state["plan"][state["current_step"]]
-        instruction = step["instruction"]
-        tool_map = {t.name: t for t in tools}
-        llm_with_tools = llm.bind_tools(tools) if tools else llm
-        messages = [
-            SystemMessage(content=worker.system_prompt),
-            HumanMessage(content=instruction),
-        ]
-        final_answer = ""
-        for _ in range(worker.max_iterations):
-            response = llm_with_tools.invoke(messages)
-            messages.append(response)
-            tool_calls = getattr(response, "tool_calls", None)
-            if not tool_calls:
-                final_answer = response.content
-                break
-            for tc in tool_calls:
-                tool = tool_map.get(tc["name"])
-                if tool is None:
-                    result = f"工具 {tc['name']} 不存在"
-                else:
-                    try:
-                        result = tool.invoke(tc["args"])
-                    except Exception as e:
-                        result = f"工具执行出错：{type(e).__name__}: {e}"
-                messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
-        else:
-            final_answer = getattr(messages[-1], "content", "") if messages else ""
+    # 共享累加器字段：子图不需要读取它们（只用 react_messages 内部通信），
+    # 但若传入，子图的 reducer 会累积它们，返回时父图 reducer 再次累积 → 重复。
+    # 因此从输入中剥离，让子图只产出自己的增量。
+    _ACCUMULATOR_KEYS = frozenset({"messages", "audit_events", "worker_outputs"})
 
-        if trace_writer:
-            trace_writer.emit(
-                run_id, "worker_end", worker.name, {"answer_length": len(final_answer)}
-            )
-        return {
-            "worker_outputs": {worker.name: final_answer},
-            "messages": [
-                AIMessage(content=f"[{worker.name}] {final_answer}", name=worker.name)
-            ],
-            "audit_events": [{"event_type": "worker_end", "actor": worker.name}],
+    def worker_node(state: TeamState) -> dict:
+        subgraph_input = {
+            k: v for k, v in state.items() if k not in _ACCUMULATOR_KEYS
         }
+        return subgraph.invoke(subgraph_input)
 
-    return worker_react
+    return worker_node
 
 
 def make_leader_review_node(
