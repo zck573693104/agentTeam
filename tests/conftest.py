@@ -74,3 +74,17 @@ def fake_llm() -> FakeLLM:
 def fake_trace_writer():
     from agentteam.runtime.trace import FakeTraceWriter
     return FakeTraceWriter()
+
+
+@pytest.fixture
+def fake_mcp_loader():
+    """返回一个 fake MCP loader，产出指定的 fake 工具。"""
+    from langchain_core.tools import StructuredTool
+
+    def _loader(tools=None):
+        tools = tools or []
+        def loader(server):
+            return list(tools)
+        return loader
+
+    return _loader

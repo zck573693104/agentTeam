@@ -489,3 +489,238 @@ def test_e2e_no_policy_runs_without_interrupt(fake_llm, fake_trace_writer):
     # 无审批事件
     event_types = [e["event_type"] for e in fake_trace_writer.events]
     assert "approval_requested" not in event_types
+
+
+def test_e2e_tool_approval_interrupt_resume(fake_llm, fake_trace_writer, tmp_path):
+    """E2E：Worker 调用需审批的工具 → interrupt → resume approved → 完成。"""
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import StructuredTool
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    # 一个需要审批的工具
+    target = tmp_path / "secret.txt"
+    def write_secret(content: str) -> str:
+        target.write_text(content, encoding="utf-8")
+        return "written"
+
+    dangerous_tool = StructuredTool.from_function(
+        name="write_secret", description="写秘密文件", func=write_secret
+    )
+
+    # LLM: leader 拆计划 + 点评；worker 先调工具再给答案
+    fake_llm.set_structured_responses(
+        [Plan(steps=[PlanStep(worker="w1", instruction="写秘密文件")])]
+    )
+    fake_llm.set_invoke_responses([
+        # worker 第 1 轮：调工具
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "write_secret", "args": {"content": "top secret"}, "id": "tc1", "type": "tool_call"}],
+        ),
+        # worker 第 2 轮：给最终答案
+        AIMessage(content="文件已写入"),
+        # leader 点评
+        AIMessage(content="做得好"),
+    ])
+
+    reg = ToolRegistry()
+    reg.register(dangerous_tool)
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, reg)
+    team = Team(
+        name="t",
+        description="test",
+        leader=Leader(name="leader", system_prompt="test"),
+        workers=[
+            Worker(
+                name="w1", role="r", description="", system_prompt="test",
+                tools=["write_secret"],
+                approval_policy=ApprovalPolicy(level="tool", targets=["write_secret"]),
+            )
+        ],
+        default_model=ModelRef(provider="qwen", name="qwen-max"),
+    )
+    graph = compiler.compile(
+        team, checkpointer=MemorySaver(), trace_writer=fake_trace_writer
+    )
+
+    config = {"configurable": {"thread_id": "e2e-tool"}}
+    initial = _make_initial_state()
+
+    # 第一次 invoke：应在 tool_step 处 interrupt
+    graph.invoke(initial, config)
+    state = graph.get_state(config)
+    assert state.next, "图应该在工具级审批处暂停"
+
+    # Resume：批准
+    graph.invoke(Command(resume={"approved": True, "decider": "admin"}), config)
+    state = graph.get_state(config)
+    assert not state.next, "图应该已完成"
+
+    # 验证工具被执行
+    assert target.read_text(encoding="utf-8") == "top secret"
+
+    # 验证 worker 产出
+    values = state.values
+    assert values["worker_outputs"]["w1"] == "文件已写入"
+
+    # 验证轨迹事件
+    event_types = [e["event_type"] for e in fake_trace_writer.events]
+    assert "approval_requested" in event_types
+    assert "approval_decided" in event_types
+    assert "tool_call" in event_types
+    assert "worker_end" in event_types
+
+
+def test_e2e_tool_approval_rejected_skips_tool(fake_llm, fake_trace_writer):
+    """E2E：工具级审批被拒绝 → 工具跳过 → Worker 继续给答案。"""
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import StructuredTool
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    executed = []
+    def dangerous(x: str) -> str:
+        executed.append(x)
+        return "done"
+
+    tool = StructuredTool.from_function(name="dangerous", description="d", func=dangerous)
+
+    fake_llm.set_structured_responses(
+        [Plan(steps=[PlanStep(worker="w1", instruction="do x")])]
+    )
+    fake_llm.set_invoke_responses([
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "dangerous", "args": {"x": "data"}, "id": "tc1", "type": "tool_call"}],
+        ),
+        AIMessage(content="好的，我换个方案"),
+        AIMessage(content="完成"),
+    ])
+
+    reg = ToolRegistry()
+    reg.register(tool)
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, reg)
+    team = Team(
+        name="t",
+        description="test",
+        leader=Leader(name="leader", system_prompt="test"),
+        workers=[
+            Worker(
+                name="w1", role="r", description="", system_prompt="test",
+                tools=["dangerous"],
+                approval_policy=ApprovalPolicy(level="tool", targets=["dangerous"]),
+            )
+        ],
+        default_model=ModelRef(provider="qwen", name="qwen-max"),
+    )
+    graph = compiler.compile(
+        team, checkpointer=MemorySaver(), trace_writer=fake_trace_writer
+    )
+
+    config = {"configurable": {"thread_id": "e2e-tool-reject"}}
+    initial = _make_initial_state()
+
+    graph.invoke(initial, config)
+    state = graph.get_state(config)
+    assert state.next, "应 interrupt"
+
+    # Resume：拒绝
+    graph.invoke(Command(resume={"approved": False, "decider": "admin"}), config)
+    state = graph.get_state(config)
+
+    # 工具未执行
+    assert len(executed) == 0
+
+    # Worker 最终仍有产出（LLM 换方案后给答案）
+    values = state.values
+    assert "w1" in values.get("worker_outputs", {})
+
+
+def test_e2e_mcp_tools_via_fake_loader(fake_llm, fake_trace_writer):
+    """E2E：通过 fake MCP loader 加载工具，Worker 使用 mcp: 前缀工具。"""
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import StructuredTool
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from agentteam.domain.mcp_server import MCPServer
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    # fake MCP 工具
+    def search(query: str) -> str:
+        return f"搜索结果: {query}"
+
+    mcp_tool = StructuredTool.from_function(name="search", description="搜索", func=search)
+
+    fake_loader = lambda server: [mcp_tool]  # noqa: E731
+    reg = ToolRegistry(mcp_loader=fake_loader)
+
+    fake_llm.set_structured_responses(
+        [Plan(steps=[PlanStep(worker="w1", instruction="搜索测试")])]
+    )
+    fake_llm.set_invoke_responses([
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "mcp:searcher:search", "args": {"query": "hello"}, "id": "tc1", "type": "tool_call"}],
+        ),
+        AIMessage(content="搜索完成"),
+        AIMessage(content="好的"),
+    ])
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, reg)
+    team = Team(
+        name="t",
+        description="test",
+        leader=Leader(name="leader", system_prompt="test"),
+        workers=[
+            Worker(
+                name="w1", role="r", description="", system_prompt="test",
+                tools=["mcp:searcher:search"],
+            )
+        ],
+        default_model=ModelRef(provider="qwen", name="qwen-max"),
+        mcp_servers=[MCPServer(name="searcher", command="python")],
+    )
+    graph = compiler.compile(
+        team, checkpointer=MemorySaver(), trace_writer=fake_trace_writer
+    )
+
+    config = {"configurable": {"thread_id": "e2e-mcp"}}
+    result = graph.invoke(_make_initial_state(), config)
+
+    state = graph.get_state(config)
+    assert not state.next, "图应该已完成"
+    assert state.values["worker_outputs"]["w1"] == "搜索完成"
+
+    # 验证 tool_call 轨迹事件
+    event_types = [e["event_type"] for e in fake_trace_writer.events]
+    assert "tool_call" in event_types
