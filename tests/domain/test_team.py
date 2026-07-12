@@ -36,3 +36,32 @@ def test_team_with_skills():
         skills=["read_file", "write_file"],
     )
     assert team.skills == ["read_file", "write_file"]
+
+
+def test_team_with_mcp_servers():
+    from agentteam.domain.mcp_server import MCPServer
+
+    leader = Leader(system_prompt="你是主管")
+    server = MCPServer(name="fetch", command="python", args=["-m", "mcp_server_fetch"])
+    team = Team(
+        name="dev",
+        description="开发小队",
+        leader=leader,
+        workers=[],
+        default_model=ModelRef("qwen", "qwen-max"),
+        mcp_servers=[server],
+    )
+    assert len(team.mcp_servers) == 1
+    assert team.mcp_servers[0].name == "fetch"
+
+
+def test_team_mcp_servers_defaults_empty():
+    leader = Leader(system_prompt="你是主管")
+    team = Team(
+        name="dev",
+        description="开发小队",
+        leader=leader,
+        workers=[],
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    assert team.mcp_servers == []

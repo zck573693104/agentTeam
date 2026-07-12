@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from agentteam.domain.approval import ApprovalPolicy
+from agentteam.domain.mcp_server import MCPServer
 from agentteam.domain.worker import Worker
 from agentteam.models.provider import ModelRef
 
@@ -28,3 +29,4 @@ class Team:
     workers: list[Worker]
     default_model: ModelRef
     skills: list[str] = field(default_factory=list)
+    mcp_servers: list[MCPServer] = field(default_factory=list)
