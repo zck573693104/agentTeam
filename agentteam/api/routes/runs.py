@@ -143,6 +143,18 @@ def runs_router(
                     }
                     return
                 if run_status and run_status["status"] in ("completed", "failed"):
+                    # 重读历史：在初始历史读取（step 2）与状态检查之间，run 可能刚完成并写入
+                    # run_end 事件。若不重读，客户端会漏掉该事件。仅补发 id > last_id 的新事件。
+                    updated_history = audit_repo.list_events(run_id)
+                    for row in updated_history:
+                        eid = dict(row).get("id", 0)
+                        if eid > last_id:
+                            yield {
+                                "event": row["event_type"],
+                                "data": json.dumps(
+                                    dict(row), default=str, ensure_ascii=False
+                                ),
+                            }
                     return
 
                 # 4. 直播模式：从 Queue 读事件
@@ -175,16 +187,21 @@ def runs_router(
         run = run_repo.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
-        if run["status"] != "interrupted":
+
+        # 原子地 claim：仅当状态仍为 interrupted 时才置为 running，
+        # 避免两个并发 approve 请求都通过 check-then-act 竞态。
+        if not run_repo.try_claim(run_id, "interrupted", "running"):
+            current = run_repo.get_run(run_id)
             raise HTTPException(
                 status_code=400,
-                detail=f"Run '{run_id}' is not interrupted (status={run['status']})",
+                detail=f"Run '{run_id}' is not interrupted (status={current['status']})",
             )
 
         try:
             run_manager.resume_run(run_id, req.approved, req.reason)
         except ValueError as e:
-            # run 在 DB 中为 interrupted 但内存中 graph/config 已丢失（如服务重启后）
+            # claim 成功但 resume 失败（如服务重启后 graph/config 丢失）——回滚状态
+            run_repo.update_status(run_id, "interrupted")
             raise HTTPException(status_code=409, detail=str(e))
         return {"ok": True}
 
