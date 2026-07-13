@@ -60,3 +60,21 @@ class RunRepo:
         with self._lock:
             cur = self._conn.execute("SELECT * FROM runs ORDER BY created_at DESC")
             return cur.fetchall()
+
+    def try_claim(
+        self, run_id: str, expected_status: str, new_status: str
+    ) -> bool:
+        """原子地条件更新 run 状态。
+
+        若当前 status == expected_status，则更新为 new_status 并返回 True；
+        否返回 False。用 SQL 的 WHERE 条件保证检查与更新的原子性，
+        避免并发 approve 请求的双竞态（check-then-act 非原子问题）。
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE runs SET status = ?, updated_at = ? "
+                "WHERE id = ? AND status = ?",
+                (new_status, _now(), run_id, expected_status),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0

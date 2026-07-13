@@ -4,13 +4,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from agentteam.api.events import EventBus
-from agentteam.api.run_manager import RunManager
 from agentteam.api.server import create_app
-from agentteam.api.store import TeamStore
-from agentteam.storage.audit import AuditRepo
-from agentteam.storage.db import init_db
-from agentteam.storage.runs import RunRepo
 from agentteam.tools.registry import ToolRegistry
 
 
@@ -21,8 +15,9 @@ def _wait_for_run(client, run_id, timeout=10.0):
     """
     for _ in range(int(timeout * 10)):
         resp = client.get(f"/api/runs/{run_id}")
-        if resp.json()["status"] in ("completed", "failed", "interrupted"):
-            return resp.json()["status"]
+        status = resp.json()["status"]
+        if status in ("completed", "failed", "interrupted"):
+            return status
         time.sleep(0.1)
     return None
 
