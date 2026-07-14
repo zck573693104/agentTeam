@@ -29,8 +29,10 @@ export default function RunDetail() {
   const [rejectReason, setRejectReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  if (loading) return <div>加载中...</div>;
-  if (error) return <div>错误: {error}</div>;
+  // 仅在加载"不同 run"时显示加载屏;同 run 的 refetch(如审批后)保留现有数据,
+  // 避免 SSEViewer 卸载导致实时轨迹丢失。
+  if (loading && (!run || run.run_id !== runId)) return <div>加载中...</div>;
+  if (error && (!run || run.run_id !== runId)) return <div>错误: {error}</div>;
   if (!run) return <div>未找到</div>;
 
   const handleApprove = async (approved: boolean, reason?: string): Promise<boolean> => {
