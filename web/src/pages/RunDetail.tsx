@@ -33,8 +33,8 @@ export default function RunDetail() {
   if (error) return <div>错误: {error}</div>;
   if (!run) return <div>未找到</div>;
 
-  const handleApprove = async (approved: boolean, reason?: string) => {
-    if (!runId) return;
+  const handleApprove = async (approved: boolean, reason?: string): Promise<boolean> => {
+    if (!runId) return false;
     try {
       setSubmitting(true);
       await api(`/api/runs/${runId}/approve`, {
@@ -45,8 +45,10 @@ export default function RunDetail() {
       refetch();
       refetchApprovals();
       setSseKey((k) => k + 1); // 重连 SSE
+      return true;
     } catch (e) {
       message.error((e as Error).message);
+      return false;
     } finally {
       setSubmitting(false);
     }
@@ -148,10 +150,13 @@ export default function RunDetail() {
       <Modal
         title="拒绝原因"
         open={rejectModalOpen}
-        onOk={() => {
-          handleApprove(false, rejectReason);
-          setRejectModalOpen(false);
-          setRejectReason("");
+        confirmLoading={submitting}
+        onOk={async () => {
+          const ok = await handleApprove(false, rejectReason);
+          if (ok) {
+            setRejectModalOpen(false);
+            setRejectReason("");
+          }
         }}
         onCancel={() => setRejectModalOpen(false)}
         okText="确认拒绝"
