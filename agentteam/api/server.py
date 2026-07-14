@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 from fastapi import FastAPI
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -52,5 +53,11 @@ def create_app(
         )
     )
     app.include_router(dashboard_router(run_repo, audit_repo))
+
+    # 挂载前端静态文件(生产模式)。web/dist 不存在时跳过,不影响 API。
+    WEB_DIST = Path(__file__).resolve().parent.parent.parent / "web" / "dist"
+    if WEB_DIST.is_dir():
+        from starlette.staticfiles import StaticFiles
+        app.mount("/", StaticFiles(directory=str(WEB_DIST), html=True), name="web")
 
     return app
