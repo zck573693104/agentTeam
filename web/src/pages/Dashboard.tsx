@@ -17,8 +17,8 @@ export default function Dashboard() {
   const { data, loading, error, refetch } = useFetch<DashboardData>("/api/dashboard");
   const navigate = useNavigate();
 
-  if (loading) return <div>加载中...</div>;
-  if (error) return <div>错误: {error}</div>;
+  if (loading && !data) return <div>加载中...</div>;
+  if (error && !data) return <div>错误: {error}</div>;
   if (!data) return null;
 
   const statusData = Object.entries(data.by_status).map(([k, v]) => ({
