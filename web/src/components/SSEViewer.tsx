@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Badge, Button, Card, Timeline } from "antd";
 
 /** 事件类型 → Timeline 颜色映射。 */
@@ -6,11 +6,14 @@ const EVENT_COLORS: Record<string, string> = {
   run_start: "blue",
   run_end: "green",
   error: "red",
-  step_started: "cyan",
-  worker_started: "cyan",
-  step_completed: "green",
-  worker_completed: "green",
   run_interrupted: "orange",
+  leader_plan: "cyan",
+  leader_review: "geekblue",
+  worker_start: "cyan",
+  worker_end: "green",
+  tool_call: "purple",
+  approval_requested: "orange",
+  approval_decided: "gold",
 };
 
 /** 已知事件类型列表,用于注册 EventSource 监听器。 */
@@ -19,15 +22,19 @@ const EVENT_TYPES = [
   "run_end",
   "error",
   "run_interrupted",
-  "step_started",
-  "step_completed",
-  "worker_started",
-  "worker_completed",
+  "leader_plan",
+  "leader_review",
+  "worker_start",
+  "worker_end",
+  "tool_call",
+  "approval_requested",
+  "approval_decided",
 ];
 
 interface SSEEvent {
   event_type: string;
   timestamp?: string;
+  id?: number;
   [key: string]: unknown;
 }
 
@@ -43,24 +50,29 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
   const [events, setEvents] = useState<SSEEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [ended, setEnded] = useState(false);
-  const esRef = useRef<EventSource | null>(null);
+  const [endedWithError, setEndedWithError] = useState(false);
+  const [interrupted, setInterrupted] = useState(false);
 
   useEffect(() => {
     setEvents([]);
     setEnded(false);
+    setEndedWithError(false);
+    setInterrupted(false);
     setConnected(false);
 
     const es = new EventSource(`/api/runs/${runId}/stream`);
-    esRef.current = es;
 
     const handler = (e: MessageEvent) => {
       try {
         const data: SSEEvent = JSON.parse(e.data);
         setEvents((prev) => [...prev, data]);
-        if (data.event_type === "run_end" || data.event_type === "error") {
+        if (data.event_type === "run_interrupted") {
+          setInterrupted(true);
+        } else if (data.event_type === "run_end" || data.event_type === "error") {
           es.close();
           setConnected(false);
           setEnded(true);
+          setEndedWithError(data.event_type === "error");
         }
       } catch {
         // 忽略 JSON 解析错误
@@ -73,23 +85,35 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
     es.onmessage = handler;
 
     es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
+    es.onerror = () => {
+      setConnected(false);
+      es.close();
+    };
 
     return () => {
       es.close();
     };
   }, [runId, refreshKey]);
 
+  const badgeConfig = connected
+    ? { status: "processing" as const, text: "已连接" }
+    : endedWithError
+    ? { status: "error" as const, text: "已失败" }
+    : ended
+    ? { status: "success" as const, text: "已结束" }
+    : interrupted
+    ? { status: "warning" as const, text: "等待审批" }
+    : { status: "error" as const, text: "已断开" };
+
+  const showReconnect = !connected && !ended && !interrupted;
+
   return (
     <Card
       title="实时轨迹"
       extra={
         <span>
-          <Badge
-            status={connected ? "processing" : ended ? "success" : "error"}
-            text={connected ? "已连接" : ended ? "已结束" : "已断开"}
-          />
-          {!connected && !ended && (
+          <Badge status={badgeConfig.status} text={badgeConfig.text} />
+          {showReconnect && (
             <Button size="small" style={{ marginLeft: 8 }} onClick={onReconnect}>
               重连
             </Button>
@@ -104,7 +128,7 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
           items={events.map((e, i) => ({
             color: EVENT_COLORS[e.event_type] || "gray",
             children: (
-              <div key={i}>
+              <div key={e.id ?? i}>
                 <Badge
                   color={EVENT_COLORS[e.event_type] || "gray"}
                   text={e.event_type}
