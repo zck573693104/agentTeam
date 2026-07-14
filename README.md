@@ -71,5 +71,5 @@ API 端点：
 - [x] M3 审批与轨迹
 - [x] M4 MCP 集成（子图 ReAct + 工具级审批 + MCP 工具加载）
 - [x] M5a API（FastAPI + SSE + RunManager）
-- [ ] M5b Web UI
+- [x] M5b Web UI（React + antd + SSE 实时控制台）
 - [ ] M6 示例团队 + 测试
