@@ -3,6 +3,7 @@
 FakeLLM 不设 invoke_responses → invoke 时 IndexError → run 状态 failed。
 """
 from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.storage.audit import AuditRepo
 from tests.conftest import FakeLLM
 from tests.integration.conftest import make_dev_team_compiled, _wait_for_status
 
@@ -33,8 +34,6 @@ def test_e2e_worker_error_fails_run(run_manager, run_repo, integration_db):
 
 def test_e2e_error_events_in_audit(run_manager, run_repo, integration_db):
     """run 失败后,audit 表有 error 事件。"""
-    from agentteam.storage.audit import AuditRepo
-
     fake_llm = FakeLLM()
     fake_llm.set_structured_responses([
         Plan(steps=[PlanStep(worker="analyst", instruction="分析需求")]),
@@ -45,7 +44,8 @@ def test_e2e_error_events_in_audit(run_manager, run_repo, integration_db):
     config = {"configurable": {"thread_id": run_id}}
 
     run_manager.start_run(run_id, graph, config, "开发功能")
-    _wait_for_status(run_repo, run_id)
+    status = _wait_for_status(run_repo, run_id)
+    assert status == "failed"
 
     # 验证 audit 事件
     audit_repo = AuditRepo(integration_db)

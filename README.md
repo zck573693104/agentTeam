@@ -63,7 +63,7 @@ uvicorn agentteam.api.server:create_app --factory
 
 ### 2. 注册研发小队
 
-研发小队定义在 `examples/dev_team.py`（`DEV_TEAM` 字典）。通过 CLI 注册（需 `pip install -e ".[dev]"`）：
+研发小队定义在 `examples/dev_team.py`（`DEV_TEAM` 字典）。通过 CLI 注册（需 `pip install -e ".[qwen,dev]"`）：
 
 ```bash
 agentteam register-dev-team
@@ -94,10 +94,10 @@ curl -X POST http://localhost:8000/api/runs/{run_id}/approve \
   -d '{"approved": true, "reason": "同意"}'
 ```
 
-## 启动 API 服务
+## API 服务配置
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[qwen,dev]"
 uvicorn agentteam.api.server:create_app --factory
 ```
 
