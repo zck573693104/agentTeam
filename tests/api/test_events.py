@@ -78,3 +78,21 @@ def test_broadcast_trace_writer_publishes_to_multiple_subscribers():
     assert q1.get(timeout=1.0)["event_type"] == "run_start"
     assert q2.get(timeout=1.0)["event_type"] == "run_start"
     conn.close()
+
+
+def test_event_bus_bounded_queue_drops_oldest():
+    """队列满后丢弃最旧事件，不崩溃。新事件仍可入队。"""
+    bus = EventBus()
+    q = bus.subscribe("run-1")
+    # 发布超过 maxsize 个事件
+    for i in range(1200):
+        bus.publish("run-1", {"event_type": "test", "seq": i})
+    # 队列不应超过 maxsize
+    assert q.qsize() <= 1000
+    # 最旧的事件应已被丢弃，最新的事件应在队列中
+    events = []
+    while not q.empty():
+        events.append(q.get_nowait())
+    assert len(events) <= 1000
+    # 最新事件保留
+    assert events[-1]["seq"] == 1199

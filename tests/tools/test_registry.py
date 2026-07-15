@@ -101,3 +101,25 @@ def test_unregister_missing_tool_returns_false():
 
     reg = ToolRegistry()
     assert reg.unregister("nope") is False
+
+
+def test_register_mcp_tools_idempotent():
+    """重复调用 register_mcp_tools 同一 server 不报错，幂等跳过。"""
+    from agentteam.domain.mcp_server import MCPServer
+    from agentteam.tools.registry import ToolRegistry
+
+    # 每次调用返回新工具对象（模拟真实 MCP loader 行为）
+    def fake_loader(server):
+        return [_make_tool("fetch"), _make_tool("search")]
+
+    reg = ToolRegistry(mcp_loader=fake_loader)
+    server = MCPServer(name="remote", command="python")
+
+    # 第一次注册
+    registered1 = reg.register_mcp_tools(server)
+    assert set(registered1) == {"mcp:remote:fetch", "mcp:remote:search"}
+
+    # 第二次注册——不报错，幂等跳过
+    registered2 = reg.register_mcp_tools(server)
+    assert set(registered2) == {"mcp:remote:fetch", "mcp:remote:search"}
+    assert set(reg.list_names()) == {"mcp:remote:fetch", "mcp:remote:search"}

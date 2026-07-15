@@ -22,7 +22,11 @@ class ToolRegistry:
         return self._tools.pop(name, None) is not None
 
     def register_mcp_tools(self, server: MCPServer) -> list[str]:
-        """加载 MCP 工具并注册，加 mcp:{server.name}: 前缀防冲突。"""
+        """加载 MCP 工具并注册，加 mcp:{server.name}: 前缀防冲突。
+
+        幂等：已注册的同名工具会被跳过。TeamCompiler.compile() 每次 run
+        都会调用此方法，共享 registry 不能因重复注册而报错。
+        """
         from agentteam.tools.mcp import default_mcp_loader
 
         loader = self._mcp_loader or default_mcp_loader
@@ -30,7 +34,11 @@ class ToolRegistry:
         registered = []
         for tool in tools:
             tool.name = f"mcp:{server.name}:{tool.name}"
-            self.register(tool)
+            if tool.name in self._tools:
+                # 幂等：已注册则跳过，不覆盖已有工具
+                registered.append(tool.name)
+                continue
+            self._tools[tool.name] = tool
             registered.append(tool.name)
         return registered
 

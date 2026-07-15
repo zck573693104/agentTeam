@@ -7,6 +7,10 @@ from typing import Any
 
 from agentteam.storage.audit import AuditRepo
 
+# 每个订阅者队列上限。事件已持久化到 SQLite，慢消费者溢出时丢弃旧事件，
+# SSE 重连后可从 SQLite 回放补全。
+_MAX_QUEUE_SIZE = 1000
+
 
 class EventBus:
     """线程安全事件总线：桥接后台线程（TraceWriter）→ SSE 端点。
@@ -20,7 +24,7 @@ class EventBus:
 
     def subscribe(self, run_id: str) -> queue_mod.Queue:
         """订阅 run_id 的事件流，返回一个 Queue。"""
-        q: queue_mod.Queue = queue_mod.Queue()
+        q: queue_mod.Queue = queue_mod.Queue(maxsize=_MAX_QUEUE_SIZE)
         with self._lock:
             if run_id not in self._subscribers:
                 self._subscribers[run_id] = []
@@ -28,11 +32,25 @@ class EventBus:
         return q
 
     def publish(self, run_id: str, event: dict[str, Any]) -> None:
-        """向 run_id 的所有订阅者发布事件。无订阅者时 no-op。"""
+        """向 run_id 的所有订阅者发布事件。无订阅者时 no-op。
+
+        队列满时丢弃最旧事件腾出空间——事件已在 SQLite 持久化，
+        SSE 重连后可从历史回放补全。
+        """
         with self._lock:
             subs = list(self._subscribers.get(run_id, []))
         for q in subs:
-            q.put_nowait(event)
+            try:
+                q.put_nowait(event)
+            except queue_mod.Full:
+                try:
+                    q.get_nowait()  # 丢最旧
+                except queue_mod.Empty:
+                    pass
+                try:
+                    q.put_nowait(event)
+                except queue_mod.Full:
+                    pass  # 极端情况：放弃
 
     def unsubscribe(self, run_id: str, q: queue_mod.Queue) -> None:
         """取消订阅。清理空列表。"""

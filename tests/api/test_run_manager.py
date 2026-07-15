@@ -173,3 +173,81 @@ def test_start_run_handles_error(tmp_path):
     assert event is not None
     assert event["event_type"] == "error"
     conn.close()
+
+
+def test_cleanup_after_run_completes(tmp_path):
+    """run 完成后 _graphs/_configs/_threads 应被清理，防止内存泄漏。"""
+    conn = init_db(tmp_path / "test.db")
+    run_repo = RunRepo(conn)
+    audit_repo = AuditRepo(conn)
+    bus = EventBus()
+    rm = RunManager(run_repo, audit_repo, bus)
+
+    fake_llm = FakeLLM()
+    fake_llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
+    fake_llm.set_invoke_responses([AIMessage(content="done"), AIMessage(content="ok")])
+
+    team = _make_team_no_approval()
+    graph = _compile_graph(team, fake_llm, conn)
+    run_id = run_repo.create_run("t", "test task")
+    config = {"configurable": {"thread_id": run_id}}
+
+    rm.start_run(run_id, graph, config, "test task")
+    _wait_for_status(run_repo, run_id)
+
+    # 等待后台线程完成清理
+    time.sleep(0.3)
+    assert run_id not in rm._graphs
+    assert run_id not in rm._configs
+    assert run_id not in rm._threads
+    conn.close()
+
+
+def test_cleanup_after_run_fails(tmp_path):
+    """run 失败后 _graphs/_configs/_threads 应被清理。"""
+    conn = init_db(tmp_path / "test.db")
+    run_repo = RunRepo(conn)
+    audit_repo = AuditRepo(conn)
+    bus = EventBus()
+    rm = RunManager(run_repo, audit_repo, bus)
+
+    fake_llm = FakeLLM()  # 不设 responses → 触发异常
+    team = _make_team_no_approval()
+    graph = _compile_graph(team, fake_llm, conn)
+    run_id = run_repo.create_run("t", "test task")
+    config = {"configurable": {"thread_id": run_id}}
+
+    rm.start_run(run_id, graph, config, "test task")
+    _wait_for_status(run_repo, run_id, target_statuses={"failed"})
+
+    time.sleep(0.3)
+    assert run_id not in rm._graphs
+    assert run_id not in rm._configs
+    assert run_id not in rm._threads
+    conn.close()
+
+
+def test_no_cleanup_after_run_interrupted(tmp_path):
+    """run 中断后 _graphs/_configs 应保留，供 resume 使用。"""
+    conn = init_db(tmp_path / "test.db")
+    run_repo = RunRepo(conn)
+    audit_repo = AuditRepo(conn)
+    bus = EventBus()
+    rm = RunManager(run_repo, audit_repo, bus)
+
+    fake_llm = FakeLLM()
+    fake_llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
+
+    team = _make_team_with_approval()
+    graph = _compile_graph(team, fake_llm, conn)
+    run_id = run_repo.create_run("t", "test task")
+    config = {"configurable": {"thread_id": run_id}}
+
+    rm.start_run(run_id, graph, config, "test task")
+    _wait_for_status(run_repo, run_id, target_statuses={"interrupted"})
+
+    time.sleep(0.3)
+    # interrupted 的 run 不清理——resume 需要 graph/config
+    assert run_id in rm._graphs
+    assert run_id in rm._configs
+    conn.close()
