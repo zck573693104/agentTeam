@@ -81,3 +81,23 @@ def test_register_mcp_tools_empty_returns_empty_list():
     server = MCPServer(name="empty", command="python")
     registered = reg.register_mcp_tools(server)
     assert registered == []
+
+
+def test_unregister_existing_tool_returns_true():
+    """unregister 已注册工具返回 True,且工具不再可用。"""
+    from agentteam.tools.registry import ToolRegistry
+
+    reg = ToolRegistry()
+    reg.register(_make_tool("foo"))
+    assert reg.unregister("foo") is True
+    assert "foo" not in reg.list_names()
+    with pytest.raises(KeyError):
+        reg.get_tools(["foo"])
+
+
+def test_unregister_missing_tool_returns_false():
+    """unregister 不存在的工具返回 False,不报错。"""
+    from agentteam.tools.registry import ToolRegistry
+
+    reg = ToolRegistry()
+    assert reg.unregister("nope") is False

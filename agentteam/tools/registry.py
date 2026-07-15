@@ -17,6 +17,10 @@ class ToolRegistry:
             raise ValueError(f"Tool already registered: {tool.name}")
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> bool:
+        """注销已注册的工具。返回是否成功移除。"""
+        return self._tools.pop(name, None) is not None
+
     def register_mcp_tools(self, server: MCPServer) -> list[str]:
         """加载 MCP 工具并注册，加 mcp:{server.name}: 前缀防冲突。"""
         from agentteam.tools.mcp import default_mcp_loader
