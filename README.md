@@ -43,7 +43,7 @@ llm = provider.ModelProvider().get_llm(provider.ModelRef("qwen", "qwen-max"))
 # 工具
 reg = ToolRegistry()
 register_builtin_skills(reg)
-print(reg.list_names())  # ['read_file', 'write_file', 'list_dir']
+print(reg.list_names())  # ['read_file', 'write_file', 'list_dir', 'search_web']
 
 # 存储
 conn = init_db("data/agentteam.db")
