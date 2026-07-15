@@ -17,14 +17,19 @@ def register_dev_team(api: str = "http://localhost:8000") -> int:
     """注册研发小队到指定 API 服务,返回退出码。"""
     try:
         resp = requests.post(f"{api}/api/teams", json=DEV_TEAM, timeout=10)
-        # 等价于 resp.ok(requests 中 ok = status_code < 400),同时兼容测试 mock。
         if resp.status_code < 400:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
             print(f"已注册团队: {data.get('name', 'dev_team')}")
             return 0
         else:
-            err = resp.json()
-            detail = err.get("detail", resp.text)
+            try:
+                err = resp.json()
+                detail = err.get("detail", resp.text)
+            except ValueError:
+                detail = resp.text
             print(f"错误: {detail}")
             return 1
     except requests.ConnectionError:

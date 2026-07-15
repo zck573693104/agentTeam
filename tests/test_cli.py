@@ -1,6 +1,8 @@
 """CLI 入口测试。"""
 from unittest.mock import patch, MagicMock
 
+import requests
+
 from agentteam.cli import main
 
 
@@ -35,12 +37,12 @@ def test_register_dev_team_api_error(capsys):
         )
         main(["register-dev-team"])
     captured = capsys.readouterr()
-    assert "错误" in captured.out or "Team already exists" in captured.out
+    assert "Team already exists" in captured.out
 
 
 def test_register_dev_team_connection_error(capsys):
     """连接失败时输出错误信息。"""
-    with patch("agentteam.cli.requests.post", side_effect=ConnectionError("Connection refused")):
+    with patch("agentteam.cli.requests.post", side_effect=requests.ConnectionError("Connection refused")):
         main(["register-dev-team"])
     captured = capsys.readouterr()
     assert "错误" in captured.out
