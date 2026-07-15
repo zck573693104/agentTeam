@@ -105,9 +105,22 @@ def make_dev_team_compiled(
     from agentteam.tools.skills import register_builtin_skills
     register_builtin_skills(reg)
 
+    return compile_team_with_registry(team, fake_llm, conn, reg)
+
+
+def compile_team_with_registry(
+    team,
+    fake_llm: FakeLLM,
+    conn,
+    reg: ToolRegistry,
+):
+    """用指定的 team + registry 编译 graph(供需要自定义 team/registry 的测试使用)。"""
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from agentteam.runtime.graph import TeamCompiler
+    from tests.conftest import FakeModelProvider
+
     provider = FakeModelProvider({"qwen-max": fake_llm})
     compiler = TeamCompiler(provider, reg)
     saver = SqliteSaver(conn)
     saver.setup()
-    graph = compiler.compile(team, checkpointer=saver)
-    return graph
+    return compiler.compile(team, checkpointer=saver)

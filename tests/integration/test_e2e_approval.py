@@ -8,9 +8,14 @@ from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
 
 from agentteam.domain.approval import ApprovalPolicy
+from agentteam.domain.team import Leader, Team
+from agentteam.domain.worker import Worker
+from agentteam.models.provider import ModelRef
 from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.tools.registry import ToolRegistry
+from agentteam.tools.skills import register_builtin_skills
 from tests.conftest import FakeLLM
-from tests.integration.conftest import make_dev_team_compiled, _wait_for_status
+from tests.integration.conftest import make_dev_team_compiled, _wait_for_status, compile_team_with_registry
 
 
 def test_e2e_step_approval_interrupt_resume(run_manager, run_repo, integration_db):
@@ -44,6 +49,10 @@ def test_e2e_step_approval_interrupt_resume(run_manager, run_repo, integration_d
     status = _wait_for_status(run_repo, run_id)
     assert status == "completed"
 
+    run = run_repo.get_run(run_id)
+    assert run["status"] == "completed"
+    assert run["ended_at"] is not None
+
     # 验证 worker 执行了
     state = graph.get_state(config)
     assert "analyst" in state.values.get("worker_outputs", {})
@@ -73,9 +82,16 @@ def test_e2e_step_approval_rejected_terminates(run_manager, run_repo, integratio
     status = _wait_for_status(run_repo, run_id)
     assert status == "completed"
 
+    run = run_repo.get_run(run_id)
+    assert run["status"] == "completed"
+    assert run["ended_at"] is not None
+
     # worker 不应执行
     state = graph.get_state(config)
     assert "analyst" not in state.values.get("worker_outputs", {})
+
+    # 验证拒绝决策被记录
+    assert state.values.get("pending_approval", {}).get("approved") is False
 
 
 def test_e2e_tool_approval_write_file(run_manager, run_repo, integration_db, tmp_path):
@@ -114,20 +130,11 @@ def test_e2e_tool_approval_write_file(run_manager, run_repo, integration_db, tmp
     ])
 
     # 构建带 tool 级审批的团队
-    from agentteam.domain.team import Leader, Team
-    from agentteam.domain.worker import Worker
-    from agentteam.models.provider import ModelRef
-    from agentteam.runtime.graph import TeamCompiler
-    from agentteam.tools.registry import ToolRegistry
-    from agentteam.tools.skills import register_builtin_skills
-    from tests.conftest import FakeModelProvider
-    from langgraph.checkpoint.sqlite import SqliteSaver
-
     # 覆盖 write_file 为测试版本
     reg = ToolRegistry()
     register_builtin_skills(reg)
     # 先注销内置 write_file,注册测试版本
-    reg._tools.pop("write_file", None)
+    reg.unregister("write_file")
     reg.register(write_tool)
 
     team = Team(
@@ -147,11 +154,7 @@ def test_e2e_tool_approval_write_file(run_manager, run_repo, integration_db, tmp
         skills=["read_file", "write_file", "list_dir", "search_web"],
     )
 
-    provider = FakeModelProvider({"qwen-max": fake_llm})
-    compiler = TeamCompiler(provider, reg)
-    saver = SqliteSaver(integration_db)
-    saver.setup()
-    graph = compiler.compile(team, checkpointer=saver)
+    graph = compile_team_with_registry(team, fake_llm, integration_db, reg)
 
     run_id = run_repo.create_run("dev_team_test", "写文件任务")
     config = {"configurable": {"thread_id": run_id}}
