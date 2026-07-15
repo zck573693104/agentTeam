@@ -50,6 +50,50 @@ conn = init_db("data/agentteam.db")
 run_id = RunRepo(conn).create_run("dev_team", "示例任务")
 ```
 
+## 研发小队示例
+
+内置「研发小队」团队验证框架完整流程:Leader 拆解 → 需求分析 → 编码 → 测试 → 审查。
+
+### 1. 启动 API 服务
+
+```bash
+pip install -e ".[qwen,dev]"
+uvicorn agentteam.api.server:create_app --factory
+```
+
+### 2. 注册研发小队
+
+研发小队定义在 `examples/dev_team.py`（`DEV_TEAM` 字典）。通过 CLI 注册（需 `pip install -e ".[dev]"`）：
+
+```bash
+agentteam register-dev-team
+```
+
+CLI 会读取 `DEV_TEAM` 并 POST 到 `http://localhost:8000/api/teams`。
+
+### 3. 提交任务
+
+```bash
+curl -X POST http://localhost:8000/api/runs \
+  -H "Content-Type: application/json" \
+  -d '{"team_name": "dev_team", "task": "实现一个 hello world 程序"}'
+```
+
+### 4. 查看实时轨迹
+
+- **Web UI**: 浏览器打开 http://localhost:8000
+- **SSE**: `GET http://localhost:8000/api/runs/{run_id}/stream`
+
+### 5. 审批续跑
+
+当 Leader step 级或 Worker tool 级审批触发时,run 状态变为 `interrupted`:
+
+```bash
+curl -X POST http://localhost:8000/api/runs/{run_id}/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approved": true, "reason": "同意"}'
+```
+
 ## 启动 API 服务
 
 ```bash
@@ -72,4 +116,4 @@ API 端点：
 - [x] M4 MCP 集成（子图 ReAct + 工具级审批 + MCP 工具加载）
 - [x] M5a API（FastAPI + SSE + RunManager）
 - [x] M5b Web UI（React + antd + SSE 实时控制台）
-- [ ] M6 示例团队 + 测试
+- [x] M6 示例团队 + 测试
