@@ -131,6 +131,19 @@ def runs_router(
                 # 3. 检查 run 当前状态
                 run_status = run_repo.get_run(run_id)
                 if run_status and run_status["status"] == "interrupted":
+                    # 重读历史：在初始历史读取（step 2）与状态检查之间，run 可能刚中断
+                    # 并写入了新事件（如 leader_plan、worker_start）。若不重读，客户端
+                    # 会漏掉这些事件。仅补发 id > last_id 的新事件。
+                    updated_history = audit_repo.list_events(run_id)
+                    for row in updated_history:
+                        eid = dict(row).get("id", 0)
+                        if eid > last_id:
+                            yield {
+                                "event": row["event_type"],
+                                "data": json.dumps(
+                                    dict(row), default=str, ensure_ascii=False
+                                ),
+                            }
                     # run 已中断。run_interrupted 是纯控制信号（只推 EventBus 不写 SQLite），
                     # 若客户端在中断后才连接，需在此补发，否则客户端不知道要弹审批框。
                     yield {
