@@ -118,7 +118,8 @@ class RunManager:
             self._run_repo.update_status(run_id, "interrupted")
             self._bus.publish(run_id, {"event_type": "run_interrupted", "run_id": run_id})
         else:
-            self._run_repo.end_run(run_id, "completed")
+            tokens = state.values.get("total_tokens", 0) if state.values else 0
+            self._run_repo.end_run(run_id, "completed", total_tokens=tokens)
             eid = self._audit_repo.add_event(run_id, "run_end", "system")
             self._bus.publish(
                 run_id, {"id": eid, "event_type": "run_end", "run_id": run_id}

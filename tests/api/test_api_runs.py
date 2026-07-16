@@ -158,3 +158,37 @@ def test_sse_connects_while_run_is_running(make_client):
     text = sse_resp.text
     assert "run_start" in text
     assert "run_end" in text
+
+
+def test_token_tracking_accumulates_usage_metadata(make_client):
+    """LLM 响应带 usage_metadata 时，run 完成后 total_tokens 应累积写入 DB。"""
+    from langchain_core.messages import AIMessage
+
+    from agentteam.runtime.nodes import Plan, PlanStep
+    from tests.conftest import FakeLLM, FakeModelProvider
+
+    llm = FakeLLM()
+    llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
+    # agent_step 返回 30 tokens, leader_review 返回 50 tokens → 总计 80
+    llm.set_invoke_responses([
+        AIMessage(
+            content="done",
+            usage_metadata={"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+        ),
+        AIMessage(
+            content="ok",
+            usage_metadata={"input_tokens": 20, "output_tokens": 30, "total_tokens": 50},
+        ),
+    ])
+    provider = FakeModelProvider({"qwen-max": llm})
+
+    client = make_client(provider)
+    client.post("/api/teams", json=make_team_json())
+
+    resp = client.post("/api/runs", json={"team_name": "dev", "task": "token test"})
+    run_id = resp.json()["run_id"]
+    status = _wait_for_run(client, run_id)
+    assert status == "completed"
+
+    run = client.get(f"/api/runs/{run_id}").json()
+    assert run["total_tokens"] == 80

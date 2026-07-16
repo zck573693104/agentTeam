@@ -99,17 +99,22 @@ def make_agent_step(
         react_messages = state.get("react_messages", [])
         response = llm_with_tools.invoke(react_messages)
 
+        usage = getattr(response, "usage_metadata", None)
+        tokens = usage.get("total_tokens", 0) if usage else 0
+
         tool_calls = getattr(response, "tool_calls", None)
         if tool_calls:
             return {
                 "react_messages": [response],
                 "tool_calls": tool_calls,
                 "final_answer": "",
+                "total_tokens": tokens,
             }
         return {
             "react_messages": [response],
             "tool_calls": [],
             "final_answer": response.content,
+            "total_tokens": tokens,
         }
 
     return agent_step
@@ -317,7 +322,7 @@ def make_worker_node(
     # 共享累加器字段：子图不需要读取它们（只用 react_messages 内部通信），
     # 但若传入，子图的 reducer 会累积它们，返回时父图 reducer 再次累积 → 重复。
     # 因此从输入中剥离，让子图只产出自己的增量。
-    _ACCUMULATOR_KEYS = frozenset({"messages", "audit_events", "worker_outputs"})
+    _ACCUMULATOR_KEYS = frozenset({"messages", "audit_events", "worker_outputs", "total_tokens"})
 
     def worker_node(state: TeamState, config=None) -> dict:
         subgraph_input = {
@@ -355,6 +360,8 @@ def make_leader_review_node(
         )
         if trace_writer:
             trace_writer.emit(run_id, "leader_review", leader.name)
+        usage = getattr(review_response, "usage_metadata", None)
+        tokens = usage.get("total_tokens", 0) if usage else 0
         return {
             "plan": plan,
             "current_step": current + 1,
@@ -362,6 +369,7 @@ def make_leader_review_node(
                 AIMessage(content=f"[Leader] {review_response.content}", name=leader.name)
             ],
             "audit_events": [{"event_type": "leader_review", "actor": leader.name}],
+            "total_tokens": tokens,
         }
 
     return leader_review

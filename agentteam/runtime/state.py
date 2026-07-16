@@ -30,6 +30,7 @@ class TeamState(TypedDict):
     audit_events: Annotated[list, operator.add]
     run_id: str
     pending_approval: dict | None
+    total_tokens: Annotated[int, operator.add]
 
 
 def is_rejected(state: dict) -> bool:
@@ -58,3 +59,4 @@ class WorkerState(TypedDict):
     tool_calls: list[dict]
     iteration: int
     final_answer: str
+    total_tokens: Annotated[int, operator.add]
