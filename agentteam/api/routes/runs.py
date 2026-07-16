@@ -70,6 +70,18 @@ def runs_router(
             )
         except Exception as e:
             run_repo.end_run(run_id, "failed")
+            eid = audit_repo.add_event(
+                run_id, "error", "system", {"error": str(e)}
+            )
+            event_bus.publish(
+                run_id,
+                {
+                    "id": eid,
+                    "event_type": "error",
+                    "run_id": run_id,
+                    "payload": {"error": str(e)},
+                },
+            )
             raise HTTPException(status_code=400, detail=f"Compile failed: {e}")
 
         config = {"configurable": {"thread_id": run_id}}
@@ -213,8 +225,22 @@ def runs_router(
         try:
             run_manager.resume_run(run_id, req.approved, req.reason)
         except ValueError as e:
-            # claim 成功但 resume 失败（如服务重启后 graph/config 丢失）——回滚状态
-            run_repo.update_status(run_id, "interrupted")
+            # claim 成功但 resume 失败：服务重启后 graph/config 丢失，run 无法恢复。
+            # 标记为 failed（终态）而非回滚 interrupted——否则 run 永远卡住，
+            # 用户反复 approve 反复 409。
+            run_repo.end_run(run_id, "failed")
+            eid = audit_repo.add_event(
+                run_id, "error", "system", {"error": str(e)}
+            )
+            event_bus.publish(
+                run_id,
+                {
+                    "id": eid,
+                    "event_type": "error",
+                    "run_id": run_id,
+                    "payload": {"error": str(e)},
+                },
+            )
             raise HTTPException(status_code=409, detail=str(e))
         return {"ok": True}
 
