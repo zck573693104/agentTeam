@@ -65,3 +65,27 @@ def test_team_mcp_servers_defaults_empty():
         default_model=ModelRef("qwen", "qwen-max"),
     )
     assert team.mcp_servers == []
+
+
+def test_leader_to_agent_basic():
+    from agentteam.domain.agent import Agent
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    a = leader.to_agent()
+    assert isinstance(a, Agent)
+    assert a.role == "supervisor"
+    assert a.system_prompt == "你是主管"
+    assert a.children == []
+    assert a.approval_policy is None
+
+
+def test_leader_to_agent_with_children_and_policy():
+    from agentteam.domain.agent import Agent
+    from agentteam.domain.approval import ApprovalPolicy
+    ap = ApprovalPolicy(level="step")
+    leader = Leader(name="lead", system_prompt="你是主管", approval_policy=ap)
+    child = Agent(name="w", role="worker")
+    a = leader.to_agent(children=[child])
+    assert a.role == "supervisor"
+    assert a.approval_policy is ap
+    assert len(a.children) == 1
+    assert a.children[0].name == "w"

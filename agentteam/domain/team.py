@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from agentteam.domain.agent import Agent, TeamRef
 from agentteam.domain.approval import ApprovalPolicy
 from agentteam.domain.mcp_server import MCPServer
 from agentteam.domain.worker import Worker
@@ -17,6 +18,17 @@ class Leader:
     system_prompt: str = ""
     model: ModelRef | None = None
     approval_policy: ApprovalPolicy | None = None
+
+    def to_agent(
+        self, children: list[Agent | TeamRef] | None = None
+    ) -> Agent:
+        """转换为统一 Agent 节点。children 可在调用处传入。"""
+        return Agent(
+            name=self.name, role="supervisor",
+            system_prompt=self.system_prompt, model=self.model,
+            children=list(children) if children else [],
+            approval_policy=self.approval_policy,
+        )
 
 
 @dataclass
