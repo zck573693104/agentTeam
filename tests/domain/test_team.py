@@ -145,3 +145,24 @@ def test_team_legacy_construction_still_works():
     # root 也能访问
     assert team.root.role == "supervisor"
     assert team.root.name == "leader"
+
+
+def test_team_property_workers_filters_non_worker_children():
+    """property workers 仅返回 role=worker 的 children，跳过 supervisor/TeamRef。"""
+    from agentteam.domain.agent import Agent, TeamRef
+    root = Agent(
+        name="lead", role="supervisor",
+        children=[
+            Agent(name="w1", role="worker"),
+            Agent(name="sub", role="supervisor", children=[
+                Agent(name="w2", role="worker")
+            ]),
+            TeamRef(name="other_team"),
+        ],
+    )
+    team = Team(
+        name="t", description="d", root=root,
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    # workers property 只返回 w1（worker 角色的直接 child）
+    assert [w.name for w in team.workers] == ["w1"]
