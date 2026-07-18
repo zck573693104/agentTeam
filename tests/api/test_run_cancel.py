@@ -71,3 +71,84 @@ def test_is_cancelled_returns_false_for_unknown_run():
     """未知 run_id(未 start_run)时 is_cancelled 返回 False,不抛 KeyError。"""
     rm = _make_run_manager()
     assert rm.is_cancelled("nonexistent-run") is False
+
+
+def test_cancel_interrupted_run_ends_directly():
+    """interrupted run cancel:直接 end_run('cancelled') + 发 run_cancelled 事件 + cleanup。
+
+    简化方案(spec §6.3):interrupted 状态无需 recompile,直接结束。
+    不应调用 update_status(interrupted 直接 end_run)。
+    """
+    rm = _make_run_manager()
+    run_id = "run-interrupted"
+    rm._run_repo.get_run.return_value = {"status": "interrupted"}
+
+    result = rm.cancel_run(run_id)
+
+    assert result is True
+    # 直接 end_run("cancelled")
+    rm._run_repo.end_run.assert_called_once_with(run_id, "cancelled")
+    # 不走 update_status 路径(interrupted 直接结束)
+    rm._run_repo.update_status.assert_not_called()
+    # 发 run_cancelled 事件到 audit_repo
+    rm._audit_repo.add_event.assert_called_once_with(run_id, "run_cancelled", "user")
+    # publish 到 EventBus
+    assert rm._bus.publish.called
+    published = rm._bus.publish.call_args[0][1]
+    assert published["event_type"] == "run_cancelled"
+    assert published["run_id"] == run_id
+
+
+def test_cancel_running_run_sets_event_and_status_cancelling():
+    """running run cancel:set cancel event + update_status('cancelling')。
+
+    running 状态不直接 end_run,而是设置 event 让 worker 检测后抛
+    RunCancelledError,由 _handle_error 标 cancelled(Task 3)。
+    """
+    rm = _make_run_manager()
+    run_id = "run-running"
+    # 模拟 start_run 已创建 event
+    rm._cancel_events[run_id] = threading.Event()
+    rm._run_repo.get_run.return_value = {"status": "running"}
+
+    result = rm.cancel_run(run_id)
+
+    assert result is True
+    # event 被 set
+    assert rm._cancel_events[run_id].is_set() is True
+    # 状态更新为 cancelling(中间态)
+    rm._run_repo.update_status.assert_called_once_with(run_id, "cancelling")
+    # running 状态不直接 end_run(等 worker 抛 RunCancelledError)
+    rm._run_repo.end_run.assert_not_called()
+
+
+def test_cancel_completed_run_returns_false():
+    """completed run cancel:返回 False(不可取消)。"""
+    rm = _make_run_manager()
+    rm._run_repo.get_run.return_value = {"status": "completed"}
+
+    result = rm.cancel_run("run-completed")
+
+    assert result is False
+    rm._run_repo.end_run.assert_not_called()
+    rm._run_repo.update_status.assert_not_called()
+
+
+def test_cancel_failed_run_returns_false():
+    """failed run cancel:返回 False(不可取消)。"""
+    rm = _make_run_manager()
+    rm._run_repo.get_run.return_value = {"status": "failed"}
+
+    result = rm.cancel_run("run-failed")
+
+    assert result is False
+
+
+def test_cancel_unknown_run_returns_false():
+    """未知 run(get_run 返回 None)cancel:返回 False,不抛异常。"""
+    rm = _make_run_manager()
+    rm._run_repo.get_run.return_value = None
+
+    result = rm.cancel_run("run-nonexistent")
+
+    assert result is False

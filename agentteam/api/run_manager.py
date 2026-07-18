@@ -151,8 +151,56 @@ class RunManager:
 
         未知 run_id(未 start_run 或已 cleanup)返回 False,不抛异常。
         """
-        event = self._cancel_events.get(run_id)
+        with self._lock:
+            event = self._cancel_events.get(run_id)
         return event is not None and event.is_set()
+
+    def cancel_run(self, run_id: str) -> bool:
+        """请求取消 run。返回是否成功发出取消信号。
+
+        两种状态分别处理(spec §6.3 简化方案):
+        - interrupted: 直接 end_run("cancelled") + 发 run_cancelled 事件 + cleanup。
+          无需 lazy recompile,因为 run 已暂停,直接结束即可。
+        - running: set cancel event + update_status("cancelling")。
+          worker 在下一次 agent_step 入口检测到 event 后抛 RunCancelledError,
+          由 _handle_error 标 cancelled。
+        - 其他状态(completed/failed/cancelled/pending): 返回 False,不可取消。
+        - 未知 run_id(get_run 返回 None): 返回 False。
+        """
+        run = self._run_repo.get_run(run_id)
+        if run is None:
+            return False
+        status = run["status"]
+
+        if status == "interrupted":
+            # interrupted 直接结束,无需 recompile
+            self._run_repo.end_run(run_id, "cancelled")
+            eid = self._audit_repo.add_event(run_id, "run_cancelled", "user")
+            self._bus.publish(
+                run_id,
+                {
+                    "id": eid,
+                    "event_type": "run_cancelled",
+                    "run_id": run_id,
+                    "payload": {"reason": "user requested cancel"},
+                },
+            )
+            self._cleanup_run(run_id)
+            return True
+
+        if status == "running":
+            # set event 让 worker 检测
+            event = self._cancel_events.get(run_id)
+            if event is None:
+                # _cancel_events 缺失(异常情况):无法协作取消
+                return False
+            event.set()
+            # 标中间态 cancelling,等 worker 抛 RunCancelledError 后由 _handle_error 收尾
+            self._run_repo.update_status(run_id, "cancelling")
+            return True
+
+        # completed / failed / cancelled / pending 等终态或不可取消状态
+        return False
 
     def _cleanup_run(self, run_id: str) -> None:
         """清理已完成/失败的 run 的内存状态。
