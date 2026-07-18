@@ -24,7 +24,7 @@ def test_install_preset_nonexistent_raises_keyerror():
 def test_install_preset_no_deps_posts_only_team():
     """无 deps 的 preset(customer_support):只 POST 1 次 team,无 library/sub-team。"""
     from agentteam.presets import install_preset_to_api
-    with patch("agentteam.presets.requests") as mock_req:
+    with patch("agentteam.presets.installer.requests") as mock_req:
         mock_req.post.return_value = _fake_response(200, {"name": "customer_support"})
         mock_req.ConnectionError = Exception  # patch class attr
         result = install_preset_to_api("customer_support", api="http://api")
@@ -39,7 +39,7 @@ def test_install_preset_no_deps_posts_only_team():
 def test_install_preset_with_library_posts_library_then_team():
     """enterprise_dev:先 POST library(code_engineer),再 POST sub-team,再 POST team。"""
     from agentteam.presets import install_preset_to_api
-    with patch("agentteam.presets.requests") as mock_req:
+    with patch("agentteam.presets.installer.requests") as mock_req:
         mock_req.post.return_value = _fake_response(200, {"name": "x"})
         mock_req.ConnectionError = Exception
         result = install_preset_to_api("enterprise_dev", api="http://api")
@@ -64,7 +64,7 @@ def test_install_preset_with_library_posts_library_then_team():
 def test_install_preset_duplicate_falls_back_to_put():
     """POST 返回 400(重复)→ 回退 PUT,实现幂等。"""
     from agentteam.presets import install_preset_to_api
-    with patch("agentteam.presets.requests") as mock_req:
+    with patch("agentteam.presets.installer.requests") as mock_req:
         # POST 返回 400,PUT 返回 200
         mock_req.post.return_value = _fake_response(400, {"detail": "already exists"})
         mock_req.put.return_value = _fake_response(200, {"name": "customer_support"})
@@ -81,7 +81,7 @@ def test_install_preset_duplicate_falls_back_to_put():
 def test_install_preset_post_5xx_raises_runtimeerror():
     """POST 返回 500(非重复)→ 抛 RuntimeError,不回退 PUT。"""
     from agentteam.presets import install_preset_to_api
-    with patch("agentteam.presets.requests") as mock_req:
+    with patch("agentteam.presets.installer.requests") as mock_req:
         mock_req.post.return_value = _fake_response(500, {"detail": "server error"})
         mock_req.ConnectionError = Exception
         try:

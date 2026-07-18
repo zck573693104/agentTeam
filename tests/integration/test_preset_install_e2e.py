@@ -28,7 +28,7 @@ def _install_via_testclient(name: str, client: TestClient) -> dict:
         path = url.replace("http://testserver", "")
         return client.put(path, json=json)
 
-    with patch("agentteam.presets.requests") as mock_req:
+    with patch("agentteam.presets.installer.requests") as mock_req:
         mock_req.post.side_effect = _post
         mock_req.put.side_effect = _put
         mock_req.ConnectionError = Exception
