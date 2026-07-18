@@ -10,7 +10,32 @@ import {
   message,
 } from "antd";
 import { useFetch } from "../hooks/useFetch";
-import { api, type Team } from "../api/client";
+import { api, type AgentNode, type Team, type TeamRefNode } from "../api/client";
+
+/** 统计 Agent 树中 worker 节点数量。 */
+function countWorkers(node: AgentNode | TeamRefNode): number {
+  if ("_type" in node) return 0; // TeamRef 不计入 worker
+  if (node.role === "worker") return 1;
+  return (node.children || []).reduce((sum, c) => sum + countWorkers(c), 0);
+}
+
+/** 收集 Agent 树中所有 worker 节点（叶子）。 */
+function collectWorkers(node: AgentNode | TeamRefNode): { name: string; role?: string }[] {
+  if ("_type" in node) return [{ name: node.alias || node.name, role: "subteam" }];
+  if (node.role === "worker") return [{ name: node.name, role: node.role }];
+  return (node.children || []).flatMap((c) => collectWorkers(c));
+}
+
+/** 渲染 Agent 树为缩进字符串。 */
+function renderAgentTree(node: AgentNode | TeamRefNode, depth = 0): string {
+  const indent = "  ".repeat(depth);
+  if ("_type" in node) {
+    return `${indent}↳ [TeamRef] ${node.alias || node.name}`;
+  }
+  const head = `${indent}- ${node.name} (${node.role})`;
+  const childLines = (node.children || []).map((c) => renderAgentTree(c, depth + 1));
+  return [head, ...childLines].join("\n");
+}
 
 export default function Teams() {
   const { data, loading, error, refetch } = useFetch<Team[]>("/api/teams");
@@ -55,7 +80,10 @@ export default function Teams() {
   const columns = [
     { title: "名称", dataIndex: "name" },
     { title: "描述", dataIndex: "description" },
-    { title: "Worker 数", render: (_: unknown, r: Team) => r.workers.length },
+    {
+      title: "Worker 数",
+      render: (_: unknown, r: Team) => countWorkers(r.root),
+    },
     {
       title: "操作",
       render: (_: unknown, r: Team) => (
@@ -86,11 +114,18 @@ export default function Teams() {
           expandable={{
             expandedRowRender: (r: Team) => (
               <Descriptions column={1} bordered size="small">
-                <Descriptions.Item label="Leader">
-                  {r.leader?.name} ({r.leader?.role})
+                <Descriptions.Item label="Root">
+                  {r.root.name} ({r.root.role})
                 </Descriptions.Item>
                 <Descriptions.Item label="Workers">
-                  {r.workers.map((w) => `${w.name}(${w.role})`).join(", ")}
+                  {collectWorkers(r.root)
+                    .map((w) => `${w.name}(${w.role})`)
+                    .join(", ")}
+                </Descriptions.Item>
+                <Descriptions.Item label="Agent 树">
+                  <pre style={{ margin: 0, fontSize: 12 }}>
+                    {renderAgentTree(r.root)}
+                  </pre>
                 </Descriptions.Item>
               </Descriptions>
             ),
