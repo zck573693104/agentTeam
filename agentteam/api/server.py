@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -39,9 +40,19 @@ def create_app(
     agent_library: AgentLibrary | None = None,
     web_dist: Path | None | object = _DEFAULT,
 ) -> FastAPI:
-    app = FastAPI(title="AgentTeam")
-
     conn = init_db(db_path)
+
+    # BUG-07:用 lifespan 在 app shutdown 时显式 close conn,
+    # 避免 Windows 上 SQLite 文件锁残留(原实现 conn 仅在 app GC 时释放)。
+    # 注意:只有 `with TestClient(app):` 或真实 uvicorn 启停才触发 lifespan;
+    # 直接 TestClient(app) 不触发(与原行为一致,不影响现有测试)。
+    @asynccontextmanager
+    async def lifespan(app):
+        yield
+        conn.close()
+
+    app = FastAPI(title="AgentTeam", lifespan=lifespan)
+
     # 共享锁：SqliteSaver / RunRepo / AuditRepo 共用同一 sqlite3.Connection，
     # 必须用同一把锁串行化所有连接访问，否则多线程下会触发
     # sqlite3.InterfaceError: bad parameter or other API misuse。
