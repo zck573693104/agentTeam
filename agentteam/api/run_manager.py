@@ -13,6 +13,17 @@ if TYPE_CHECKING:
     from agentteam.runtime.graph import TeamCompiler
 
 
+class RunCancelledError(BaseException):
+    """run 被用户取消,worker 节点检测到 cancel event 后抛出。
+
+    继承 BaseException(而非 Exception)以绕过 worker 内部
+    `try: ... except Exception:` 的常规 catch,确保取消信号能
+    一路传播到 RunManager._handle_error 被识别并标记为 cancelled。
+    """
+
+    pass
+
+
 class RunManager:
     """管理 run 的后台线程执行。
 
@@ -36,6 +47,7 @@ class RunManager:
         self._configs: dict[str, dict] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
+        self._cancel_events: dict[str, threading.Event] = {}
 
     def has_graph(self, run_id: str) -> bool:
         """返回 run_id 是否有内存态 graph。
@@ -92,6 +104,7 @@ class RunManager:
         with self._lock:
             self._graphs[run_id] = graph
             self._configs[run_id] = config
+            self._cancel_events[run_id] = threading.Event()
         self._run_repo.update_status(run_id, "running")
         thread = threading.Thread(
             target=self._run_in_background,
@@ -133,6 +146,14 @@ class RunManager:
         if thread:
             thread.join(timeout=timeout)
 
+    def is_cancelled(self, run_id: str) -> bool:
+        """供 worker 节点轮询检查:run 是否被用户请求取消。
+
+        未知 run_id(未 start_run 或已 cleanup)返回 False,不抛异常。
+        """
+        event = self._cancel_events.get(run_id)
+        return event is not None and event.is_set()
+
     def _cleanup_run(self, run_id: str) -> None:
         """清理已完成/失败的 run 的内存状态。
 
@@ -142,6 +163,7 @@ class RunManager:
             self._graphs.pop(run_id, None)
             self._configs.pop(run_id, None)
             self._threads.pop(run_id, None)
+            self._cancel_events.pop(run_id, None)
 
     def _run_in_background(self, run_id: str, graph, config: dict, task: str) -> None:
         try:
