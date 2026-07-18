@@ -134,3 +134,22 @@ def test_get_llm_unknown_provider_lists_registered(clean_registry):
     assert "Registered:" in msg
     assert "alpha" in msg
     assert "beta" in msg
+
+
+# ===== Task 4: 内置 adapter 继承 BaseAdapter + 自动注册 =====
+
+
+def test_builtin_providers_registered_by_default(clean_registry):
+    """ModelProvider() 构造后 4 个内置 provider 自动注册。
+
+    使用 clean_registry：先清空 _registry（模拟被前序测试污染），
+    再构造 ModelProvider() 验证 register_builtins() 重新注册。
+    这验证了 register_builtins() 的幂等性 + 测试隔离保证。
+    """
+    from agentteam.models.provider import ModelProvider
+
+    # clean_registry 已清空 _registry，构造应触发 register_builtins() 重新注册
+    ModelProvider()
+    providers = ModelProvider.list_providers()
+    for expected in ("qwen", "openai", "anthropic", "ollama"):
+        assert expected in providers, f"内置 provider {expected!r} 未注册"

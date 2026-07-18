@@ -44,6 +44,12 @@ class ModelProvider:
 
     def __init__(self, api_keys: dict[str, str] | None = None) -> None:
         self._api_keys = api_keys or {}
+        # 延迟 import adapters 包并显式注册内置 adapter。
+        # 放在此处而非模块顶层，避免循环依赖（adapters/__init__.py 反向 import ModelProvider）。
+        # register_builtins() 是幂等的：clean_registry fixture 清空 _registry 后，
+        # 下次 ModelProvider() 调用会重新注册，保证测试隔离。
+        from agentteam.models import adapters
+        adapters.register_builtins()
 
     def get_llm(self, ref: ModelRef) -> BaseChatModel:
         adapter_cls = self._registry.get(ref.provider)
