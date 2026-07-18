@@ -424,6 +424,10 @@ def make_worker_node(
     剥离共享累加器字段（messages/audit_events/worker_outputs）后传入子图，
     避免子图 reducer 与父图 reducer 双重累积导致重复。
     透传 config 以支持子图内 interrupt/resume（工具级审批）。
+
+    输出过滤:dag 模式下多个 worker 并行触发,子图回传的 plan/current_step 等
+    LastValue 通道会并发写入冲突(InvalidUpdateError)。因此只回传累加器
+    (有 reducer) + dag 模式 completed_steps + 审批信号,其余字段由父图自管。
     """
     subgraph = make_worker_subgraph(agent, llm, tools, trace_writer, audit_repo)
 
@@ -431,14 +435,23 @@ def make_worker_node(
     # 但若传入，子图的 reducer 会累积它们，返回时父图 reducer 再次累积 → 重复。
     # 因此从输入中剥离，让子图只产出自己的增量。
     _ACCUMULATOR_KEYS = frozenset({"messages", "audit_events", "worker_outputs", "total_tokens"})
+    # 只回传这些 key:累加器(有 reducer) + dag completed_steps(set_union) + 审批信号。
+    # plan/current_step/execution_mode 等 LastValue 通道不回传,避免并行 worker 冲突。
+    _RETURN_KEYS = frozenset({
+        "messages", "audit_events", "worker_outputs", "total_tokens",
+        "completed_steps",  # dag 模式:worker 完成后回传 {current_step_id}
+        "pending_approval",  # 审批中断信号需冒泡到父图
+    })
 
     def worker_node(state: TeamState, config=None) -> dict:
         subgraph_input = {
             k: v for k, v in state.items() if k not in _ACCUMULATOR_KEYS
         }
         if config is not None:
-            return subgraph.invoke(subgraph_input, config)
-        return subgraph.invoke(subgraph_input)
+            sub_result = subgraph.invoke(subgraph_input, config)
+        else:
+            sub_result = subgraph.invoke(subgraph_input)
+        return {k: v for k, v in sub_result.items() if k in _RETURN_KEYS}
 
     return worker_node
 

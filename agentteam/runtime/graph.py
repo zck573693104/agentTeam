@@ -186,6 +186,42 @@ def make_route_from_plan_dag(child_targets: dict[str, str]):
     return route
 
 
+def make_route_unified(child_targets: dict[str, str]):
+    """统一路由:运行时根据 state["execution_mode"] 分派到 sequential 或 dag 逻辑。
+
+    LangGraph add_conditional_edges 只能注册一个路由函数,因此用 unified 函数
+    在运行时根据 execution_mode 分派(编译期无法预判 LLM 输出的 execution_mode)。
+
+    - sequential: 用 make_route_from_review 逻辑(current_step -> worker)
+    - dag: 用 make_route_from_plan_dag 逻辑(completed_steps -> ready workers)
+    """
+    dag_router = make_route_from_plan_dag(child_targets)
+    seq_router = make_route_from_review(child_targets)
+
+    def route(state):
+        if state.get("execution_mode") == "dag":
+            return dag_router(state)
+        return seq_router(state)
+    return route
+
+
+def make_route_unified_to_worker(child_targets: dict[str, str]):
+    """统一路由(带拒绝检查): 拒绝->END, 否则按 execution_mode 分派。
+
+    用于 step_gate 之后:sequential 用 make_route_to_worker,dag 用 dag_router。
+    """
+    dag_router = make_route_from_plan_dag(child_targets)
+    seq_router = make_route_from_review(child_targets)
+
+    def route(state):
+        if is_rejected(state):
+            return END
+        if state.get("execution_mode") == "dag":
+            return dag_router(state)
+        return seq_router(state)
+    return route
+
+
 def make_route_to_worker(child_targets: dict[str, str]):
     """创建路由函数：拒绝→END，否则→make_route_from_review。"""
     inner = make_route_from_review(child_targets)
@@ -381,20 +417,20 @@ class TeamCompiler:
         # 边：START → leader_plan
         graph.add_edge(START, "leader_plan")
 
-        # leader_plan → step_gate 或直接路由
+        # leader_plan → step_gate 或直接路由(统一路由:运行时按 execution_mode 分派)
         # 路由函数接收 child_targets（logical→physical），返回物理节点名；
         # path_map 用 physical_targets（physical→destination，含 gate 重定向）。
         if has_step_gate:
             graph.add_edge("leader_plan", "step_gate")
             graph.add_conditional_edges(
                 "step_gate",
-                make_route_to_worker(child_targets),
+                make_route_unified_to_worker(child_targets),
                 physical_targets,
             )
         else:
             graph.add_conditional_edges(
                 "leader_plan",
-                make_route_from_plan(child_targets),
+                make_route_unified(child_targets),
                 physical_targets,
             )
 
@@ -413,13 +449,13 @@ class TeamCompiler:
         for logical, node_name in child_targets.items():
             graph.add_edge(node_name, "leader_review")
 
-        # leader_review → step_gate 或直接路由
+        # leader_review → step_gate 或直接路由(统一路由)
         if has_step_gate:
             graph.add_edge("leader_review", "step_gate")
         else:
             graph.add_conditional_edges(
                 "leader_review",
-                make_route_from_review(child_targets),
+                make_route_unified(child_targets),
                 physical_targets,
             )
 

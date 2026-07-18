@@ -485,3 +485,229 @@ def test_leader_plan_dag_mode_detects_duplicate_ids_raises(fake_llm):
 
     with pytest.raises(ValueError, match="duplicate step ids"):
         node({"task": "bad dag", "messages": []})
+
+
+def test_plan_dag_parallel_execution_e2e():
+    """E2E dag: A/B 无依赖并行, C 依赖 A+B。A/B 并行触发, C 在 A/B 完成后触发。"""
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeLLM, FakeModelProvider
+
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "leader-model"))
+    worker_a = Worker(
+        name="a", role="r", description="", system_prompt="A",
+        model=ModelRef("qwen", "worker-model"),
+    )
+    worker_b = Worker(
+        name="b", role="r", description="", system_prompt="B",
+        model=ModelRef("qwen", "worker-model"),
+    )
+    worker_c = Worker(
+        name="c", role="r", description="", system_prompt="C",
+        model=ModelRef("qwen", "worker-model"),
+    )
+    team = Team(
+        name="dag_team", description="dag test",
+        leader=leader, workers=[worker_a, worker_b, worker_c],
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+
+    leader_llm = FakeLLM()
+    leader_llm.set_structured_responses([Plan(
+        execution_mode="dag",
+        steps=[
+            PlanStep(worker="a", instruction="do A", id="step_a"),
+            PlanStep(worker="b", instruction="do B", id="step_b"),
+            PlanStep(worker="c", instruction="do C", id="step_c",
+                     depends_on=["step_a", "step_b"]),
+        ],
+    )])
+    # 2 次 review(A+B 完成后, C 完成后)
+    leader_llm.set_invoke_responses([
+        AIMessage(content="A/B done"),
+        AIMessage(content="C done, all complete"),
+    ])
+
+    # worker LLM: A/B/C 各 1 次直接答案
+    worker_llm = FakeLLM()
+    worker_llm.set_invoke_responses([
+        AIMessage(content="result A"),
+        AIMessage(content="result B"),
+        AIMessage(content="result C"),
+    ])
+
+    provider = FakeModelProvider({
+        "leader-model": leader_llm,
+        "worker-model": worker_llm,
+    })
+    compiler = TeamCompiler(provider, ToolRegistry())
+    graph = compiler.compile(team, checkpointer=MemorySaver())
+
+    result = graph.invoke(
+        {"task": "do ABC in dag"},
+        config={"configurable": {"thread_id": "dag-e2e-1"}},
+    )
+
+    # dag 模式
+    assert result["execution_mode"] == "dag"
+    # 3 步全部完成
+    assert "step_a" in result["completed_steps"]
+    assert "step_b" in result["completed_steps"]
+    assert "step_c" in result["completed_steps"]
+    # 3 个 worker 都有产出
+    assert result["worker_outputs"]["a"] == "result A"
+    assert result["worker_outputs"]["b"] == "result B"
+    assert result["worker_outputs"]["c"] == "result C"
+
+
+def test_plan_dag_condition_skip_e2e():
+    """E2E dag: B 的 condition=False 被跳过, C(依赖 B)仍执行(skipped 视为满足)。"""
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeLLM, FakeModelProvider
+
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "leader-model"))
+    worker_a = Worker(
+        name="a", role="r", description="", system_prompt="A",
+        model=ModelRef("qwen", "worker-model"),
+    )
+    worker_b = Worker(
+        name="b", role="r", description="", system_prompt="B",
+        model=ModelRef("qwen", "worker-model"),
+    )
+    worker_c = Worker(
+        name="c", role="r", description="", system_prompt="C",
+        model=ModelRef("qwen", "worker-model"),
+    )
+    team = Team(
+        name="dag_cond_team", description="dag condition test",
+        leader=leader, workers=[worker_a, worker_b, worker_c],
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+
+    leader_llm = FakeLLM()
+    # B 的 condition 永远 False
+    leader_llm.set_structured_responses([Plan(
+        execution_mode="dag",
+        steps=[
+            PlanStep(worker="a", instruction="do A", id="step_a"),
+            PlanStep(worker="b", instruction="do B", id="step_b",
+                     condition="False"),
+            PlanStep(worker="c", instruction="do C", id="step_c",
+                     depends_on=["step_b"]),
+        ],
+    )])
+    # 2 次 review(A 完成后, C 完成后)
+    leader_llm.set_invoke_responses([
+        AIMessage(content="A done"),
+        AIMessage(content="C done"),
+    ])
+
+    worker_llm = FakeLLM()
+    worker_llm.set_invoke_responses([
+        AIMessage(content="result A"),
+        AIMessage(content="result C"),
+    ])
+
+    provider = FakeModelProvider({
+        "leader-model": leader_llm,
+        "worker-model": worker_llm,
+    })
+    compiler = TeamCompiler(provider, ToolRegistry())
+    graph = compiler.compile(team, checkpointer=MemorySaver())
+
+    result = graph.invoke(
+        {"task": "dag with condition"},
+        config={"configurable": {"thread_id": "dag-cond-1"}},
+    )
+
+    assert result["execution_mode"] == "dag"
+    # A 和 C 完成
+    assert "step_a" in result["completed_steps"]
+    assert "step_c" in result["completed_steps"]
+    # B 被跳过
+    assert "step_b" in result["skipped_steps"]
+    # B 未执行(worker_outputs 无 b)
+    assert "b" not in result.get("worker_outputs", {})
+    # A 和 C 有产出
+    assert result["worker_outputs"]["a"] == "result A"
+    assert result["worker_outputs"]["c"] == "result C"
+
+
+def test_plan_sequential_backward_compat_e2e():
+    """E2E sequential: 默认模式行为与旧版完全一致(current_step 线性推进)。"""
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from agentteam.domain.team import Leader, Team
+    from agentteam.domain.worker import Worker
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeLLM, FakeModelProvider
+
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "leader-model"))
+    coder = Worker(
+        name="coder", role="代码工程师", description="写代码",
+        system_prompt="你是代码工程师", model=ModelRef("qwen", "worker-model"),
+    )
+    tester = Worker(
+        name="tester", role="测试员", description="写测试",
+        system_prompt="你是测试员", model=ModelRef("qwen", "worker-model"),
+    )
+    team = Team(
+        name="seq_team", description="seq backward compat",
+        leader=leader, workers=[coder, tester],
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+
+    leader_llm = FakeLLM()
+    # 默认 execution_mode="sequential"(不显式设置)
+    leader_llm.set_structured_responses([Plan(steps=[
+        PlanStep(worker="coder", instruction="写 hello world"),
+        PlanStep(worker="tester", instruction="写测试"),
+    ])])
+    leader_llm.set_invoke_responses([
+        AIMessage(content="coder 干得不错"),
+        AIMessage(content="tester 测试到位,全部完成"),
+    ])
+
+    worker_llm = FakeLLM()
+    worker_llm.set_invoke_responses([
+        AIMessage(content="print('hello world')"),
+        AIMessage(content="assert True"),
+    ])
+
+    provider = FakeModelProvider({
+        "leader-model": leader_llm,
+        "worker-model": worker_llm,
+    })
+    compiler = TeamCompiler(provider, ToolRegistry())
+    graph = compiler.compile(team, checkpointer=MemorySaver())
+
+    result = graph.invoke(
+        {"task": "开发 hello world"},
+        config={"configurable": {"thread_id": "seq-e2e-1"}},
+    )
+
+    # execution_mode 默认 sequential
+    assert result.get("execution_mode", "sequential") == "sequential"
+    # current_step 推进到末尾(旧版行为)
+    assert result["current_step"] == 2
+    # 计划 2 步全部 done(旧版行为)
+    assert result["plan"][0]["status"] == "done"
+    assert result["plan"][1]["status"] == "done"
+    # 两个 worker 都有产出
+    assert result["worker_outputs"]["coder"] == "print('hello world')"
+    assert result["worker_outputs"]["tester"] == "assert True"
+    # completed_steps 在 sequential 模式下不被写入(或为空)
+    assert not result.get("completed_steps", set())
