@@ -5,9 +5,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from agentteam.domain.agent import Agent
 from agentteam.domain.approval import ApprovalPolicy
-from agentteam.domain.team import Leader
-from agentteam.domain.worker import Worker
 from agentteam.runtime.state import TeamState
 from agentteam.runtime.trace import TraceWriter
 
@@ -26,7 +25,7 @@ class Plan(BaseModel):
 
 
 def make_leader_plan_node(
-    leader: Leader, llm: BaseChatModel, trace_writer: TraceWriter | None = None
+    agent: Agent, llm: BaseChatModel, trace_writer: TraceWriter | None = None
 ):
     """创建 leader_plan 节点：用 LLM 结构化输出把 task 拆成 plan。"""
 
@@ -34,7 +33,7 @@ def make_leader_plan_node(
         run_id = state.get("run_id", "")
         task = state["task"]
         messages = [
-            SystemMessage(content=leader.system_prompt),
+            SystemMessage(content=agent.system_prompt),
             HumanMessage(
                 content=f"请把以下任务拆解成可执行的步骤计划，每步指派一个 worker：\n\n{task}"
             ),
@@ -46,21 +45,21 @@ def make_leader_plan_node(
             for s in plan_obj.steps
         ]
         if trace_writer:
-            trace_writer.emit(run_id, "leader_plan", leader.name, {"steps": len(plan)})
+            trace_writer.emit(run_id, "leader_plan", agent.name, {"steps": len(plan)})
         return {
             "plan": plan,
             "current_step": 0,
             "messages": [
-                AIMessage(content=f"[Leader] 计划已拆解：{len(plan)} 步", name=leader.name)
+                AIMessage(content=f"[Leader] 计划已拆解：{len(plan)} 步", name=agent.name)
             ],
-            "audit_events": [{"event_type": "leader_plan", "actor": leader.name}],
+            "audit_events": [{"event_type": "leader_plan", "actor": agent.name}],
         }
 
     return leader_plan
 
 
 def make_init_worker(
-    worker: Worker,
+    agent: Agent,
     trace_writer: TraceWriter | None = None,
 ):
     """创建 init_worker 节点：初始化 ReAct 循环的 react_messages 和计数器。"""
@@ -71,11 +70,11 @@ def make_init_worker(
         instruction = step["instruction"]
 
         if trace_writer:
-            trace_writer.emit(run_id, "worker_start", worker.name)
+            trace_writer.emit(run_id, "worker_start", agent.name)
 
         return {
             "react_messages": [
-                SystemMessage(content=worker.system_prompt),
+                SystemMessage(content=agent.system_prompt),
                 HumanMessage(content=instruction),
             ],
             "tool_calls": [],
@@ -87,7 +86,7 @@ def make_init_worker(
 
 
 def make_agent_step(
-    worker: Worker,
+    agent: Agent,
     llm: BaseChatModel,
     tools: list[BaseTool],
 ):
@@ -121,7 +120,7 @@ def make_agent_step(
 
 
 def make_finalize(
-    worker: Worker,
+    agent: Agent,
     trace_writer: TraceWriter | None = None,
 ):
     """创建 finalize 节点：写 worker_outputs、汇总 messages、emit worker_end。"""
@@ -140,22 +139,22 @@ def make_finalize(
 
         if trace_writer:
             trace_writer.emit(
-                run_id, "worker_end", worker.name,
+                run_id, "worker_end", agent.name,
                 {"answer_length": len(final_answer)},
             )
         return {
-            "worker_outputs": {worker.name: final_answer},
+            "worker_outputs": {agent.name: final_answer},
             "messages": [
-                AIMessage(content=f"[{worker.name}] {final_answer}", name=worker.name)
+                AIMessage(content=f"[{agent.name}] {final_answer}", name=agent.name)
             ],
-            "audit_events": [{"event_type": "worker_end", "actor": worker.name}],
+            "audit_events": [{"event_type": "worker_end", "actor": agent.name}],
         }
 
     return finalize
 
 
 def make_tool_step(
-    worker: Worker,
+    agent: Agent,
     tools: list[BaseTool],
     approval_policy: ApprovalPolicy | None = None,
     trace_writer: TraceWriter | None = None,
@@ -187,9 +186,9 @@ def make_tool_step(
         if needs_approval:
             decision = interrupt({
                 "gate": "tool",
-                "worker": worker.name,
+                "worker": agent.name,
                 "tool_calls": [{"name": tc["name"], "args": tc["args"]} for tc in tool_calls],
-                "message": f"Worker {worker.name} 请求调用工具: {[tc['name'] for tc in tool_calls]}",
+                "message": f"Worker {agent.name} 请求调用工具: {[tc['name'] for tc in tool_calls]}",
             })
             approved = decision.get("approved", False)
             decider = decision.get("decider", "unknown")
@@ -203,7 +202,7 @@ def make_tool_step(
             if trace_writer is not None:
                 trace_writer.emit(
                     run_id, "approval_requested", "system",
-                    {"gate": "tool", "worker": worker.name,
+                    {"gate": "tool", "worker": agent.name,
                      "tools": [tc["name"] for tc in tool_calls]},
                 )
                 trace_writer.emit(
@@ -225,7 +224,7 @@ def make_tool_step(
         # 执行工具
         if trace_writer is not None:
             trace_writer.emit(
-                run_id, "tool_call", worker.name,
+                run_id, "tool_call", agent.name,
                 {"tools": [tc["name"] for tc in tool_calls]},
             )
 
@@ -252,7 +251,7 @@ def make_tool_step(
 
 
 def make_worker_subgraph(
-    worker: Worker,
+    agent: Agent,
     llm: BaseChatModel,
     tools: list[BaseTool],
     trace_writer: TraceWriter | None = None,
@@ -265,16 +264,16 @@ def make_worker_subgraph(
     from langgraph.graph import END, START, StateGraph
     from agentteam.runtime.state import WorkerState
 
-    approval_policy = worker.approval_policy
+    approval_policy = agent.approval_policy
 
     sg = StateGraph(WorkerState)
-    sg.add_node("init_worker", make_init_worker(worker, trace_writer))
-    sg.add_node("agent_step", make_agent_step(worker, llm, tools))
+    sg.add_node("init_worker", make_init_worker(agent, trace_writer))
+    sg.add_node("agent_step", make_agent_step(agent, llm, tools))
     sg.add_node(
         "tool_step",
-        make_tool_step(worker, tools, approval_policy, trace_writer, audit_repo),
+        make_tool_step(agent, tools, approval_policy, trace_writer, audit_repo),
     )
-    sg.add_node("finalize", make_finalize(worker, trace_writer))
+    sg.add_node("finalize", make_finalize(agent, trace_writer))
 
     # 边
     sg.add_edge(START, "init_worker")
@@ -291,7 +290,7 @@ def make_worker_subgraph(
     sg.add_conditional_edges("agent_step", route_after_agent)
 
     # tool_step → agent_step（未达上限）或 finalize（达上限）
-    max_iter = worker.max_iterations
+    max_iter = agent.max_iterations
 
     def route_after_tool(state: dict) -> str:
         if state.get("iteration", 0) >= max_iter:
@@ -305,7 +304,7 @@ def make_worker_subgraph(
 
 
 def make_worker_node(
-    worker: Worker,
+    agent: Agent,
     llm: BaseChatModel,
     tools: list[BaseTool],
     trace_writer: TraceWriter | None = None,
@@ -317,7 +316,7 @@ def make_worker_node(
     避免子图 reducer 与父图 reducer 双重累积导致重复。
     透传 config 以支持子图内 interrupt/resume（工具级审批）。
     """
-    subgraph = make_worker_subgraph(worker, llm, tools, trace_writer, audit_repo)
+    subgraph = make_worker_subgraph(agent, llm, tools, trace_writer, audit_repo)
 
     # 共享累加器字段：子图不需要读取它们（只用 react_messages 内部通信），
     # 但若传入，子图的 reducer 会累积它们，返回时父图 reducer 再次累积 → 重复。
@@ -336,7 +335,7 @@ def make_worker_node(
 
 
 def make_leader_review_node(
-    leader: Leader, llm: BaseChatModel, trace_writer: TraceWriter | None = None
+    agent: Agent, llm: BaseChatModel, trace_writer: TraceWriter | None = None
 ):
     """创建 leader_review 节点：点评 worker 产出，标记步骤完成，推进 current_step。"""
 
@@ -349,7 +348,7 @@ def make_leader_review_node(
         outputs = state.get("worker_outputs", {})
         review_response = llm.invoke(
             [
-                SystemMessage(content=leader.system_prompt),
+                SystemMessage(content=agent.system_prompt),
                 HumanMessage(
                     content=(
                         f"Worker {worker_name} 完成了步骤 {current}，"
@@ -359,16 +358,16 @@ def make_leader_review_node(
             ]
         )
         if trace_writer:
-            trace_writer.emit(run_id, "leader_review", leader.name)
+            trace_writer.emit(run_id, "leader_review", agent.name)
         usage = getattr(review_response, "usage_metadata", None)
         tokens = usage.get("total_tokens", 0) if usage else 0
         return {
             "plan": plan,
             "current_step": current + 1,
             "messages": [
-                AIMessage(content=f"[Leader] {review_response.content}", name=leader.name)
+                AIMessage(content=f"[Leader] {review_response.content}", name=agent.name)
             ],
-            "audit_events": [{"event_type": "leader_review", "actor": leader.name}],
+            "audit_events": [{"event_type": "leader_review", "actor": agent.name}],
             "total_tokens": tokens,
         }
 
