@@ -152,3 +152,79 @@ def test_cancel_unknown_run_returns_false():
     result = rm.cancel_run("run-nonexistent")
 
     assert result is False
+
+
+def test_handle_error_with_cancelled_error_marks_cancelled():
+    """_handle_error 收到 RunCancelledError 时:标 cancelled + 发 run_cancelled 事件。
+
+    场景:worker agent_step 检测到 cancel event 后抛 RunCancelledError,
+    信号沿调用栈传播到 _run_in_background 的 except,由 _handle_error 收尾。
+    """
+    rm = _make_run_manager()
+    run_id = "run-cancelled-by-worker"
+    # 模拟 start_run 已创建 event(否则 _cleanup_run pop 时 KeyError,虽有 .pop(None) 兜底但仍需设置)
+    rm._cancel_events[run_id] = threading.Event()
+
+    rm._handle_error(run_id, RunCancelledError("Run run-cancelled-by-worker cancelled by user"))
+
+    # 标 cancelled(不是 failed)
+    rm._run_repo.end_run.assert_called_once_with(run_id, "cancelled")
+    # 发 run_cancelled 事件(actor=user,表示用户触发)
+    rm._audit_repo.add_event.assert_called_once_with(run_id, "run_cancelled", "user")
+    # publish 到 EventBus
+    assert rm._bus.publish.called
+    published = rm._bus.publish.call_args[0][1]
+    assert published["event_type"] == "run_cancelled"
+    assert published["run_id"] == run_id
+    # cleanup 被调用(event 已从 _cancel_events 移除)
+    assert run_id not in rm._cancel_events
+
+
+def test_handle_error_with_other_error_marks_failed():
+    """回归保障:普通异常仍标 failed + 发 error 事件(不被 RunCancelledError 逻辑误触)。"""
+    rm = _make_run_manager()
+    run_id = "run-failed-by-bug"
+    rm._cancel_events[run_id] = threading.Event()
+
+    rm._handle_error(run_id, ValueError("something broke"))
+
+    # 标 failed(不是 cancelled)
+    rm._run_repo.end_run.assert_called_once_with(run_id, "failed")
+    # 发 error 事件(actor=system)
+    rm._audit_repo.add_event.assert_called_once_with(
+        run_id, "error", "system", {"error": "something broke"}
+    )
+    # publish error 事件
+    assert rm._bus.publish.called
+    published = rm._bus.publish.call_args[0][1]
+    assert published["event_type"] == "error"
+    assert published["run_id"] == run_id
+    # cleanup 被调用
+    assert run_id not in rm._cancel_events
+
+
+def test_run_in_background_catches_runcancellederror_via_baseexception():
+    """_run_in_background 用 except BaseException 捕获 RunCancelledError。
+
+    场景:graph.invoke 抛 RunCancelledError(BaseException)。
+    若用 except Exception 会漏捕,run 卡 cancelling;
+    改为 except BaseException 后能交给 _handle_error 标 cancelled。
+    """
+    rm = _make_run_manager()
+    run_id = "run-bg-cancelled"
+    rm._cancel_events[run_id] = threading.Event()
+
+    # Fake graph:invoke 抛 RunCancelledError(模拟 worker 检测到 cancel)
+    fake_graph = MagicMock()
+    fake_graph.invoke.side_effect = RunCancelledError("cancelled")
+    fake_graph.get_state.side_effect = RuntimeError("不应到达此处")
+
+    # 直接调用 _run_in_background(不走 start_run 的线程,简化测试)
+    rm._run_in_background(run_id, fake_graph, {}, "task")
+
+    # 应标 cancelled(不是 failed,也不是卡 cancelling)
+    rm._run_repo.end_run.assert_called_once_with(run_id, "cancelled")
+    # add_event 被调用 2 次(run_start + run_cancelled),检查最后一次是 run_cancelled
+    rm._audit_repo.add_event.assert_called_with(run_id, "run_cancelled", "user")
+    # cleanup 被调用
+    assert run_id not in rm._cancel_events

@@ -232,14 +232,14 @@ class RunManager:
             }
             graph.invoke(initial, config)
             self._handle_invoke_result(run_id, graph, config)
-        except Exception as e:
+        except BaseException as e:
             self._handle_error(run_id, e)
 
     def _resume_in_background(self, run_id: str, graph, config: dict, command) -> None:
         try:
             graph.invoke(command, config)
             self._handle_invoke_result(run_id, graph, config)
-        except Exception as e:
+        except BaseException as e:
             self._handle_error(run_id, e)
 
     def _handle_invoke_result(self, run_id: str, graph, config: dict) -> None:
@@ -270,18 +270,33 @@ class RunManager:
             )
             self._cleanup_run(run_id)
 
-    def _handle_error(self, run_id: str, error: Exception) -> None:
-        self._run_repo.end_run(run_id, "failed")
-        eid = self._audit_repo.add_event(
-            run_id, "error", "system", {"error": str(error)}
-        )
-        self._bus.publish(
-            run_id,
-            {
-                "id": eid,
-                "event_type": "error",
-                "run_id": run_id,
-                "payload": {"error": str(error)},
-            },
-        )
+    def _handle_error(self, run_id: str, error: BaseException) -> None:
+        if isinstance(error, RunCancelledError):
+            # 用户取消:标 cancelled + 发 run_cancelled 事件
+            self._run_repo.end_run(run_id, "cancelled")
+            eid = self._audit_repo.add_event(run_id, "run_cancelled", "user")
+            self._bus.publish(
+                run_id,
+                {
+                    "id": eid,
+                    "event_type": "run_cancelled",
+                    "run_id": run_id,
+                    "payload": {"reason": "user requested cancel"},
+                },
+            )
+        else:
+            # 普通异常:沿用 failed 逻辑
+            self._run_repo.end_run(run_id, "failed")
+            eid = self._audit_repo.add_event(
+                run_id, "error", "system", {"error": str(error)}
+            )
+            self._bus.publish(
+                run_id,
+                {
+                    "id": eid,
+                    "event_type": "error",
+                    "run_id": run_id,
+                    "payload": {"error": str(error)},
+                },
+            )
         self._cleanup_run(run_id)
