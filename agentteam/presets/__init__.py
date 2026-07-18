@@ -20,6 +20,7 @@ from typing import Any
 PRESET_REGISTRY: dict[str, str] = {
     "enterprise_dev": "agentteam.presets.enterprise_dev",
     "customer_support": "agentteam.presets.customer_support",
+    "data_analysis": "agentteam.presets.data_analysis",
 }
 
 
