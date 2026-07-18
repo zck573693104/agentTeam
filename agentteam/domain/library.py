@@ -89,6 +89,7 @@ class AgentLibrary:
                 tools=list(agent.tools),
                 max_iterations=agent.max_iterations,
                 ref=None,
+                mcp_servers=list(agent.mcp_servers),
             )
 
         # ref 指向库
@@ -125,6 +126,8 @@ class AgentLibrary:
         if agent.children:
             # 调用处 children 覆盖模板的 children
             resolved.children = list(agent.children)
+        if agent.mcp_servers:
+            resolved.mcp_servers = list(agent.mcp_servers)
         # name 和 role 始终用调用处的（与 name 平行：避免模板 role 静默覆盖
         # 调用处意图，例如 caller 想把 worker 模板实例化为 supervisor）
         resolved.name = agent.name

@@ -241,3 +241,49 @@ def test_resolve_sibling_refs_to_same_library_no_false_positive():
     assert resolved.children[1].system_prompt == "shared template"
     assert resolved.children[0].ref is None
     assert resolved.children[1].ref is None
+
+
+def test_resolve_mcp_servers_from_template():
+    """ref 模式：调用方未传 mcp_servers，保留模板的 mcp_servers。"""
+    from agentteam.domain.mcp_server import MCPServer
+    lib = AgentLibrary()
+    lib.register(Agent(
+        name="code_engineer", role="worker",
+        system_prompt="template",
+        mcp_servers=[MCPServer(name="git", command="git-mcp")],
+    ))
+    caller = Agent(name="eng", role="worker", ref="library:code_engineer")
+    resolved = lib.resolve(caller)
+    assert len(resolved.mcp_servers) == 1
+    assert resolved.mcp_servers[0].name == "git"
+
+
+def test_resolve_mcp_servers_override_from_caller():
+    """ref 模式：调用方传了 mcp_servers，覆盖模板的。"""
+    from agentteam.domain.mcp_server import MCPServer
+    lib = AgentLibrary()
+    lib.register(Agent(
+        name="code_engineer", role="worker",
+        system_prompt="template",
+        mcp_servers=[MCPServer(name="git", command="git-mcp")],
+    ))
+    caller = Agent(
+        name="eng", role="worker", ref="library:code_engineer",
+        mcp_servers=[MCPServer(name="custom", command="custom-mcp")],
+    )
+    resolved = lib.resolve(caller)
+    assert len(resolved.mcp_servers) == 1
+    assert resolved.mcp_servers[0].name == "custom"
+
+
+def test_resolve_no_ref_preserves_mcp_servers():
+    """无 ref 模式：mcp_servers 原样传递。"""
+    from agentteam.domain.mcp_server import MCPServer
+    lib = AgentLibrary()
+    a = Agent(
+        name="w", role="worker",
+        mcp_servers=[MCPServer(name="git", command="git-mcp")],
+    )
+    resolved = lib.resolve(a)
+    assert len(resolved.mcp_servers) == 1
+    assert resolved.mcp_servers[0].name == "git"
