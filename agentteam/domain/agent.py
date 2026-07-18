@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Union
 
 from agentteam.domain.approval import ApprovalPolicy
+from agentteam.domain.mcp_server import MCPServer
 from agentteam.models.provider import ModelRef
 
 
@@ -14,9 +15,13 @@ class TeamRef:
 
     编译时由 TeamCompiler 从 _team_registry 取出目标 Team，
     编译其 root 作为本节点。alias 用于在父 Team 内重命名，防重名。
+
+    mcp_overrides：引用 sub-Team 时追加注册的 MCP 服务（扩展语义，
+    不替换 sub-Team 自身的 mcp_servers）。
     """
     name: str
     alias: str | None = None
+    mcp_overrides: list[MCPServer] = field(default_factory=list)
 
 
 @dataclass
@@ -30,6 +35,9 @@ class Agent:
     - supervisor 必须有 children，tools 必须为空
     - worker 必须无 children，可有 tools
     - ref 与 children 可同时存在：ref 指向库时作为模板，调用处 children 覆盖模板 children
+
+    mcp_servers：本 Agent 级别挂载的 MCP 服务，编译期由 TeamCompiler 注册到
+    ToolRegistry。Worker 在 tools 中用 `mcp:{server.name}:{tool.name}` 引用。
     """
     name: str
     role: Literal["supervisor", "worker"]
@@ -46,3 +54,6 @@ class Agent:
 
     # 专家库引用（解析前填充；解析后由 AgentLibrary.resolve 置空）
     ref: str | None = None  # 格式："library:agent_name"
+
+    # MCP 挂载（任意角色可挂，worker 在 tools 中引用注册后的工具名）
+    mcp_servers: list[MCPServer] = field(default_factory=list)

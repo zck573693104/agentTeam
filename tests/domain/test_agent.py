@@ -71,3 +71,28 @@ def test_agent_with_model():
     m = ModelRef("qwen", "qwen-max")
     a = Agent(name="w", role="worker", model=m)
     assert a.model is m
+
+
+def test_agent_worker_with_mcp_servers():
+    from agentteam.domain.mcp_server import MCPServer
+    server = MCPServer(name="git", command="git-mcp")
+    a = Agent(name="coder", role="worker", mcp_servers=[server])
+    assert len(a.mcp_servers) == 1
+    assert a.mcp_servers[0].name == "git"
+
+
+def test_agent_mcp_servers_defaults_empty():
+    a = Agent(name="w", role="worker")
+    assert a.mcp_servers == []
+
+
+def test_team_ref_with_mcp_overrides():
+    from agentteam.domain.mcp_server import MCPServer
+    server = MCPServer(name="extra", command="extra-mcp")
+    ref = TeamRef(name="sub", alias="qa", mcp_overrides=[server])
+    assert ref.mcp_overrides[0].name == "extra"
+
+
+def test_team_ref_mcp_overrides_defaults_empty():
+    ref = TeamRef(name="sub")
+    assert ref.mcp_overrides == []
