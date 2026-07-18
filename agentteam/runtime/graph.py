@@ -138,6 +138,9 @@ class TeamCompiler:
         agent = self._lib.resolve(agent)
         # 2. 校验
         self._validate(agent, depth, path)
+        # 注册 Agent 级 MCP
+        for server in agent.mcp_servers:
+            self._tr.register_mcp_tools(server)
         # 3. 按 role 分派
         if agent.role == "worker":
             return self._compile_worker(agent, default_model, trace_writer, audit_repo)
@@ -192,6 +195,9 @@ class TeamCompiler:
                     raise ValueError(
                         f"Circular team reference: {path}.{alias}"
                     )
+                # 注册 TeamRef 的 mcp_overrides
+                for server in child.mcp_overrides:
+                    self._tr.register_mcp_tools(server)
                 sub_graph = self._compile_agent(
                     sub_team.root, sub_team.default_model, checkpointer,
                     trace_writer, audit_repo,

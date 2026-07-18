@@ -963,3 +963,81 @@ def test_compile_with_library_ref(fake_llm):
     )
     graph = compiler.compile(team)
     assert graph is not None  # 编译成功
+
+
+def test_compile_registers_agent_mcp_servers():
+    """Worker Agent 的 mcp_servers 在编译期注册到 ToolRegistry。"""
+    from agentteam.domain.agent import Agent
+    from agentteam.domain.mcp_server import MCPServer
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+    from langchain_core.tools import StructuredTool
+
+    def fake_loader(server):
+        return [StructuredTool.from_function(
+            name="git_status", description="git status", func=lambda: "ok")]
+    reg = ToolRegistry(mcp_loader=fake_loader)
+
+    provider = FakeModelProvider({"qwen-max": FakeLLM()})
+    compiler = TeamCompiler(provider, reg)
+    team = Team(
+        name="t", description="d",
+        root=Agent(
+            name="lead", role="supervisor",
+            children=[Agent(
+                name="coder", role="worker",
+                mcp_servers=[MCPServer(name="git", command="git-mcp")],
+                tools=["mcp:git:git_status"],
+            )],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    compiler.compile(team)
+    assert "mcp:git:git_status" in reg.list_names()
+
+
+def test_compile_registers_teamref_mcp_overrides():
+    """TeamRef 的 mcp_overrides 在编译期注册到 ToolRegistry。"""
+    from agentteam.domain.agent import Agent, TeamRef
+    from agentteam.domain.mcp_server import MCPServer
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+    from langchain_core.tools import StructuredTool
+
+    def fake_loader(server):
+        return [StructuredTool.from_function(
+            name="extra_tool", description="extra", func=lambda: "ok")]
+    reg = ToolRegistry(mcp_loader=fake_loader)
+
+    provider = FakeModelProvider({"qwen-max": FakeLLM()})
+    compiler = TeamCompiler(provider, reg)
+
+    sub_team = Team(
+        name="sub", description="sub",
+        root=Agent(
+            name="sub_lead", role="supervisor",
+            children=[Agent(name="w", role="worker")],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    compiler.register_team(sub_team)
+
+    main_team = Team(
+        name="main", description="main",
+        root=Agent(
+            name="lead", role="supervisor",
+            children=[TeamRef(
+                name="sub", alias="qa",
+                mcp_overrides=[MCPServer(name="extra", command="extra-mcp")],
+            )],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    compiler.compile(main_team)
+    assert "mcp:extra:extra_tool" in reg.list_names()
