@@ -14,6 +14,7 @@ from agentteam.api.routes.runs import runs_router
 from agentteam.api.routes.teams import teams_router
 from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
+from agentteam.domain.library import AgentLibrary
 from agentteam.models.provider import ModelProvider
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
@@ -31,6 +32,7 @@ def create_app(
     db_path: str = "data/agentteam.db",
     model_provider: ModelProvider | None = None,
     tool_registry: ToolRegistry | None = None,
+    agent_library: AgentLibrary | None = None,
     web_dist: Path | None | object = _DEFAULT,
 ) -> FastAPI:
     app = FastAPI(title="AgentTeam")
@@ -47,6 +49,7 @@ def create_app(
     run_manager = RunManager(run_repo, audit_repo, event_bus)
     mp = model_provider or ModelProvider()
     tr = tool_registry or ToolRegistry()
+    lib = agent_library or AgentLibrary()
 
     saver = SqliteSaver(conn)
     saver.lock = conn_lock  # 让 SqliteSaver 也用同一把锁
@@ -57,7 +60,7 @@ def create_app(
     app.include_router(
         runs_router(
             run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,
-            checkpointer=saver,
+            checkpointer=saver, agent_library=lib,
         )
     )
     app.include_router(dashboard_router(run_repo, audit_repo))

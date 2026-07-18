@@ -12,6 +12,7 @@ from sse_starlette.sse import EventSourceResponse
 from agentteam.api.events import BroadcastTraceWriter, EventBus
 from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
+from agentteam.domain.library import AgentLibrary
 from agentteam.models.provider import ModelProvider
 from agentteam.runtime.graph import TeamCompiler
 from agentteam.storage.audit import AuditRepo
@@ -48,8 +49,10 @@ def runs_router(
     audit_repo: AuditRepo,
     event_bus: EventBus,
     checkpointer=None,
+    agent_library: AgentLibrary | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/runs", tags=["runs"])
+    lib = agent_library or AgentLibrary()
 
     @router.post("")
     def create_run(req: CreateRunRequest):
@@ -60,7 +63,10 @@ def runs_router(
         run_id = run_repo.create_run(team.name, req.task)
 
         trace_writer = BroadcastTraceWriter(audit_repo, event_bus)
-        compiler = TeamCompiler(model_provider, tool_registry)
+        compiler = TeamCompiler(model_provider, tool_registry, library=lib)
+        # 注册所有已知 Team 到 compiler._team_registry，使 TeamRef 可解析
+        for t in team_store.list_all():
+            compiler.register_team(t)
         try:
             graph = compiler.compile(
                 team,
