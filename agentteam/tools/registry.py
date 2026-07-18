@@ -64,7 +64,14 @@ class ToolRegistry:
 
         BUG-06:loader 调用本身不幂等(default_mcp_loader 会 spawn npx
         子进程),仅靠工具名检查无法避免子进程泄漏。此处用 _loaded_servers
-        缓存 server.name,二次调用直接跳过 loader,返回已注册的工具名。
+        缓存配置 tuple(见 _server_cache_key),二次调用直接跳过 loader,
+        返回已注册的工具名。
+
+        SP6-P2 / BUG-12 修正:cache key 用 (name, command, args, transport,
+        url) tuple,而非 server.name。同名但配置不同的 server 各自独立缓存,
+        避免第二个同名 server 被错误跳过 loader 导致工具漏注册。工具名前缀
+        仍用 mcp:{server.name}:,因此同名不同配置的 server 注册的同名工具
+        会冲突(第二个被跳过),用户若需多实例应改 server.name。
 
         已知限制(BUG-12,本次不深入修复):default_mcp_loader 内部用
         asyncio.run 创建短命 event loop,loop 关闭后返回的 BaseTool 持有
@@ -74,16 +81,20 @@ class ToolRegistry:
         """
         from agentteam.tools.mcp import default_mcp_loader
 
-        # BUG-06:已加载的 server 直接跳过 loader 调用,避免重复 spawn 子进程。
+        # BUG-06 / SP6-P2:已加载的 server 直接跳过 loader 调用,避免重复 spawn
+        # 子进程。cache key 用 (name, command, args, transport, url) tuple,
+        # 同名不同配置的 server 各自独立缓存(BUG-12 修复)。
         # 返回已注册的工具名(保持幂等语义,调用方仍能拿到工具列表)。
-        if server.name in self._loaded_servers:
+        key = _server_cache_key(server)
+        if key in self._loaded_servers:
             prefix = f"mcp:{server.name}:"
             return [name for name in self._tools if name.startswith(prefix)]
 
         loader = self._mcp_loader or default_mcp_loader
         tools = loader(server)
         # 仅在 loader 调用成功(未抛异常)后才缓存,失败时不加入 → 允许重试
-        self._loaded_servers.add(server.name)
+        # SP6-P2:cache key 用配置 tuple,而非 server.name
+        self._loaded_servers.add(key)
         registered = []
         for tool in tools:
             tool.name = f"mcp:{server.name}:{tool.name}"
