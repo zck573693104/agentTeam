@@ -208,3 +208,85 @@ def test_team_from_dict_legacy_schema_still_works():
     # 兼容 property
     assert team.leader.name == "tech_lead"
     assert team.workers[0].name == "coder"
+
+
+def test_agent_to_dict_includes_mcp_servers():
+    from agentteam.domain.agent import Agent
+    from agentteam.domain.mcp_server import MCPServer
+    from agentteam.api.serializer import _agent_to_dict
+    a = Agent(
+        name="w", role="worker",
+        mcp_servers=[MCPServer(name="git", command="git-mcp")],
+    )
+    d = _agent_to_dict(a)
+    assert "mcp_servers" in d
+    assert len(d["mcp_servers"]) == 1
+    assert d["mcp_servers"][0]["name"] == "git"
+
+
+def test_agent_from_dict_parses_mcp_servers():
+    from agentteam.domain.agent import Agent
+    from agentteam.api.serializer import _agent_from_dict
+    d = {
+        "name": "w", "role": "worker",
+        "mcp_servers": [{"name": "git", "command": "git-mcp", "args": [], "env": {}, "transport": "stdio", "url": None}],
+    }
+    a = _agent_from_dict(d)
+    assert len(a.mcp_servers) == 1
+    assert a.mcp_servers[0].name == "git"
+
+
+def test_teamref_to_dict_includes_mcp_overrides():
+    from agentteam.domain.agent import Agent, TeamRef
+    from agentteam.domain.mcp_server import MCPServer
+    from agentteam.api.serializer import _agent_to_dict
+    parent = Agent(
+        name="lead", role="supervisor",
+        children=[TeamRef(name="sub", alias="qa",
+                          mcp_overrides=[MCPServer(name="extra", command="x")])],
+    )
+    d = _agent_to_dict(parent)
+    child = d["children"][0]
+    assert child["_type"] == "TeamRef"
+    assert "mcp_overrides" in child
+    assert child["mcp_overrides"][0]["name"] == "extra"
+
+
+def test_teamref_from_dict_parses_mcp_overrides():
+    from agentteam.domain.agent import TeamRef
+    from agentteam.api.serializer import _agent_from_dict
+    d = {
+        "name": "lead", "role": "supervisor",
+        "children": [{
+            "_type": "TeamRef", "name": "sub", "alias": "qa",
+            "mcp_overrides": [{"name": "extra", "command": "x", "args": [], "env": {}, "transport": "stdio", "url": None}],
+        }],
+    }
+    a = _agent_from_dict(d)
+    ref = a.children[0]
+    assert isinstance(ref, TeamRef)
+    assert len(ref.mcp_overrides) == 1
+    assert ref.mcp_overrides[0].name == "extra"
+
+
+def test_team_to_dict_roundtrip_with_mcp():
+    from agentteam.domain.agent import Agent
+    from agentteam.domain.mcp_server import MCPServer
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.api.serializer import team_to_dict, team_from_dict
+    team = Team(
+        name="t", description="d",
+        root=Agent(
+            name="lead", role="supervisor",
+            children=[Agent(
+                name="coder", role="worker",
+                mcp_servers=[MCPServer(name="git", command="git-mcp")],
+            )],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    d = team_to_dict(team)
+    team2 = team_from_dict(d)
+    assert len(team2.root.children[0].mcp_servers) == 1
+    assert team2.root.children[0].mcp_servers[0].name == "git"

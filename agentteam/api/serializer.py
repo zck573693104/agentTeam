@@ -76,7 +76,11 @@ def _agent_from_dict(d: dict) -> Agent:
     children: list[Agent | TeamRef] = []
     for c in d.get("children", []):
         if c.get("_type") == "TeamRef":
-            children.append(TeamRef(name=c["name"], alias=c.get("alias")))
+            children.append(TeamRef(
+                name=c["name"],
+                alias=c.get("alias"),
+                mcp_overrides=[_mcp_server_from_dict(s) for s in c.get("mcp_overrides", [])],
+            ))
         else:
             children.append(_agent_from_dict(c))
     return Agent(
@@ -89,6 +93,7 @@ def _agent_from_dict(d: dict) -> Agent:
         tools=d.get("tools", []),
         max_iterations=d.get("max_iterations", 10),
         ref=d.get("ref"),
+        mcp_servers=[_mcp_server_from_dict(s) for s in d.get("mcp_servers", [])],
     )
 
 
@@ -96,7 +101,12 @@ def _agent_to_dict(agent: Agent) -> dict:
     children = []
     for c in agent.children:
         if isinstance(c, TeamRef):
-            children.append({"_type": "TeamRef", "name": c.name, "alias": c.alias})
+            children.append({
+                "_type": "TeamRef",
+                "name": c.name,
+                "alias": c.alias,
+                "mcp_overrides": [asdict(s) for s in c.mcp_overrides],
+            })
         else:
             children.append(_agent_to_dict(c))
     return {
@@ -109,6 +119,7 @@ def _agent_to_dict(agent: Agent) -> dict:
         "tools": list(agent.tools),
         "max_iterations": agent.max_iterations,
         "ref": agent.ref,
+        "mcp_servers": [asdict(s) for s in agent.mcp_servers],
     }
 
 
