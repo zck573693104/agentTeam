@@ -233,6 +233,8 @@ class RunManager:
             graph.invoke(initial, config)
             self._handle_invoke_result(run_id, graph, config)
         except BaseException as e:
+            # 必须用 BaseException 而非 Exception:RunCancelledError 继承 BaseException
+            # 以绕过 worker 内部 except Exception 吞没,改回 Exception 会静默破坏取消机制
             self._handle_error(run_id, e)
 
     def _resume_in_background(self, run_id: str, graph, config: dict, command) -> None:
@@ -240,6 +242,8 @@ class RunManager:
             graph.invoke(command, config)
             self._handle_invoke_result(run_id, graph, config)
         except BaseException as e:
+            # 必须用 BaseException 而非 Exception:RunCancelledError 继承 BaseException
+            # 以绕过 worker 内部 except Exception 吞没,改回 Exception 会静默破坏取消机制
             self._handle_error(run_id, e)
 
     def _handle_invoke_result(self, run_id: str, graph, config: dict) -> None:
@@ -271,6 +275,15 @@ class RunManager:
             self._cleanup_run(run_id)
 
     def _handle_error(self, run_id: str, error: BaseException) -> None:
+        """统一处理 run 执行中的异常,根据异常类型标记终态并发布事件。
+
+        分支:
+        - RunCancelledError: 标 cancelled + 发 run_cancelled 事件(worker 检测到
+          cancel event 后抛出,代表用户主动取消)
+        - 其他异常: 标 failed + 发 error 事件(程序错误/LLM 异常等)
+
+        两种分支都调用 _cleanup_run 释放 graph/config/threads/cancel_event 内存。
+        """
         if isinstance(error, RunCancelledError):
             # 用户取消:标 cancelled + 发 run_cancelled 事件
             self._run_repo.end_run(run_id, "cancelled")
