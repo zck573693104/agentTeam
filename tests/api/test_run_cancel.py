@@ -330,3 +330,162 @@ def test_worker_node_passes_run_manager_to_agent_step():
 
     with pytest.raises(RunCancelledError):
         worker_node(state)
+
+
+def _build_app_with_run_manager(tmp_path):
+    """手动创建 app 并暴露 run_manager,便于注入 blocking graph / monkey-patch。
+
+    沿用 tests/api/test_api_approvals_robustness.py 的模式。
+    """
+    conn = init_db(tmp_path / "test.db")
+    conn_lock = threading.Lock()
+    run_repo = RunRepo(conn, lock=conn_lock)
+    audit_repo = AuditRepo(conn, lock=conn_lock)
+    team_store = TeamStore()
+    event_bus = EventBus()
+    run_manager = RunManager(run_repo, audit_repo, event_bus)
+    provider = make_provider_with_plan()
+    tr = ToolRegistry()
+    saver = SqliteSaver(conn)
+    saver.lock = conn_lock
+    saver.setup()
+
+    app = FastAPI()
+    app.include_router(teams_router(team_store))
+    app.include_router(
+        runs_router(
+            run_manager, team_store, provider, tr, run_repo, audit_repo, event_bus,
+            checkpointer=saver,
+        )
+    )
+    return app, run_manager, run_repo, audit_repo, event_bus, conn
+
+
+class _BlockingGraph:
+    """Fake graph:invoke 阻塞直到 release event 被 set,模拟长 run。
+
+    用于 cancel endpoint 测试:让 run 卡在 running 状态,等 cancel 信号。
+    """
+
+    def __init__(self):
+        self.release = threading.Event()
+        self.invoked = threading.Event()
+
+    def invoke(self, input, config=None):
+        self.invoked.set()
+        # 阻塞直到测试 release,模拟长 LLM 调用
+        self.release.wait(timeout=10)
+        return {}
+
+    def get_state(self, config):
+        # 释放后返回"已完成"状态(测试不依赖此,仅为避免 _handle_invoke_result 抛异常)
+        class _State:
+            next = None
+            values = {"total_tokens": 0}
+        return _State()
+
+
+def test_cancel_endpoint_unknown_run_returns_404(tmp_path):
+    """未知 run_id 调 cancel 返回 404。"""
+    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(tmp_path)
+    client = TestClient(app)
+
+    resp = client.post("/api/runs/nonexistent-run/cancel")
+    assert resp.status_code == 404
+
+    conn.close()
+
+
+def test_cancel_endpoint_completed_run_returns_400(tmp_path):
+    """已完成(completed)的 run 调 cancel 返回 400。"""
+    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(tmp_path)
+    client = TestClient(app)
+
+    # 创建一个会快速完成的 run(无审批,FakeLLM 立即响应)
+    client.post("/api/teams", json=make_team_json())
+    resp = client.post("/api/runs", json={"team_name": "dev", "task": "small task"})
+    run_id = resp.json()["run_id"]
+    status = _wait_for_run(client, run_id)
+    assert status == "completed", f"setup 失败:run 未完成(实际 {status})"
+
+    cancel_resp = client.post(f"/api/runs/{run_id}/cancel")
+    assert cancel_resp.status_code == 400
+    assert "completed" in cancel_resp.json()["detail"]
+
+    conn.close()
+
+
+def test_cancel_endpoint_running_run_returns_ok(tmp_path):
+    """running run 调 cancel 返回 200 + status 变为 cancelling。
+
+    用 _BlockingGraph 让 run 卡在 running 状态,等 cancel 信号。
+    """
+    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(tmp_path)
+    client = TestClient(app)
+
+    client.post("/api/teams", json=make_team_json())
+
+    # Patch start_run:用 _BlockingGraph 替换真实 graph,使 run 卡在 running
+    blocking_graph = _BlockingGraph()
+    original_start_run = run_manager.start_run
+
+    def patched_start_run(run_id, graph, config, task):
+        original_start_run(run_id, blocking_graph, config, task)
+
+    run_manager.start_run = patched_start_run  # type: ignore[assignment]
+
+    run_id = None
+    try:
+        resp = client.post("/api/runs", json={"team_name": "dev", "task": "long task"})
+        run_id = resp.json()["run_id"]
+
+        # 等 graph.invoke 被调用(确认 run 已进入 running)
+        assert blocking_graph.invoked.wait(timeout=5), "graph.invoke 未被调用"
+
+        cancel_resp = client.post(f"/api/runs/{run_id}/cancel")
+        assert cancel_resp.status_code == 200
+        assert cancel_resp.json() == {"ok": True}
+
+        # status 应为 cancelling(running → cancelling)
+        run = client.get(f"/api/runs/{run_id}").json()
+        assert run["status"] == "cancelling"
+    finally:
+        # 释放 blocking graph 让后台线程退出,避免线程泄漏
+        blocking_graph.release.set()
+        run_manager.start_run = original_start_run  # type: ignore[assignment]
+        if run_id is not None:
+            run_manager.wait(run_id, timeout=2)
+
+    conn.close()
+
+
+def test_cancel_endpoint_emits_run_cancelled_event_for_interrupted(tmp_path):
+    """interrupted run 调 cancel:返回 200 + status 变 cancelled + trace 含 run_cancelled 事件。
+
+    interrupted 走简化路径(直接 end_run,无需 worker 检测)。
+    """
+    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(tmp_path)
+    client = TestClient(app)
+
+    # 创建带 step 审批的 team,使 run 进入 interrupted 状态
+    client.post("/api/teams", json=make_team_json(with_approval=True))
+    resp = client.post("/api/runs", json={"team_name": "dev", "task": "cancel test"})
+    run_id = resp.json()["run_id"]
+    status = _wait_for_run(client, run_id)
+    assert status == "interrupted", f"setup 失败:run 未到 interrupted(实际 {status})"
+
+    cancel_resp = client.post(f"/api/runs/{run_id}/cancel")
+    assert cancel_resp.status_code == 200
+    assert cancel_resp.json() == {"ok": True}
+
+    # status 应为 cancelled(interrupted → cancelled,直接结束)
+    run = client.get(f"/api/runs/{run_id}").json()
+    assert run["status"] == "cancelled"
+
+    # trace 应含 run_cancelled 事件
+    trace = client.get(f"/api/runs/{run_id}/trace").json()
+    cancel_events = [e for e in trace if e["event_type"] == "run_cancelled"]
+    assert len(cancel_events) == 1, f"应有 1 个 run_cancelled 事件,实际 {len(cancel_events)}"
+    assert cancel_events[0]["actor"] == "user"
+
+    conn.close()

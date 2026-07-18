@@ -293,4 +293,22 @@ def runs_router(
             raise HTTPException(status_code=status_code, detail=str(e))
         return {"ok": True}
 
+    @router.post("/{run_id}/cancel")
+    def cancel_run(run_id: str):
+        run = run_repo.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+        if run["status"] not in ("running", "interrupted"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot cancel run in status: {run['status']}",
+            )
+        if not run_manager.cancel_run(run_id):
+            # cancel_run 返回 False:run 不在可取消状态(并发竞态:已被其他请求取消/结束)
+            raise HTTPException(
+                status_code=409,
+                detail="Run not active or already cancelled",
+            )
+        return {"ok": True}
+
     return router
