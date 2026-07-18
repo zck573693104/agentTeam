@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
@@ -12,16 +14,37 @@ from agentteam.runtime.trace import TraceWriter
 
 
 class PlanStep(BaseModel):
-    """计划中的一步：指派给某 worker 的子任务。"""
+    """计划中的一步：指派给某 worker 的子任务。
+
+    dag 模式下:
+    - id: 唯一标识(空=用 worker 名作 id),用于 depends_on 引用
+    - depends_on: 依赖的 step id 列表(空=可立即执行)
+    - condition: Python 表达式,求值 False 则跳过此步(None=不评估)
+    """
 
     worker: str = Field(description="执行此步的 worker name")
     instruction: str = Field(description="子任务描述")
+    id: str = Field(default="", description="唯一 id(空=用 worker 名)")
+    depends_on: list[str] = Field(
+        default_factory=list, description="依赖的 step id 列表"
+    )
+    condition: str | None = Field(
+        default=None, description="Python 表达式,求值 False 则跳过"
+    )
 
 
 class Plan(BaseModel):
-    """Leader 拆解出的执行计划。"""
+    """Leader 拆解出的执行计划。
 
-    steps: list[PlanStep] = Field(description="按顺序执行的步骤列表")
+    execution_mode:
+    - sequential(默认): 沿用 current_step 线性推进,向后兼容
+    - dag: 用 completed_steps/skipped_steps + 拓扑排序并行触发
+    """
+
+    steps: list[PlanStep] = Field(description="按顺序或 DAG 执行的步骤列表")
+    execution_mode: Literal["sequential", "dag"] = Field(
+        default="sequential", description="执行模式"
+    )
 
 
 def make_leader_plan_node(
