@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from agentteam.api.events import EventBus
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.runs import RunRepo
+
+if TYPE_CHECKING:
+    from agentteam.domain.team import Team
+    from agentteam.runtime.graph import TeamCompiler
 
 
 class RunManager:
@@ -17,14 +21,30 @@ class RunManager:
     - run 执行与 SSE 连接解耦
     """
 
-    def __init__(self, run_repo: RunRepo, audit_repo: AuditRepo, event_bus: EventBus) -> None:
+    def __init__(
+        self,
+        run_repo: RunRepo,
+        audit_repo: AuditRepo,
+        event_bus: EventBus,
+        checkpointer=None,
+    ) -> None:
         self._run_repo = run_repo
         self._audit_repo = audit_repo
         self._bus = event_bus
+        self._saver = checkpointer
         self._graphs: dict[str, Any] = {}
         self._configs: dict[str, dict] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
+
+    def has_graph(self, run_id: str) -> bool:
+        """返回 run_id 是否有内存态 graph。
+
+        供 approve_run 判断走 fast path(resume_run)还是 lazy recompile 路径。
+        服务重启后 _graphs 清空,has_graph 返回 False → 触发 recompile。
+        """
+        with self._lock:
+            return run_id in self._graphs
 
     def start_run(self, run_id: str, graph, config: dict, task: str) -> None:
         """在后台线程中跑 graph.invoke()，立即返回。"""

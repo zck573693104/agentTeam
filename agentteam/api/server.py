@@ -63,15 +63,16 @@ def create_app(
     library_repo = LibraryRepo(conn, lock=conn_lock)
     team_store = TeamStore(repo=team_repo)
     event_bus = EventBus()
-    run_manager = RunManager(run_repo, audit_repo, event_bus)
-    mp = model_provider or ModelProvider()
-    tr = tool_registry or ToolRegistry()
-    lib = agent_library or AgentLibrary(repo=library_repo)
 
     saver = SqliteSaver(conn)
     saver.lock = conn_lock  # 让 SqliteSaver 也用同一把锁
     assert saver.lock is conn_lock  # 防御：若 langgraph 改名 lock 属性则静默失效
     saver.setup()
+
+    run_manager = RunManager(run_repo, audit_repo, event_bus, checkpointer=saver)
+    mp = model_provider or ModelProvider()
+    tr = tool_registry or ToolRegistry()
+    lib = agent_library or AgentLibrary(repo=library_repo)
 
     app.include_router(teams_router(team_store))
     app.include_router(
