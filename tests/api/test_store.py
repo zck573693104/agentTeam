@@ -121,3 +121,55 @@ def test_team_store_no_repo_is_in_memory_only(tmp_path):
     # 新 store 无 DB,模拟重启 —— 数据应丢失
     store2 = TeamStore()
     assert store2.get("dev") is None
+
+
+def test_team_store_update_existing():
+    """TeamStore.update 覆盖已存在 team,返回 True。"""
+    store = TeamStore()
+    store.register(_make_team("dev"))
+    team2 = _make_team("dev")
+    team2.description = "updated"
+    assert store.update(team2) is True
+    assert store.get("dev").description == "updated"
+
+
+def test_team_store_update_missing_returns_false():
+    """TeamStore.update 不存在返回 False(不创建)。"""
+    store = TeamStore()
+    assert store.update(_make_team("nonexistent")) is False
+    assert store.get("nonexistent") is None
+
+
+def test_team_store_reload_from_db_no_repo_returns_zero():
+    """无 repo 时 reload_from_db 返回 0(no-op)。"""
+    store = TeamStore()
+    store.register(_make_team("dev"))
+    assert store.reload_from_db() == 0
+    # 内存数据保留
+    assert store.get("dev") is not None
+
+
+def test_team_store_reload_from_db_with_repo(tmp_path):
+    """DB-backed 模式: reload_from_db 从 DB 重载。"""
+    import sqlite3
+    from agentteam.storage.db import init_db
+    from agentteam.storage.teams import TeamRepo
+
+    db_path = tmp_path / "test.db"
+    conn = init_db(db_path)
+    repo = TeamRepo(conn)
+    store = TeamStore(repo=repo)
+    store.register(_make_team("dev"))
+
+    # 外部直接修改 DB
+    external_team = _make_team("dev")
+    external_team.description = "externally_updated"
+    repo.upsert(external_team)
+    # 内存仍是旧值
+    assert store.get("dev").description == "test"
+
+    # reload 后内存刷新
+    count = store.reload_from_db()
+    assert count == 1
+    assert store.get("dev").description == "externally_updated"
+    conn.close()

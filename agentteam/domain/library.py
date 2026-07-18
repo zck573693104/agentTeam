@@ -65,6 +65,34 @@ class AgentLibrary:
     def get(self, name: str) -> Agent | None:
         return self.agents.get(name)
 
+    def delete(self, name: str) -> bool:
+        """删除库中 agent。不存在返回 False(不抛错)。同步删除 DB。"""
+        if name not in self.agents:
+            return False
+        del self.agents[name]
+        if self._repo is not None:
+            self._repo.delete(name)
+        return True
+
+    def update(self, agent: Agent) -> bool:
+        """更新库中 agent(覆盖)。不存在返回 False(不创建)。同步 DB。"""
+        if agent.name not in self.agents:
+            return False
+        self.agents[agent.name] = agent
+        if self._repo is not None:
+            self._repo.upsert(agent)
+        return True
+
+    def reload_from_db(self) -> int:
+        """从 DB 重新加载所有 agents 到内存。返回加载数量。
+
+        无 repo 时返回 0(no-op,内存数据保留)。
+        """
+        if self._repo is None:
+            return 0
+        self.agents = {a.name: a for a in self._repo.list_all()}
+        return len(self.agents)
+
     def resolve(self, agent: Agent, _visited: list[str] | None = None) -> Agent:
         """递归解析 agent.ref，深拷贝库定义并由调用处非空字段覆盖。
 

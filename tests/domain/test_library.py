@@ -369,3 +369,66 @@ def test_library_no_repo_is_in_memory_only():
     # 新 lib 无 DB,模拟重启 —— 数据应丢失
     lib2 = AgentLibrary()
     assert lib2.get("coder") is None
+
+
+def test_library_delete_existing():
+    """AgentLibrary.delete 删除已存在 agent,返回 True。"""
+    lib = AgentLibrary()
+    lib.register(Agent(name="coder", role="worker"))
+    assert lib.delete("coder") is True
+    assert lib.get("coder") is None
+
+
+def test_library_delete_missing_returns_false():
+    """AgentLibrary.delete 不存在返回 False(不抛错)。"""
+    lib = AgentLibrary()
+    assert lib.delete("nonexistent") is False
+
+
+def test_library_update_existing():
+    """AgentLibrary.update 覆盖已存在 agent,返回 True。"""
+    lib = AgentLibrary()
+    lib.register(Agent(name="coder", role="worker", system_prompt="v1"))
+    updated = Agent(name="coder", role="worker", system_prompt="v2")
+    assert lib.update(updated) is True
+    assert lib.get("coder").system_prompt == "v2"
+
+
+def test_library_update_missing_returns_false():
+    """AgentLibrary.update 不存在返回 False(不创建)。"""
+    lib = AgentLibrary()
+    assert lib.update(Agent(name="nonexistent", role="worker")) is False
+    assert lib.get("nonexistent") is None
+
+
+def test_library_reload_from_db_no_repo_returns_zero():
+    """无 repo 时 reload_from_db 返回 0(no-op)。"""
+    lib = AgentLibrary()
+    lib.register(Agent(name="coder", role="worker"))
+    assert lib.reload_from_db() == 0
+    # 内存数据保留(未被清空)
+    assert lib.get("coder") is not None
+
+
+def test_library_reload_from_db_with_repo(tmp_path):
+    """DB-backed 模式: reload_from_db 从 DB 重载,外部 DB 编辑生效。"""
+    import sqlite3
+    from agentteam.storage.db import init_db
+    from agentteam.storage.library import LibraryRepo
+
+    db_path = tmp_path / "test.db"
+    conn = init_db(db_path)
+    repo = LibraryRepo(conn)
+    lib = AgentLibrary(repo=repo)
+    lib.register(Agent(name="coder", role="worker", system_prompt="v1"))
+
+    # 外部直接修改 DB(模拟 DBA 操作)
+    repo.upsert(Agent(name="coder", role="worker", system_prompt="externally_updated"))
+    # 内存仍是旧值
+    assert lib.get("coder").system_prompt == "v1"
+
+    # reload 后内存刷新
+    count = lib.reload_from_db()
+    assert count == 1
+    assert lib.get("coder").system_prompt == "externally_updated"
+    conn.close()

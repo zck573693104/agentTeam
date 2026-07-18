@@ -40,3 +40,22 @@ class TeamStore:
         if self._repo is not None:
             self._repo.delete(name)
         return True
+
+    def update(self, team: Team) -> bool:
+        """更新已存在的 team。不存在返回 False(不创建)。同步 DB。"""
+        if team.name not in self._cache:
+            return False
+        self._cache[team.name] = team
+        if self._repo is not None:
+            self._repo.upsert(team)
+        return True
+
+    def reload_from_db(self) -> int:
+        """从 DB 重新加载所有 teams 到内存缓存。返回加载数量。
+
+        无 repo 时返回 0(no-op,内存数据保留)。
+        """
+        if self._repo is None:
+            return 0
+        self._cache = {t.name: t for t in self._repo.list_all()}
+        return len(self._cache)
