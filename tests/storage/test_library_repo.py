@@ -46,3 +46,49 @@ def test_library_repo_get_missing_returns_none(tmp_db: sqlite3.Connection):
 
     repo = LibraryRepo(tmp_db)
     assert repo.get("nonexistent") is None
+
+
+def test_library_repo_list_all(tmp_db: sqlite3.Connection):
+    from agentteam.storage.library import LibraryRepo
+
+    repo = LibraryRepo(tmp_db)
+    repo.upsert(_make_agent("a"))
+    repo.upsert(_make_agent("b"))
+    agents = repo.list_all()
+    names = sorted(a.name for a in agents)
+    assert names == ["a", "b"]
+
+
+def test_library_repo_list_all_empty(tmp_db: sqlite3.Connection):
+    from agentteam.storage.library import LibraryRepo
+
+    repo = LibraryRepo(tmp_db)
+    assert repo.list_all() == []
+
+
+def test_library_repo_delete_existing(tmp_db: sqlite3.Connection):
+    from agentteam.storage.library import LibraryRepo
+
+    repo = LibraryRepo(tmp_db)
+    repo.upsert(_make_agent("coder"))
+    assert repo.delete("coder") is True
+    assert repo.get("coder") is None
+
+
+def test_library_repo_delete_missing_returns_false(tmp_db: sqlite3.Connection):
+    from agentteam.storage.library import LibraryRepo
+
+    repo = LibraryRepo(tmp_db)
+    assert repo.delete("nonexistent") is False
+
+
+def test_library_repo_upsert_overwrites(tmp_db: sqlite3.Connection):
+    from agentteam.storage.library import LibraryRepo
+
+    repo = LibraryRepo(tmp_db)
+    repo.upsert(_make_agent("coder"))
+    agent2 = _make_agent("coder")
+    agent2.system_prompt = "updated prompt"
+    repo.upsert(agent2)
+    got = repo.get("coder")
+    assert got.system_prompt == "updated prompt"

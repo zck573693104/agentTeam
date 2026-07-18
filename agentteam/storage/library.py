@@ -49,3 +49,17 @@ class LibraryRepo:
         if row is None:
             return None
         return _agent_from_dict(json.loads(row["config"]))
+
+    def list_all(self) -> list[Agent]:
+        """SELECT all,反序列化为 Agent 列表。"""
+        with self._lock:
+            cur = self._conn.execute("SELECT config FROM library_agents ORDER BY name")
+            rows = cur.fetchall()
+        return [_agent_from_dict(json.loads(r["config"])) for r in rows]
+
+    def delete(self, name: str) -> bool:
+        """DELETE,返回是否删除成功。"""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM library_agents WHERE name = ?", (name,))
+            self._conn.commit()
+            return cur.rowcount > 0
