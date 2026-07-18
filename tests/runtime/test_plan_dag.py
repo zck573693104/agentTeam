@@ -213,7 +213,6 @@ def test_eval_condition_reads_state_fields():
 
 def test_leader_plan_dag_mode_initializes_completed_steps(fake_llm):
     """leader_plan dag 模式:初始化 completed_steps/skipped_steps 为空 set,不写 current_step。"""
-    from langchain_core.messages import AIMessage
     from agentteam.domain.team import Leader
     from agentteam.runtime.nodes import make_leader_plan_node
 
@@ -444,3 +443,45 @@ def test_finalize_sequential_mode_no_completed_steps(fake_llm):
     # sequential 模式不回传 completed_steps
     assert "completed_steps" not in result
     assert result["worker_outputs"] == {"w1": "done"}
+
+
+def test_init_worker_dag_mode_raises_when_no_ready_step(fake_llm):
+    """init_worker dag 模式:本 worker 无 ready step(不在 plan 或全部 completed) → 抛 ValueError。"""
+    import pytest
+    from agentteam.domain.worker import Worker
+    from agentteam.runtime.nodes import make_init_worker
+
+    worker = Worker(name="orphan", role="r", description="", system_prompt="test")
+    node = make_init_worker(worker)
+    state = {
+        "plan": [
+            {"worker": "a", "instruction": "do A", "id": "step_a", "depends_on": []},
+        ],
+        "execution_mode": "dag",
+        "completed_steps": set(),
+        "skipped_steps": set(),
+        "run_id": "r1",
+    }
+    with pytest.raises(ValueError, match="no ready step"):
+        node(state)
+
+
+def test_leader_plan_dag_mode_detects_duplicate_ids_raises(fake_llm):
+    """leader_plan dag 模式:LLM 对同一 worker 产多步且无显式 id → id 冲突抛 ValueError。"""
+    import pytest
+    from agentteam.domain.team import Leader
+    from agentteam.runtime.nodes import make_leader_plan_node
+
+    plan = Plan(
+        execution_mode="dag",
+        steps=[
+            PlanStep(worker="a", instruction="do A first"),  # id 默认为 "a"
+            PlanStep(worker="a", instruction="do A again"),  # id 又是 "a" → 冲突
+        ],
+    )
+    fake_llm.set_structured_responses([plan])
+    leader = Leader(system_prompt="你是主管")
+    node = make_leader_plan_node(leader, fake_llm)
+
+    with pytest.raises(ValueError, match="duplicate step ids"):
+        node({"task": "bad dag", "messages": []})

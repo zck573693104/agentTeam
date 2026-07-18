@@ -85,6 +85,16 @@ def make_leader_plan_node(
             for s in plan_obj.steps
         ]
 
+        # dag 模式:校验 step id 唯一性(避免 LLM 对同一 worker 产多步导致 id 冲突)
+        if execution_mode == "dag":
+            ids = [s["id"] for s in plan]
+            duplicates = {sid for sid in ids if ids.count(sid) > 1}
+            if duplicates:
+                raise ValueError(
+                    f"Plan has duplicate step ids in dag mode: {sorted(duplicates)}. "
+                    f"Use explicit unique 'id' for steps sharing the same worker."
+                )
+
         # dag 模式:检测循环依赖
         if execution_mode == "dag" and _detect_dag_cycle(plan):
             raise ValueError(
@@ -135,7 +145,7 @@ def make_init_worker(
             completed = state.get("completed_steps", set())
             skipped = state.get("skipped_steps", set())
             current_step_id = ""
-            instruction = state.get("task", "")  # 兜底
+            instruction = None
             for step in plan:
                 sid = step.get("id") or step.get("worker")
                 if sid in completed or sid in skipped:
@@ -144,6 +154,12 @@ def make_init_worker(
                     current_step_id = sid
                     instruction = step["instruction"]
                     break
+            if instruction is None or not current_step_id:
+                raise ValueError(
+                    f"Worker {agent.name} has no ready step in plan "
+                    f"(completed={sorted(completed)}, skipped={sorted(skipped)}). "
+                    f"Router should not dispatch idle workers."
+                )
         else:
             # sequential 模式:沿用 current_step
             step = state["plan"][state["current_step"]]
