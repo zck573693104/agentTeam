@@ -20,6 +20,11 @@ def teams_router(store: TeamStore) -> APIRouter:
             team = team_from_dict(body)
         except (KeyError, TypeError) as e:
             raise HTTPException(status_code=422, detail=f"Invalid team JSON: {e}")
+        if store.get(team.name) is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Team already exists: {team.name}",
+            )
         store.register(team)
         return {"name": team.name}
 
