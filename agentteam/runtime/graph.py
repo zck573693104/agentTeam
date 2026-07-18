@@ -208,7 +208,8 @@ def make_route_unified(child_targets: dict[str, str]):
 def make_route_unified_to_worker(child_targets: dict[str, str]):
     """统一路由(带拒绝检查): 拒绝->END, 否则按 execution_mode 分派。
 
-    用于 step_gate 之后:sequential 用 make_route_to_worker,dag 用 dag_router。
+    用于 step_gate 之后:sequential 用 make_route_from_review(拒绝已在分派前检查),
+    dag 用 dag_router。
     """
     dag_router = make_route_from_plan_dag(child_targets)
     seq_router = make_route_from_review(child_targets)

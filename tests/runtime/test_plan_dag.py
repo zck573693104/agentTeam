@@ -699,8 +699,8 @@ def test_plan_sequential_backward_compat_e2e():
         config={"configurable": {"thread_id": "seq-e2e-1"}},
     )
 
-    # execution_mode 默认 sequential
-    assert result.get("execution_mode", "sequential") == "sequential"
+    # execution_mode 默认 sequential(直接索引,缺失字段会抛 KeyError 暴露回归)
+    assert result["execution_mode"] == "sequential"
     # current_step 推进到末尾(旧版行为)
     assert result["current_step"] == 2
     # 计划 2 步全部 done(旧版行为)
