@@ -209,3 +209,238 @@ def test_eval_condition_reads_state_fields():
     assert _eval_condition("len(worker_outputs) >= 2", state) is True
     assert _eval_condition("len(worker_outputs) >= 3", state) is False
     assert _eval_condition("'step_a' in completed_steps", state) is True
+
+
+def test_leader_plan_dag_mode_initializes_completed_steps(fake_llm):
+    """leader_plan dag 模式:初始化 completed_steps/skipped_steps 为空 set,不写 current_step。"""
+    from langchain_core.messages import AIMessage
+    from agentteam.domain.team import Leader
+    from agentteam.runtime.nodes import make_leader_plan_node
+
+    plan = Plan(
+        execution_mode="dag",
+        steps=[
+            PlanStep(worker="a", instruction="do A", id="step_a"),
+            PlanStep(worker="b", instruction="do B", id="step_b",
+                     depends_on=["step_a"]),
+        ],
+    )
+    fake_llm.set_structured_responses([plan])
+    leader = Leader(system_prompt="你是主管")
+    node = make_leader_plan_node(leader, fake_llm)
+
+    result = node({"task": "dag task", "messages": []})
+
+    # dag 模式字段
+    assert result["execution_mode"] == "dag"
+    assert result["completed_steps"] == set()
+    assert result["skipped_steps"] == set()
+    # dag 模式不写 current_step
+    assert "current_step" not in result
+    # plan 含 id/depends_on/condition 字段
+    assert result["plan"][0]["id"] == "step_a"
+    assert result["plan"][1]["depends_on"] == ["step_a"]
+
+
+def test_leader_plan_sequential_mode_keeps_current_step(fake_llm):
+    """leader_plan sequential 模式:沿用 current_step=0,不写 completed_steps。"""
+    from agentteam.domain.team import Leader
+    from agentteam.runtime.nodes import make_leader_plan_node
+
+    plan = Plan(
+        execution_mode="sequential",
+        steps=[PlanStep(worker="w1", instruction="do x")],
+    )
+    fake_llm.set_structured_responses([plan])
+    leader = Leader(system_prompt="你是主管")
+    node = make_leader_plan_node(leader, fake_llm)
+
+    result = node({"task": "seq task", "messages": []})
+
+    assert result["execution_mode"] == "sequential"
+    assert result["current_step"] == 0
+    # sequential 模式不写 completed_steps/skipped_steps
+    assert "completed_steps" not in result
+    assert "skipped_steps" not in result
+
+
+def test_leader_plan_dag_mode_detects_cycle_raises(fake_llm):
+    """leader_plan dag 模式:LLM 输出循环依赖 plan → 抛 ValueError。"""
+    import pytest
+    from agentteam.domain.team import Leader
+    from agentteam.runtime.nodes import make_leader_plan_node
+
+    plan = Plan(
+        execution_mode="dag",
+        steps=[
+            PlanStep(worker="a", instruction="do A", id="step_a",
+                     depends_on=["step_b"]),
+            PlanStep(worker="b", instruction="do B", id="step_b",
+                     depends_on=["step_a"]),
+        ],
+    )
+    fake_llm.set_structured_responses([plan])
+    leader = Leader(system_prompt="你是主管")
+    node = make_leader_plan_node(leader, fake_llm)
+
+    with pytest.raises(ValueError, match="circular dependency|cycle"):
+        node({"task": "bad dag", "messages": []})
+
+
+def test_leader_review_dag_mode_does_not_advance_current_step(fake_llm):
+    """leader_review dag 模式:不推进 current_step(completed_steps 已由 worker 通过 reducer 更新)。"""
+    from langchain_core.messages import AIMessage
+    from agentteam.domain.team import Leader
+    from agentteam.runtime.nodes import make_leader_review_node
+
+    fake_llm.set_invoke_responses([AIMessage(content="A done")])
+    leader = Leader(system_prompt="你是主管")
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "dag task",
+        "messages": [],
+        "plan": [
+            {"worker": "a", "instruction": "do A", "id": "step_a",
+             "depends_on": [], "status": "running"},
+            {"worker": "b", "instruction": "do B", "id": "step_b",
+             "depends_on": ["step_a"], "status": "pending"},
+        ],
+        "current_step": 0,
+        "execution_mode": "dag",
+        "completed_steps": {"step_a"},  # 已由 worker 通过 reducer 更新
+        "skipped_steps": set(),
+        "worker_outputs": {"a": "result A"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    # dag 模式:不写 current_step(不推进)
+    assert "current_step" not in result
+    # dag 模式:不写 completed_steps(已由 worker reducer 更新,避免覆盖)
+    assert "completed_steps" not in result
+    # 仍有点评消息
+    assert len(result["messages"]) == 1
+    assert len(result["audit_events"]) == 1
+
+
+def test_leader_review_sequential_mode_advances_current_step(fake_llm):
+    """leader_review sequential 模式:沿用 current_step += 1。"""
+    from langchain_core.messages import AIMessage
+    from agentteam.domain.team import Leader
+    from agentteam.runtime.nodes import make_leader_review_node
+
+    fake_llm.set_invoke_responses([AIMessage(content="good")])
+    leader = Leader(system_prompt="你是主管")
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "seq task",
+        "messages": [],
+        "plan": [
+            {"worker": "coder", "instruction": "写代码", "status": "running"},
+            {"worker": "tester", "instruction": "写测试", "status": "pending"},
+        ],
+        "current_step": 0,
+        "execution_mode": "sequential",
+        "worker_outputs": {"coder": "print('hi')"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    # sequential 模式:推进 current_step,标记 plan[0] done
+    assert result["current_step"] == 1
+    assert result["plan"][0]["status"] == "done"
+    assert result["plan"][1]["status"] == "pending"
+
+
+def test_init_worker_dag_mode_finds_ready_step(fake_llm):
+    """init_worker dag 模式:从 plan 中找到本 worker 的 ready step,设置 current_step_id。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from agentteam.domain.worker import Worker
+    from agentteam.runtime.nodes import make_init_worker
+
+    worker = Worker(name="b", role="r", description="", system_prompt="test")
+    node = make_init_worker(worker)
+    state = {
+        "plan": [
+            {"worker": "a", "instruction": "do A", "id": "step_a", "depends_on": []},
+            {"worker": "b", "instruction": "do B", "id": "step_b",
+             "depends_on": ["step_a"]},
+        ],
+        "execution_mode": "dag",
+        "completed_steps": {"step_a"},  # step_a 已完成,step_b ready
+        "skipped_steps": set(),
+        "run_id": "r1",
+    }
+    result = node(state)
+
+    # 找到 step_b 作为 current_step_id
+    assert result["current_step_id"] == "step_b"
+    # react_messages 用 step_b 的 instruction
+    assert len(result["react_messages"]) == 2
+    assert isinstance(result["react_messages"][1], HumanMessage)
+    assert result["react_messages"][1].content == "do B"
+
+
+def test_init_worker_sequential_mode_uses_current_step(fake_llm):
+    """init_worker sequential 模式:沿用 plan[current_step]。"""
+    from langchain_core.messages import HumanMessage
+    from agentteam.domain.worker import Worker
+    from agentteam.runtime.nodes import make_init_worker
+
+    worker = Worker(name="coder", role="r", description="", system_prompt="test")
+    node = make_init_worker(worker)
+    state = {
+        "plan": [
+            {"worker": "coder", "instruction": "写 hello", "status": "pending"},
+        ],
+        "current_step": 0,
+        "execution_mode": "sequential",
+    }
+    result = node(state)
+    # sequential 模式不设 current_step_id(或设为空)
+    assert result.get("current_step_id", "") == ""
+    assert result["react_messages"][1].content == "写 hello"
+
+
+def test_finalize_dag_mode_returns_completed_steps(fake_llm):
+    """finalize dag 模式:回传 completed_steps={current_step_id}(set_union reducer 合并)。"""
+    from agentteam.domain.worker import Worker
+    from agentteam.runtime.nodes import make_finalize
+
+    worker = Worker(name="a", role="r", description="", system_prompt="test")
+    node = make_finalize(worker)
+    state = {
+        "final_answer": "result A",
+        "react_messages": [],
+        "run_id": "r1",
+        "execution_mode": "dag",
+        "current_step_id": "step_a",
+    }
+    result = node(state)
+
+    # dag 模式回传 completed_steps(set,经 set_union reducer 合并到父图)
+    assert result["completed_steps"] == {"step_a"}
+    # 仍有 worker_outputs 与 messages
+    assert result["worker_outputs"] == {"a": "result A"}
+    assert len(result["messages"]) == 1
+
+
+def test_finalize_sequential_mode_no_completed_steps(fake_llm):
+    """finalize sequential 模式:不回传 completed_steps。"""
+    from agentteam.domain.worker import Worker
+    from agentteam.runtime.nodes import make_finalize
+
+    worker = Worker(name="w1", role="r", description="", system_prompt="test")
+    node = make_finalize(worker)
+    state = {
+        "final_answer": "done",
+        "react_messages": [],
+        "run_id": "r1",
+        "execution_mode": "sequential",
+    }
+    result = node(state)
+    # sequential 模式不回传 completed_steps
+    assert "completed_steps" not in result
+    assert result["worker_outputs"] == {"w1": "done"}

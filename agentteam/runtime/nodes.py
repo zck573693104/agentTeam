@@ -50,7 +50,15 @@ class Plan(BaseModel):
 def make_leader_plan_node(
     agent: Agent, llm: BaseChatModel, trace_writer: TraceWriter | None = None
 ):
-    """创建 leader_plan 节点：用 LLM 结构化输出把 task 拆成 plan。"""
+    """创建 leader_plan 节点：用 LLM 结构化输出把 task 拆成 plan。
+
+    dag 模式(execution_mode == "dag"):
+    - 初始化 completed_steps=set()、skipped_steps=set()
+    - 不写 current_step(dag 模式不用线性计数器)
+    - 检测 plan 循环依赖,有环抛 ValueError
+    sequential 模式:沿用 current_step=0(向后兼容)
+    """
+    from agentteam.runtime.graph import _detect_dag_cycle
 
     def leader_plan(state: TeamState) -> dict:
         run_id = state.get("run_id", "")
@@ -63,20 +71,45 @@ def make_leader_plan_node(
         ]
         structured = llm.with_structured_output(Plan)
         plan_obj = structured.invoke(messages)
+        execution_mode = plan_obj.execution_mode
+
         plan = [
-            {"worker": s.worker, "instruction": s.instruction, "status": "pending"}
+            {
+                "worker": s.worker,
+                "instruction": s.instruction,
+                "status": "pending",
+                "id": s.id or s.worker,
+                "depends_on": list(s.depends_on),
+                "condition": s.condition,
+            }
             for s in plan_obj.steps
         ]
+
+        # dag 模式:检测循环依赖
+        if execution_mode == "dag" and _detect_dag_cycle(plan):
+            raise ValueError(
+                f"Plan has circular dependency in dag mode: "
+                f"{[s['id'] for s in plan]}. Refusing to execute."
+            )
+
         if trace_writer:
             trace_writer.emit(run_id, "leader_plan", agent.name, {"steps": len(plan)})
-        return {
+
+        result: dict = {
             "plan": plan,
-            "current_step": 0,
+            "execution_mode": execution_mode,
             "messages": [
                 AIMessage(content=f"[Leader] 计划已拆解：{len(plan)} 步", name=agent.name)
             ],
             "audit_events": [{"event_type": "leader_plan", "actor": agent.name}],
         }
+        if execution_mode == "dag":
+            result["completed_steps"] = set()
+            result["skipped_steps"] = set()
+            # dag 模式不写 current_step
+        else:
+            result["current_step"] = 0
+        return result
 
     return leader_plan
 
@@ -85,12 +118,37 @@ def make_init_worker(
     agent: Agent,
     trace_writer: TraceWriter | None = None,
 ):
-    """创建 init_worker 节点：初始化 ReAct 循环的 react_messages 和计数器。"""
+    """创建 init_worker 节点：初始化 ReAct 循环的 react_messages 和计数器。
+
+    dag 模式:从 plan 中找到本 worker 的 ready step(id 不在 completed/skipped,
+    worker 名匹配),设置 current_step_id。
+    sequential 模式:沿用 plan[current_step],current_step_id 留空。
+    """
 
     def init_worker(state: TeamState) -> dict:
         run_id = state.get("run_id", "")
-        step = state["plan"][state["current_step"]]
-        instruction = step["instruction"]
+        execution_mode = state.get("execution_mode", "sequential")
+
+        if execution_mode == "dag":
+            # dag 模式:从 plan 找本 worker 的 ready step
+            plan = state.get("plan", [])
+            completed = state.get("completed_steps", set())
+            skipped = state.get("skipped_steps", set())
+            current_step_id = ""
+            instruction = state.get("task", "")  # 兜底
+            for step in plan:
+                sid = step.get("id") or step.get("worker")
+                if sid in completed or sid in skipped:
+                    continue
+                if step.get("worker") == agent.name:
+                    current_step_id = sid
+                    instruction = step["instruction"]
+                    break
+        else:
+            # sequential 模式:沿用 current_step
+            step = state["plan"][state["current_step"]]
+            instruction = step["instruction"]
+            current_step_id = ""
 
         if trace_writer:
             trace_writer.emit(run_id, "worker_start", agent.name)
@@ -103,6 +161,7 @@ def make_init_worker(
             "tool_calls": [],
             "iteration": 0,
             "final_answer": "",
+            "current_step_id": current_step_id,
         }
 
     return init_worker
@@ -146,7 +205,12 @@ def make_finalize(
     agent: Agent,
     trace_writer: TraceWriter | None = None,
 ):
-    """创建 finalize 节点：写 worker_outputs、汇总 messages、emit worker_end。"""
+    """创建 finalize 节点：写 worker_outputs、汇总 messages、emit worker_end。
+
+    dag 模式:额外回传 completed_steps={current_step_id},通过 set_union
+    reducer 合并到父图 completed_steps(支持并行 worker)。
+    sequential 模式:不回传 completed_steps。
+    """
 
     def finalize(state: dict) -> dict:
         run_id = state.get("run_id", "")
@@ -165,13 +229,19 @@ def make_finalize(
                 run_id, "worker_end", agent.name,
                 {"answer_length": len(final_answer)},
             )
-        return {
+        result: dict = {
             "worker_outputs": {agent.name: final_answer},
             "messages": [
                 AIMessage(content=f"[{agent.name}] {final_answer}", name=agent.name)
             ],
             "audit_events": [{"event_type": "worker_end", "actor": agent.name}],
         }
+        # dag 模式:回传 completed_steps(set,经 set_union reducer 合并到父图)
+        if state.get("execution_mode") == "dag":
+            current_step_id = state.get("current_step_id", "")
+            if current_step_id:
+                result["completed_steps"] = {current_step_id}
+        return result
 
     return finalize
 
@@ -417,10 +487,49 @@ def make_supervisor_node(compiled_graph, agent_name: str):
 def make_leader_review_node(
     agent: Agent, llm: BaseChatModel, trace_writer: TraceWriter | None = None
 ):
-    """创建 leader_review 节点：点评 worker 产出，标记步骤完成，推进 current_step。"""
+    """创建 leader_review 节点：点评 worker 产出。
+
+    dag 模式:
+    - completed_steps 已由 worker 通过 set_union reducer 更新,leader_review 不覆盖
+    - 不推进 current_step(dag 模式不用)
+    - 仅做 LLM 点评 + emit trace
+    sequential 模式:沿用 current_step += 1 + 标记 plan[current] done(向后兼容)
+    """
 
     def leader_review(state: TeamState) -> dict:
         run_id = state.get("run_id", "")
+        execution_mode = state.get("execution_mode", "sequential")
+
+        if execution_mode == "dag":
+            # dag 模式:completed_steps 已由 worker reducer 更新
+            # leader_review 只需 LLM 点评,不推进 current_step,不覆盖 completed_steps
+            outputs = state.get("worker_outputs", {})
+            # 取最近完成的 worker(任取一个用于点评)
+            recent_worker = next(iter(outputs), "")
+            review_response = llm.invoke(
+                [
+                    SystemMessage(content=agent.system_prompt),
+                    HumanMessage(
+                        content=(
+                            f"Worker {recent_worker} 完成了步骤，"
+                            f"产出：{outputs.get(recent_worker, '')}。请简要点评。"
+                        )
+                    ),
+                ]
+            )
+            if trace_writer:
+                trace_writer.emit(run_id, "leader_review", agent.name)
+            usage = getattr(review_response, "usage_metadata", None)
+            tokens = usage.get("total_tokens", 0) if usage else 0
+            return {
+                "messages": [
+                    AIMessage(content=f"[Leader] {review_response.content}", name=agent.name)
+                ],
+                "audit_events": [{"event_type": "leader_review", "actor": agent.name}],
+                "total_tokens": tokens,
+            }
+
+        # sequential 模式:沿用原逻辑
         current = state["current_step"]
         plan = list(state["plan"])
         plan[current] = {**plan[current], "status": "done"}
