@@ -4,7 +4,7 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING, Any, Callable
 
-from agentteam.api.events import EventBus
+from agentteam.api.events import BroadcastTraceWriter, EventBus
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.runs import RunRepo
 
@@ -45,6 +45,41 @@ class RunManager:
         """
         with self._lock:
             return run_id in self._graphs
+
+    def recompile_and_resume(
+        self,
+        run_id: str,
+        team: "Team",
+        compiler_factory: "Callable[[], TeamCompiler]",
+        approved: bool,
+        reason: str | None = None,
+    ) -> None:
+        """lazy recompile: 用 compiler_factory 构造 graph,注入内存,再 resume。
+
+        供 approve_run 在 _graphs 缺失时(如服务重启后)调用。
+        SqliteSaver 的 checkpoint 已持久化 interrupt 状态,
+        graph.invoke(Command(resume=...)) 能从 checkpoint 续跑。
+
+        参数:
+            run_id: run 标识(同时作为 thread_id)
+            team: 要重新编译的 Team(从 team_store.get(run["team_name"]) 取得)
+            compiler_factory: 无参闭包,返回注册好所有 team 的 TeamCompiler。
+                              抽成闭包避免 RunManager 直接依赖 ModelProvider/ToolRegistry 等。
+            approved / reason: 透传给 resume_run
+        """
+        compiler = compiler_factory()
+        trace_writer = BroadcastTraceWriter(self._audit_repo, self._bus)
+        graph = compiler.compile(
+            team,
+            checkpointer=self._saver,
+            trace_writer=trace_writer,
+            audit_repo=self._audit_repo,
+        )
+        config = {"configurable": {"thread_id": run_id}}
+        with self._lock:
+            self._graphs[run_id] = graph
+            self._configs[run_id] = config
+        self.resume_run(run_id, approved, reason)
 
     def start_run(self, run_id: str, graph, config: dict, task: str) -> None:
         """在后台线程中跑 graph.invoke()，立即返回。"""

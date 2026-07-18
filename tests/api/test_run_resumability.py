@@ -95,3 +95,80 @@ def test_has_graph_returns_false_for_unknown_run(tmp_path):
 
     assert run_manager.has_graph("nonexistent-run-id") is False
     conn.close()
+
+
+# ===== Task 2: recompile_and_resume =====
+
+
+def test_recompile_and_resume_constructs_graph_and_resumes(tmp_path):
+    """recompile_and_resume 调用 compiler_factory 构造 graph,注入 _graphs/_configs,然后调 resume_run。"""
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+
+    conn = init_db(tmp_path / "test.db")
+    conn_lock = threading.Lock()
+    run_repo = RunRepo(conn, lock=conn_lock)
+    audit_repo = AuditRepo(conn, lock=conn_lock)
+    event_bus = EventBus()
+    my_saver = MagicMock(name="saver")
+    run_manager = RunManager(run_repo, audit_repo, event_bus, checkpointer=my_saver)
+
+    run_id = run_repo.create_run("t", "task")
+    team = Team(name="t", description="d", root=MagicMock(), default_model=ModelRef("qwen", "qwen-max"))
+
+    fake_graph = MagicMock(name="graph")
+    mock_compiler = MagicMock(name="compiler")
+    mock_compiler.compile.return_value = fake_graph
+    compiler_factory = MagicMock(return_value=mock_compiler)
+
+    # mock resume_run 避免实际启线程(单元测试聚焦 recompile 逻辑)
+    with patch.object(run_manager, "resume_run") as mock_resume:
+        run_manager.recompile_and_resume(
+            run_id, team, compiler_factory, approved=True, reason="ok",
+        )
+
+    # compiler_factory 被调用一次
+    compiler_factory.assert_called_once()
+    # compile 被调用,graph 注入内存
+    mock_compiler.compile.assert_called_once()
+    assert run_manager._graphs[run_id] is fake_graph
+    assert run_manager._configs[run_id] == {"configurable": {"thread_id": run_id}}
+    # resume_run 被调用,参数透传
+    mock_resume.assert_called_once_with(run_id, True, "ok")
+    conn.close()
+
+
+def test_recompile_uses_correct_checkpointer(tmp_path):
+    """recompile_and_resume 调用 compiler.compile 时传入 self._saver 作为 checkpointer。
+
+    这是 lazy recompile 能从 checkpoint 续跑的关键 — 新 graph 必须持有原 saver。
+    """
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+
+    conn = init_db(tmp_path / "test.db")
+    conn_lock = threading.Lock()
+    run_repo = RunRepo(conn, lock=conn_lock)
+    audit_repo = AuditRepo(conn, lock=conn_lock)
+    event_bus = EventBus()
+    my_saver = MagicMock(name="my_saver")
+    run_manager = RunManager(run_repo, audit_repo, event_bus, checkpointer=my_saver)
+
+    run_id = run_repo.create_run("t", "task")
+    team = Team(name="t", description="d", root=MagicMock(), default_model=ModelRef("qwen", "qwen-max"))
+
+    mock_compiler = MagicMock(name="compiler")
+    mock_compiler.compile.return_value = MagicMock(name="graph")
+    compiler_factory = MagicMock(return_value=mock_compiler)
+
+    with patch.object(run_manager, "resume_run"):
+        run_manager.recompile_and_resume(
+            run_id, team, compiler_factory, approved=True,
+        )
+
+    # 验证 compile 调用时 checkpointer == my_saver(不是 None,不是新 saver)
+    _, kwargs = mock_compiler.compile.call_args
+    assert kwargs.get("checkpointer") is my_saver, (
+        f"compile 应传入 self._saver 作为 checkpointer,实际: {kwargs.get('checkpointer')}"
+    )
+    conn.close()
