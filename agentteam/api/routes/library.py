@@ -18,6 +18,33 @@ class AgentDict(BaseModel):
     approval_policy: dict | None = None
 
 
+def _build_agent_from_dict(agent: AgentDict) -> Agent:
+    """从 AgentDict 构造 Agent(POST/PUT 共用)。"""
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.models.provider import ModelRef
+    model = None
+    if agent.model:
+        model = ModelRef(
+            provider=agent.model["provider"],
+            name=agent.model["name"],
+            temperature=agent.model.get("temperature", 0.7),
+            streaming=agent.model.get("streaming", True),
+        )
+    ap = None
+    if agent.approval_policy:
+        ap = ApprovalPolicy(
+            level=agent.approval_policy["level"],
+            targets=agent.approval_policy.get("targets"),
+            timeout_seconds=agent.approval_policy.get("timeout_seconds"),
+        )
+    return Agent(
+        name=agent.name, role=agent.role,
+        system_prompt=agent.system_prompt,
+        tools=list(agent.tools), max_iterations=agent.max_iterations,
+        model=model, approval_policy=ap,
+    )
+
+
 def library_router(library: AgentLibrary) -> APIRouter:
     router = APIRouter(prefix="/api/library", tags=["library"])
 
@@ -31,33 +58,30 @@ def library_router(library: AgentLibrary) -> APIRouter:
 
     @router.post("/agents")
     def register_agent(agent: AgentDict):
-        from agentteam.domain.approval import ApprovalPolicy
-        from agentteam.models.provider import ModelRef
         existing = library.get(agent.name)
         if existing is not None:
             raise HTTPException(status_code=400, detail=f"Agent already exists: {agent.name}")
-        model = None
-        if agent.model:
-            model = ModelRef(
-                provider=agent.model["provider"],
-                name=agent.model["name"],
-                temperature=agent.model.get("temperature", 0.7),
-                streaming=agent.model.get("streaming", True),
-            )
-        ap = None
-        if agent.approval_policy:
-            ap = ApprovalPolicy(
-                level=agent.approval_policy["level"],
-                targets=agent.approval_policy.get("targets"),
-                timeout_seconds=agent.approval_policy.get("timeout_seconds"),
-            )
-        a = Agent(
-            name=agent.name, role=agent.role,
-            system_prompt=agent.system_prompt,
-            tools=list(agent.tools), max_iterations=agent.max_iterations,
-            model=model, approval_policy=ap,
-        )
+        a = _build_agent_from_dict(agent)
         library.register(a)
         return {"name": a.name}
+
+    @router.put("/agents/{name}")
+    def update_agent(name: str, agent: AgentDict):
+        if library.get(name) is None:
+            raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+        a = _build_agent_from_dict(agent)
+        if a.name != name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Name in body ({a.name}) must match URL ({name})",
+            )
+        library.update(a)
+        return {"name": a.name}
+
+    @router.delete("/agents/{name}")
+    def delete_agent(name: str):
+        if not library.delete(name):
+            raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+        return {"ok": True}
 
     return router
