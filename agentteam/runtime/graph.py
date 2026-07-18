@@ -252,11 +252,13 @@ class TeamCompiler:
         model_provider: ModelProvider,
         tool_registry: ToolRegistry,
         library: AgentLibrary | None = None,
+        run_manager=None,
     ):
         self._mp = model_provider
         self._tr = tool_registry
         self._lib = library or AgentLibrary()
         self._team_registry: dict[str, Team] = {}
+        self._run_manager = run_manager
 
     def register_team(self, team: Team) -> None:
         """注册可被 TeamRef 引用的 Team。"""
@@ -470,4 +472,7 @@ class TeamCompiler:
         """
         llm = self._mp.get_llm(agent.model or default_model)
         tools = self._tr.get_tools(agent.tools) if agent.tools else []
-        return make_worker_node(agent, llm, tools, trace_writer, audit_repo)
+        return make_worker_node(
+            agent, llm, tools, trace_writer, audit_repo,
+            run_manager=self._run_manager,
+        )

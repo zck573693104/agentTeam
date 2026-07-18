@@ -228,3 +228,105 @@ def test_run_in_background_catches_runcancellederror_via_baseexception():
     rm._audit_repo.add_event.assert_called_with(run_id, "run_cancelled", "user")
     # cleanup 被调用
     assert run_id not in rm._cancel_events
+
+
+def test_agent_step_raises_cancelled_when_run_cancelled():
+    """run_manager.is_cancelled 返回 True 时,agent_step 抛 RunCancelledError。
+
+    关键:检查发生在 LLM 调用之前(不浪费 token)。
+    """
+    from agentteam.runtime.nodes import make_agent_step
+
+    run_manager = MagicMock()
+    run_manager.is_cancelled.return_value = True
+
+    # agent / llm 不应被调用(应提前 raise)
+    agent_step = make_agent_step(
+        agent=MagicMock(), llm=MagicMock(), tools=[], run_manager=run_manager
+    )
+
+    with pytest.raises(RunCancelledError):
+        agent_step({"run_id": "run-cancelled", "react_messages": []})
+
+    # LLM 未被调用(取消检查在 LLM 调用之前)
+    run_manager.is_cancelled.assert_called_once_with("run-cancelled")
+
+
+def test_agent_step_proceeds_when_not_cancelled():
+    """is_cancelled False 时正常调用 LLM,返回 LLM 响应。"""
+    from agentteam.runtime.nodes import make_agent_step
+    from tests.conftest import FakeLLM
+
+    run_manager = MagicMock()
+    run_manager.is_cancelled.return_value = False
+
+    fake_llm = FakeLLM()
+    fake_llm.set_invoke_responses([AIMessage(content="done")])
+
+    agent_step = make_agent_step(
+        agent=MagicMock(), llm=fake_llm, tools=[], run_manager=run_manager
+    )
+
+    result = agent_step({"run_id": "run-active", "react_messages": []})
+
+    # 未抛异常,LLM 被调用,返回 final_answer
+    assert result["final_answer"] == "done"
+    run_manager.is_cancelled.assert_called_once_with("run-active")
+
+
+def test_agent_step_without_run_manager_works_as_before():
+    """run_manager=None(默认)时,agent_step 行为与改造前完全一致(向后兼容)。"""
+    from agentteam.runtime.nodes import make_agent_step
+    from tests.conftest import FakeLLM
+
+    fake_llm = FakeLLM()
+    fake_llm.set_invoke_responses([AIMessage(content="ok")])
+
+    # 不传 run_manager(默认 None)
+    agent_step = make_agent_step(agent=MagicMock(), llm=fake_llm, tools=[])
+
+    result = agent_step({"run_id": "run-legacy", "react_messages": []})
+    assert result["final_answer"] == "ok"
+
+
+def test_worker_node_passes_run_manager_to_agent_step():
+    """make_worker_node 透传 run_manager 给内部 make_agent_step。
+
+    通过实际 invoke worker_node 验证:cancel 信号能传播到 agent_step。
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from agentteam.domain.agent import Agent
+    from agentteam.runtime.nodes import make_worker_node
+    from tests.conftest import FakeLLM
+
+    agent = Agent(
+        name="w1", role="worker",
+        system_prompt="你是执行者", tools=[], max_iterations=3,
+    )
+    fake_llm = FakeLLM()
+    # worker_subgraph:init_worker + agent_step + finalize
+    # agent_step 第一次调用返回无 tool_calls 的 AIMessage → finalize
+    fake_llm.set_invoke_responses([AIMessage(content="done")])
+
+    run_manager = MagicMock()
+    run_manager.is_cancelled.return_value = True  # 模拟已 cancel
+
+    worker_node = make_worker_node(
+        agent=agent, llm=fake_llm, tools=[],
+        trace_writer=None, audit_repo=None,
+        run_manager=run_manager,
+    )
+
+    state = {
+        "run_id": "run-x",
+        "plan": [{"worker": "w1", "instruction": "do x", "status": "pending"}],
+        "current_step": 0,
+        "react_messages": [SystemMessage(content="sys"), HumanMessage(content="hi")],
+        "tool_calls": [],
+        "iteration": 0,
+        "final_answer": "",
+    }
+
+    with pytest.raises(RunCancelledError):
+        worker_node(state)

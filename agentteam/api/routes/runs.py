@@ -81,7 +81,7 @@ def runs_router(
         run_id = run_repo.create_run(team.name, req.task)
 
         trace_writer = BroadcastTraceWriter(audit_repo, event_bus)
-        compiler = TeamCompiler(model_provider, tool_registry, library=lib)
+        compiler = TeamCompiler(model_provider, tool_registry, library=lib, run_manager=run_manager)
         # 注册所有已知 Team 到 compiler._team_registry，使 TeamRef 可解析
         for t in team_store.list_all():
             compiler.register_team(t)

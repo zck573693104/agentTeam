@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from agentteam.api.run_manager import RunCancelledError
 from agentteam.domain.agent import Agent
 from agentteam.domain.approval import ApprovalPolicy
 from agentteam.runtime.state import TeamState
@@ -187,12 +188,22 @@ def make_agent_step(
     agent: Agent,
     llm: BaseChatModel,
     tools: list[BaseTool],
+    run_manager=None,
 ):
-    """创建 agent_step 节点：LLM 决策调用工具或给出最终答案。"""
+    """创建 agent_step 节点：LLM 决策调用工具或给出最终答案。
+
+    新增 run_manager 参数:若提供,在 LLM 调用前检查 run 是否被取消,
+    命中则抛 RunCancelledError(继承 BaseException,绕过 worker 内 except Exception),
+    避免浪费 LLM token。
+    """
 
     llm_with_tools = llm.bind_tools(tools) if tools else llm
 
     def agent_step(state: dict) -> dict:
+        if run_manager is not None:
+            run_id = state.get("run_id", "")
+            if run_manager.is_cancelled(run_id):
+                raise RunCancelledError(f"Run {run_id} cancelled by user")
         react_messages = state.get("react_messages", [])
         response = llm_with_tools.invoke(react_messages)
 
@@ -365,10 +376,12 @@ def make_worker_subgraph(
     tools: list[BaseTool],
     trace_writer: TraceWriter | None = None,
     audit_repo=None,
+    run_manager=None,
 ):
     """编译 Worker ReAct 子图：init_worker → agent_step → tool_step → 循环 → finalize。
 
     返回 compiled subgraph，可直接作为父图的节点。
+    新增 run_manager 参数:透传给 make_agent_step,使 worker 能检查取消信号。
     """
     from langgraph.graph import END, START, StateGraph
     from agentteam.runtime.state import WorkerState
@@ -377,7 +390,7 @@ def make_worker_subgraph(
 
     sg = StateGraph(WorkerState)
     sg.add_node("init_worker", make_init_worker(agent, trace_writer))
-    sg.add_node("agent_step", make_agent_step(agent, llm, tools))
+    sg.add_node("agent_step", make_agent_step(agent, llm, tools, run_manager=run_manager))
     sg.add_node(
         "tool_step",
         make_tool_step(agent, tools, approval_policy, trace_writer, audit_repo),
@@ -418,6 +431,7 @@ def make_worker_node(
     tools: list[BaseTool],
     trace_writer: TraceWriter | None = None,
     audit_repo=None,
+    run_manager=None,
 ):
     """返回可调用节点函数，内部使用子图。
 
@@ -428,8 +442,11 @@ def make_worker_node(
     输出过滤:dag 模式下多个 worker 并行触发,子图回传的 plan/current_step 等
     LastValue 通道会并发写入冲突(InvalidUpdateError)。因此只回传累加器
     (有 reducer) + dag 模式 completed_steps + 审批信号,其余字段由父图自管。
+    新增 run_manager 参数:透传给 make_worker_subgraph,使 worker 能检查取消信号。
     """
-    subgraph = make_worker_subgraph(agent, llm, tools, trace_writer, audit_repo)
+    subgraph = make_worker_subgraph(
+        agent, llm, tools, trace_writer, audit_repo, run_manager=run_manager
+    )
 
     # 共享累加器字段：子图不需要读取它们（只用 react_messages 内部通信），
     # 但若传入，子图的 reducer 会累积它们，返回时父图 reducer 再次累积 → 重复。
