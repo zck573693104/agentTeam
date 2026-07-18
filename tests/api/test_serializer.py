@@ -42,8 +42,13 @@ def test_team_to_dict_produces_json_serializable_dict():
     import json
     json.dumps(d)  # 不抛异常即可
     assert d["name"] == "dev"
-    assert d["leader"]["model"]["provider"] == "qwen"
-    assert d["workers"][0]["approval_policy"]["level"] == "tool"
+    # 新 schema：to_dict 输出 root（Agent 树），不是 leader/workers
+    assert "root" in d
+    assert d["root"]["name"] == "leader"
+    assert d["root"]["role"] == "supervisor"
+    assert d["root"]["model"]["provider"] == "qwen"
+    # 第一个 child（原 worker coder）保留 approval_policy
+    assert d["root"]["children"][0]["approval_policy"]["level"] == "tool"
     assert d["mcp_servers"][0]["name"] == "git"
 
 
@@ -89,3 +94,117 @@ def test_team_from_dict_with_null_optionals():
     assert team.leader.approval_policy is None
     assert team.workers[0].model is None
     assert team.workers[0].approval_policy is None
+
+
+def test_team_from_dict_new_schema():
+    """新 schema：dict 含 root 字段。"""
+    data = {
+        "name": "t",
+        "description": "d",
+        "root": {
+            "name": "lead", "role": "supervisor",
+            "system_prompt": "你是主管",
+            "children": [
+                {"name": "w1", "role": "worker", "tools": ["read_file"]},
+            ],
+        },
+        "default_model": {"provider": "qwen", "name": "qwen-max"},
+        "skills": ["read_file"],
+        "mcp_servers": [],
+    }
+    team = team_from_dict(data)
+    assert team.name == "t"
+    assert team.root.role == "supervisor"
+    assert team.root.name == "lead"
+    assert len(team.root.children) == 1
+    assert team.root.children[0].name == "w1"
+    assert team.root.children[0].tools == ["read_file"]
+
+
+def test_team_from_dict_new_schema_with_teamref():
+    """新 schema：children 中含 TeamRef。"""
+    data = {
+        "name": "t", "description": "d",
+        "root": {
+            "name": "lead", "role": "supervisor",
+            "children": [
+                {"_type": "TeamRef", "name": "sub_team", "alias": "qa"},
+                {"name": "w", "role": "worker"},
+            ],
+        },
+        "default_model": {"provider": "qwen", "name": "qwen-max"},
+    }
+    team = team_from_dict(data)
+    from agentteam.domain.agent import TeamRef
+    assert isinstance(team.root.children[0], TeamRef)
+    assert team.root.children[0].name == "sub_team"
+    assert team.root.children[0].alias == "qa"
+
+
+def test_team_from_dict_new_schema_with_ref():
+    """新 schema：Agent 含 ref 字段。"""
+    data = {
+        "name": "t", "description": "d",
+        "root": {
+            "name": "lead", "role": "supervisor",
+            "children": [
+                {"name": "eng", "role": "worker", "ref": "library:code_engineer"},
+            ],
+        },
+        "default_model": {"provider": "qwen", "name": "qwen-max"},
+    }
+    team = team_from_dict(data)
+    assert team.root.children[0].ref == "library:code_engineer"
+
+
+def test_team_to_dict_new_schema_roundtrip():
+    """新 schema 序列化/反序列化往返。"""
+    from agentteam.domain.agent import Agent, TeamRef
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    team = Team(
+        name="t", description="d",
+        root=Agent(
+            name="lead", role="supervisor",
+            children=[
+                Agent(name="w", role="worker", tools=["read_file"]),
+                TeamRef(name="sub", alias="qa"),
+            ],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    d = team_to_dict(team)
+    assert "root" in d
+    assert d["root"]["name"] == "lead"
+    assert d["root"]["children"][0]["name"] == "w"
+    assert d["root"]["children"][1]["_type"] == "TeamRef"
+    # 往返
+    team2 = team_from_dict(d)
+    assert team2.root.name == "lead"
+    assert len(team2.root.children) == 2
+
+
+def test_team_from_dict_legacy_schema_still_works():
+    """旧 schema（leader+workers）仍可解析。"""
+    data = {
+        "name": "dev_team",
+        "description": "研发小队",
+        "leader": {
+            "name": "tech_lead", "role": "技术主管",
+            "system_prompt": "你是主管",
+            "model": {"provider": "qwen", "name": "qwen-max"},
+        },
+        "workers": [
+            {"name": "coder", "role": "代码工程师", "description": "",
+             "system_prompt": "你是代码工程师"},
+        ],
+        "default_model": {"provider": "qwen", "name": "qwen-max"},
+    }
+    team = team_from_dict(data)
+    assert team.root.role == "supervisor"
+    assert team.root.name == "tech_lead"
+    assert len(team.root.children) == 1
+    assert team.root.children[0].name == "coder"
+    # 兼容 property
+    assert team.leader.name == "tech_lead"
+    assert team.workers[0].name == "coder"

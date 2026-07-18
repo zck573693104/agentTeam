@@ -66,7 +66,8 @@ def test_get_team():
     resp = client.get("/api/teams/dev")
     assert resp.status_code == 200
     assert resp.json()["name"] == "dev"
-    assert resp.json()["workers"][0]["name"] == "coder"
+    # 新 schema：to_dict 输出 root（Agent 树），原 worker 在 root.children 中
+    assert resp.json()["root"]["children"][0]["name"] == "coder"
 
 
 def test_get_team_not_found():
