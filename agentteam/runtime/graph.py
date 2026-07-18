@@ -19,6 +19,76 @@ from agentteam.runtime.trace import TraceWriter
 from agentteam.tools.registry import ToolRegistry
 
 
+def _eval_condition(cond: str, state: dict) -> bool:
+    """在受限 globals 下求值 dag step 的 condition 表达式。
+
+    安全考量:
+    - globals 仅暴露安全内置函数(len/sum/min/max/any/all/str/int/float/bool),
+      不暴露 __import__/open/exec/eval/compile 等危险函数
+    - locals 仅暴露 state 中的可读字段(worker_outputs/completed_steps/skipped_steps/task),
+      避免暴露 run_id/pending_approval 等内部字段
+    - 任何异常(SyntaxError/NameError/TypeError/ZeroDivisionError 等)返回 False,
+      宁可跳过该 step 也不让图崩溃
+    - 不允许 import:因为 __builtins__ 被替换,import 语句会抛 ImportError → 返回 False
+
+    用法: condition="len(worker_outputs) >= 2" 或 condition="'step_a' in completed_steps"
+    """
+    safe_builtins = {
+        "len": len, "sum": sum, "min": min, "max": max,
+        "any": any, "all": all, "sorted": sorted,
+        "str": str, "int": int, "float": float, "bool": bool,
+        "True": True, "False": False, "None": None,
+    }
+    safe_locals = {
+        k: v for k, v in state.items()
+        if k in ("worker_outputs", "completed_steps", "skipped_steps", "task")
+    }
+    try:
+        result = eval(cond, {"__builtins__": safe_builtins}, safe_locals)
+        return bool(result)
+    except Exception:
+        return False
+
+
+def _detect_dag_cycle(plan: list[dict]) -> bool:
+    """拓扑排序(Kahn 算法)检测 plan 中的循环依赖。
+
+    plan 中的 step 通过 depends_on 形成有向图:dep → step。
+    若拓扑排序后访问的节点数 < 总节点数,说明存在环。
+
+    返回 True 表示有环(应拒绝该 plan),False 表示无环。
+    """
+    # 收集所有节点(step id + 依赖的 id)
+    nodes: set[str] = set()
+    for step in plan:
+        sid = step.get("id") or step.get("worker")
+        nodes.add(sid)
+        for dep in step.get("depends_on", []):
+            nodes.add(dep)
+
+    # 构建邻接表与入度
+    adj: dict[str, list[str]] = {n: [] for n in nodes}
+    in_degree: dict[str, int] = {n: 0 for n in nodes}
+    for step in plan:
+        sid = step.get("id") or step.get("worker")
+        for dep in step.get("depends_on", []):
+            adj[dep].append(sid)
+            in_degree[sid] += 1
+
+    # Kahn 算法:BFS 拓扑排序
+    queue = [n for n in nodes if in_degree[n] == 0]
+    visited = 0
+    while queue:
+        n = queue.pop(0)
+        visited += 1
+        for m in adj[n]:
+            in_degree[m] -= 1
+            if in_degree[m] == 0:
+                queue.append(m)
+
+    return visited != len(nodes)
+
+
 def route_from_plan(state: TeamState) -> str:
     """旧模块级函数：仅用于旧测试兼容。
 
@@ -64,6 +134,45 @@ def make_route_from_review(child_targets: dict[str, str]):
         if current >= len(plan):
             return END
         return child_targets[plan[current]["worker"]]
+    return route
+
+
+def make_route_from_plan_dag(child_targets: dict[str, str]):
+    """创建 dag 路由函数:返回 ready steps 的物理节点名列表(LangGraph 并行触发)。
+
+    dag 路由算法(spec §3.2):
+    1. 遍历 plan 中所有 step
+    2. 跳过已完成(completed_steps)或已跳过(skipped_steps)的 step
+    3. 检查 depends_on:所有依赖必须在 completed_steps 或 skipped_steps 中
+       (skipped 视为满足,避免被跳过的 step 阻塞后继)
+    4. 若 step 有 condition,用 _eval_condition 求值:
+       - False: 加入 skipped_steps(in-place mutation),不返回
+       - True 或无 condition: 加入 ready 列表
+    5. 返回 ready 列表(物理节点名);空则返回 [END]
+
+    返回 list[str] 而非 str:LangGraph conditional_edges 收到 list 时并行触发所有目标。
+    """
+    def route(state):
+        # dag 模式下若被拒绝(工具审批 reject),直接结束
+        if is_rejected(state):
+            return [END]
+        plan = state.get("plan", [])
+        completed = state.get("completed_steps", set())
+        skipped = state.get("skipped_steps", set())
+        ready: list[str] = []
+        for step in plan:
+            sid = step.get("id") or step.get("worker")
+            if sid in completed or sid in skipped:
+                continue
+            deps = step.get("depends_on", [])
+            if all(d in completed or d in skipped for d in deps):
+                cond = step.get("condition")
+                if cond and not _eval_condition(cond, state):
+                    # condition False:标记跳过,不返回(in-place mutation)
+                    skipped.add(sid)
+                    continue
+                ready.append(child_targets[step["worker"]])
+        return ready if ready else [END]
     return route
 
 
