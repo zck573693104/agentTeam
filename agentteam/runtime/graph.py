@@ -124,15 +124,19 @@ class TeamCompiler:
         if team.root.role != "supervisor":
             raise ValueError("Team.root must be supervisor")
         # 递归编译 root
+        # visited_team_names 跟踪已被引用的 Team.name（唯一标识），
+        # 用于检测循环引用。root Team 自身先入集合，确保自引用 A→A 被识别。
         return self._compile_agent(
             team.root, team.default_model, checkpointer,
             trace_writer, audit_repo,
             depth=0, path=f"team:{team.name}",
+            visited_team_names={team.name},
         )
 
     def _compile_agent(
         self, agent: Agent, default_model, checkpointer,
         trace_writer, audit_repo, depth, path,
+        visited_team_names: set[str] | None = None,
     ):
         # 1. 解析 ref（深拷贝库定义，保留覆盖）
         agent = self._lib.resolve(agent)
@@ -146,7 +150,7 @@ class TeamCompiler:
             return self._compile_worker(agent, default_model, trace_writer, audit_repo)
         return self._compile_supervisor(
             agent, default_model, checkpointer, trace_writer, audit_repo,
-            depth, path,
+            depth, path, visited_team_names or set(),
         )
 
     def _validate(self, agent: Agent, depth: int, path: str) -> None:
@@ -165,7 +169,7 @@ class TeamCompiler:
 
     def _compile_supervisor(
         self, agent: Agent, default_model, checkpointer,
-        trace_writer, audit_repo, depth, path,
+        trace_writer, audit_repo, depth, path, visited_team_names,
     ):
         graph = StateGraph(TeamState)
         llm = self._mp.get_llm(agent.model or default_model)
@@ -191,17 +195,24 @@ class TeamCompiler:
                 if sub_team is None:
                     raise KeyError(f"Team not registered: {child.name}")
                 alias = child.alias or sub_team.root.name
-                if alias in path.split("."):
+                # BUG-04 修复：用被引用 Team 的唯一 name（而非 alias）做循环检测。
+                # alias 可被不同 sub-team 引用链复用（如 A→B(alias=x)→C(alias=x)），
+                # 用 alias 会假阳性。Team.name 是 Team 注册时的唯一标识，真正反映引用关系。
+                if sub_team.name in visited_team_names:
                     raise ValueError(
-                        f"Circular team reference: {path}.{alias}"
+                        f"Circular team reference: {sub_team.name} "
+                        f"(path: {path}.{alias})"
                     )
                 # 注册 TeamRef 的 mcp_overrides
                 for server in child.mcp_overrides:
                     self._tr.register_mcp_tools(server)
+                # 递归编译时把 sub_team.name 加入已访问集合，子层级的非 TeamRef
+                # children 会原样透传该集合（不增不减），保证跨层级循环检测正确。
                 sub_graph = self._compile_agent(
                     sub_team.root, sub_team.default_model, checkpointer,
                     trace_writer, audit_repo,
                     depth=depth + 1, path=f"{path}.{alias}",
+                    visited_team_names=visited_team_names | {sub_team.name},
                 )
                 node_name = f"subteam_{alias}"
                 graph.add_node(node_name, make_supervisor_node(sub_graph, alias))
@@ -211,6 +222,7 @@ class TeamCompiler:
                 sub_graph = self._compile_agent(
                     child, default_model, checkpointer, trace_writer, audit_repo,
                     depth=depth + 1, path=f"{path}.{child.name}",
+                    visited_team_names=visited_team_names,
                 )
                 # worker 用 worker_{name} 保持与旧测试兼容；supervisor 用 agent_{name}
                 if child.role == "worker":

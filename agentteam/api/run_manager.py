@@ -112,7 +112,20 @@ class RunManager:
             self._handle_error(run_id, e)
 
     def _handle_invoke_result(self, run_id: str, graph, config: dict) -> None:
-        state = graph.get_state(config)
+        # BUG-05 修复：get_state 可能因 checkpoint 损坏 / config 失效抛异常。
+        # 若放任异常传播到 _run_in_background 的 except Exception，
+        # 会调用 _handle_error 标记 run 为 failed。但 graph.invoke 已正常返回
+        # 通常意味着 interrupted 或完成，误标 failed 会让用户无法 approve 续跑。
+        # 保守标记为 interrupted 等待人工介入（用户 approve 时会再次尝试，
+        # 若 resume 也失败则由 approve_run 的 except Exception 回滚为 failed）。
+        try:
+            state = graph.get_state(config)
+        except Exception:
+            self._run_repo.update_status(run_id, "interrupted")
+            self._bus.publish(
+                run_id, {"event_type": "run_interrupted", "run_id": run_id}
+            )
+            return
         if state.next:
             # interrupted：保留 graph/config/threads 供 resume 使用，不清理
             self._run_repo.update_status(run_id, "interrupted")

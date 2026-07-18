@@ -193,8 +193,12 @@ def runs_router(
                     if await request.is_disconnected():
                         break
                     try:
+                        # BUG-08 修复：timeout 缩短到 0.5s。
+                        # 原值 2.0s 会让客户端断开后最坏延迟 2s 才检测到，
+                        # 期间 threadpool 线程被阻塞，>40 个并发 SSE 客户端会耗尽 threadpool。
+                        # 0.5s 平衡了 disconnect 检测频率与 idle 时的 CPU 开销。
                         event = await loop.run_in_executor(
-                            None, lambda: q.get(timeout=2.0)
+                            None, lambda: q.get(timeout=0.5)
                         )
                     except queue_mod.Empty:
                         continue
@@ -230,10 +234,15 @@ def runs_router(
 
         try:
             run_manager.resume_run(run_id, req.approved, req.reason)
-        except ValueError as e:
-            # claim 成功但 resume 失败：服务重启后 graph/config 丢失，run 无法恢复。
-            # 标记为 failed（终态）而非回滚 interrupted——否则 run 永远卡住，
-            # 用户反复 approve 反复 409。
+        except Exception as e:
+            # BUG-10 修复：原仅捕获 ValueError（服务重启后 graph/config 丢失），
+            # 但 resume_run 内部抛非 ValueError（如 sqlite3.OperationalError 锁竞争、
+            # RuntimeError）时不被捕获，异常传播到 FastAPI 返回 500。此时 try_claim
+            # 已把状态置 running，但无后台线程执行，用户无法重新 approve（try_claim
+            # 因状态非 interrupted 失败），run 永久卡死。
+            # 修复：catch Exception，确保任何 resume_run 异常都回滚状态为 failed。
+            # ValueError 仍是预期内的"graph 丢失"错误，返回 409 保持向后兼容；
+            # 其他异常视为服务端错误，返回 500。
             run_repo.end_run(run_id, "failed")
             eid = audit_repo.add_event(
                 run_id, "error", "system", {"error": str(e)}
@@ -247,7 +256,8 @@ def runs_router(
                     "payload": {"error": str(e)},
                 },
             )
-            raise HTTPException(status_code=409, detail=str(e))
+            status_code = 409 if isinstance(e, ValueError) else 500
+            raise HTTPException(status_code=status_code, detail=str(e))
         return {"ok": True}
 
     return router
