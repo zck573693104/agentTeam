@@ -40,6 +40,24 @@ def run_to_dict(row) -> dict:
     return d
 
 
+def _build_compiler(
+    model_provider: ModelProvider,
+    tool_registry: ToolRegistry,
+    library: AgentLibrary,
+    team_store: TeamStore,
+) -> TeamCompiler:
+    """构造 TeamCompiler 并注册所有已知 Team(供 TeamRef 解析)。
+
+    抽成模块级 helper 供 approve_run 的 lazy recompile 路径调用,
+    与 create_run 中的编译逻辑保持一致,避免循环依赖
+    (RunManager 不直接依赖 ModelProvider/ToolRegistry)。
+    """
+    compiler = TeamCompiler(model_provider, tool_registry, library=library)
+    for t in team_store.list_all():
+        compiler.register_team(t)
+    return compiler
+
+
 def runs_router(
     run_manager: RunManager,
     team_store: TeamStore,
@@ -233,16 +251,31 @@ def runs_router(
             )
 
         try:
-            run_manager.resume_run(run_id, req.approved, req.reason)
+            if run_manager.has_graph(run_id):
+                # fast path: graph 仍在内存(正常流程),直接 resume
+                run_manager.resume_run(run_id, req.approved, req.reason)
+            else:
+                # lazy recompile (P0): 服务重启后 _graphs/_configs 丢失,
+                # 从 team_store 取 Team 重新 compile,再 resume。
+                # SqliteSaver checkpoint 已持久化 interrupt 状态,
+                # 新 graph 持有原 saver 即可从 checkpoint 续跑。
+                team = team_store.get(run["team_name"])
+                if team is None:
+                    raise ValueError(
+                        f"Team '{run['team_name']}' not found (needed for recompile)"
+                    )
+                run_manager.recompile_and_resume(
+                    run_id, team,
+                    compiler_factory=lambda: _build_compiler(
+                        model_provider, tool_registry, lib, team_store,
+                    ),
+                    approved=req.approved, reason=req.reason,
+                )
         except Exception as e:
-            # BUG-10 修复：原仅捕获 ValueError（服务重启后 graph/config 丢失），
-            # 但 resume_run 内部抛非 ValueError（如 sqlite3.OperationalError 锁竞争、
-            # RuntimeError）时不被捕获，异常传播到 FastAPI 返回 500。此时 try_claim
-            # 已把状态置 running，但无后台线程执行，用户无法重新 approve（try_claim
-            # 因状态非 interrupted 失败），run 永久卡死。
-            # 修复：catch Exception，确保任何 resume_run 异常都回滚状态为 failed。
-            # ValueError 仍是预期内的"graph 丢失"错误，返回 409 保持向后兼容；
-            # 其他异常视为服务端错误，返回 500。
+            # BUG-10 修复(沿用):catch Exception 确保任何 resume/recompile 异常
+            # 都回滚状态为 failed,避免 try_claim 已置 running 后无线程执行导致卡死。
+            # ValueError(team 不存在等预期错误)返回 409;
+            # 其他异常(锁竞争、compile 失败等)返回 500。
             run_repo.end_run(run_id, "failed")
             eid = audit_repo.add_event(
                 run_id, "error", "system", {"error": str(e)}

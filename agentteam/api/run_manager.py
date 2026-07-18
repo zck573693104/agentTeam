@@ -66,6 +66,12 @@ class RunManager:
             compiler_factory: 无参闭包,返回注册好所有 team 的 TeamCompiler。
                               抽成闭包避免 RunManager 直接依赖 ModelProvider/ToolRegistry 等。
             approved / reason: 透传给 resume_run
+
+        异常契约:
+            compiler_factory() / compiler.compile() / resume_run() 抛出的异常
+            向上传播给调用方(approve_run),由 approve_run 的 try/except 兜底
+            回滚 run 状态为 failed 并写 error audit event。本方法不做内部捕获,
+            保持与 start_run / resume_run 一致的"异常由调用方处理"风格。
         """
         compiler = compiler_factory()
         trace_writer = BroadcastTraceWriter(self._audit_repo, self._bus)

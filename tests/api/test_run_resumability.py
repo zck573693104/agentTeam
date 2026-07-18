@@ -172,3 +172,89 @@ def test_recompile_uses_correct_checkpointer(tmp_path):
         f"compile 应传入 self._saver 作为 checkpointer,实际: {kwargs.get('checkpointer')}"
     )
     conn.close()
+
+
+# ===== Task 3: approve_run lazy recompile 路径 =====
+
+
+def test_approve_after_restart_recompiles_and_resumes(tmp_path):
+    """模拟服务重启(清空 _graphs/_configs/_threads),approve 应 lazy recompile + resume,run 最终完成。
+
+    场景:
+    1. 启动 run → interrupted(step 审批)
+    2. 模拟重启:清空 RunManager 内存(_graphs/_configs/_threads)
+    3. approve → 触发 lazy recompile(从 team_store 取 Team + 重新 compile + resume)
+    4. SqliteSaver checkpoint 持久化 interrupt 状态,新 graph 能从 checkpoint 续跑
+    5. run 最终 completed
+    """
+    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(
+        tmp_path
+    )
+    client = TestClient(app)
+
+    client.post("/api/teams", json=make_team_json(with_approval=True))
+    resp = client.post("/api/runs", json={"team_name": "dev", "task": "restart recompile"})
+    run_id = resp.json()["run_id"]
+    status = _wait_for_run(client, run_id)
+    assert status == "interrupted", f"setup 失败:run 未到 interrupted(实际 {status})"
+
+    # 模拟服务重启:清空 RunManager 内存状态
+    with run_manager._lock:
+        run_manager._graphs.clear()
+        run_manager._configs.clear()
+        run_manager._threads.clear()
+    assert not run_manager.has_graph(run_id), "重启后 has_graph 应为 False"
+
+    # approve 应触发 lazy recompile + resume,返回 200
+    resp = client.post(
+        f"/api/runs/{run_id}/approve", json={"approved": True, "reason": "ok"}
+    )
+    assert resp.status_code == 200, f"lazy recompile 后 approve 应成功,实际: {resp.status_code} {resp.text}"
+
+    # run 应最终完成(checkpoint 续跑成功)
+    status = _wait_for_run(client, run_id, timeout=15.0)
+    assert status == "completed", (
+        f"lazy recompile 后 run 应完成,实际: {status}"
+    )
+
+    conn.close()
+
+
+def test_approve_after_restart_team_deleted_returns_409(tmp_path):
+    """重启后 team 也被删除,approve 应返回 409 + run 标 failed(ValueError 路径)。"""
+    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(
+        tmp_path
+    )
+    client = TestClient(app)
+
+    client.post("/api/teams", json=make_team_json(with_approval=True))
+    resp = client.post("/api/runs", json={"team_name": "dev", "task": "team deleted"})
+    run_id = resp.json()["run_id"]
+    status = _wait_for_run(client, run_id)
+    assert status == "interrupted"
+
+    # 模拟重启 + team 被删
+    with run_manager._lock:
+        run_manager._graphs.clear()
+        run_manager._configs.clear()
+        run_manager._threads.clear()
+    del_resp = client.delete("/api/teams/dev")
+    assert del_resp.status_code == 200
+
+    # approve:team 不存在 → ValueError → 409 + run failed
+    resp = client.post(
+        f"/api/runs/{run_id}/approve", json={"approved": True}
+    )
+    assert resp.status_code == 409
+    assert "not found" in resp.json()["detail"].lower()
+
+    run = client.get(f"/api/runs/{run_id}").json()
+    assert run["status"] == "failed", (
+        f"team 不存在时 run 应标 failed,实际: {run['status']}"
+    )
+
+    # 应有 error 事件
+    trace = client.get(f"/api/runs/{run_id}/trace").json()
+    assert any(e["event_type"] == "error" for e in trace)
+
+    conn.close()

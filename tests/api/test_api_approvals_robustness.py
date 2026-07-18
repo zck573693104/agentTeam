@@ -119,9 +119,12 @@ def test_approve_run_non_value_error_rolls_back_to_failed(tmp_path):
 
 
 def test_approve_run_value_error_still_returns_409(tmp_path):
-    """回归保障：ValueError（graph/config 丢失）仍按原逻辑返回 409 + 标记 failed。
+    """回归保障：ValueError（team 不存在导致 recompile 失败）仍按原逻辑返回 409 + 标记 failed。
 
-    修复时不能破坏 ValueError 的现有行为。
+    P0 后,清空 _graphs 单独不再触发 ValueError —— lazy recompile 会从 team_store
+    取 Team 重新 compile。要触发 ValueError,需同时让 team 也不存在(team_store.get
+    返回 None → approve_run 显式 raise ValueError)。这模拟"重启后 team 被删除"场景。
+    修复时不能破坏 ValueError 的现有行为(409 + failed + error 事件)。
     """
     app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(
         tmp_path
@@ -129,11 +132,14 @@ def test_approve_run_value_error_still_returns_409(tmp_path):
     client = TestClient(app)
     run_id = _create_interrupted_run(client)
 
-    # 模拟 graph/config 丢失（RunManager 内存被清空），resume_run 抛 ValueError
+    # 模拟 graph/config 丢失(RunManager 内存被清空)+ team 被删除
+    # (P0 后清空 _graphs 单独触发 lazy recompile,需 team 也不存在才会抛 ValueError)
     with run_manager._lock:
         run_manager._graphs.clear()
         run_manager._configs.clear()
         run_manager._threads.clear()
+    del_resp = client.delete("/api/teams/dev")
+    assert del_resp.status_code == 200
 
     resp = client.post(
         f"/api/runs/{run_id}/approve", json={"approved": True}
