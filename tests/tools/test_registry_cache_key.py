@@ -8,6 +8,7 @@
 
 全部用 fake loader,不依赖真实 npx 子进程。
 """
+import pytest
 from langchain_core.tools import StructuredTool
 
 from agentteam.domain.mcp_server import MCPServer
@@ -215,3 +216,60 @@ def test_different_name_different_key():
     reg.register_mcp_tools(server_a)
     reg.register_mcp_tools(server_b)
     assert calls == ["server_a", "server_b"], "缓存命中后不应再调用 loader"
+
+
+def test_loader_failure_not_cached():
+    """loader 抛异常时,cache key 不入缓存,允许重试。
+
+    契约:register_mcp_tools 中 self._loaded_servers.add(key) 必须在
+    loader(server) 成功返回之后执行。若 loader 抛异常,add 不应执行,
+    下次调用同一 server 时应再次触发 loader。
+
+    本测试为 guard rail:确保后续重构不会把 add 提前到 loader 调用前,
+    或在异常路径也加入缓存。现有实现已正确(Task 2 修改后保持原顺序)。
+    """
+    from agentteam.tools.registry import ToolRegistry
+
+    call_count = {"n": 0}
+
+    def failing_then_success_loader(server):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("load failed")
+        return [_make_tool("fetch")]
+
+    reg = ToolRegistry(mcp_loader=failing_then_success_loader)
+    server = MCPServer(name="srv", command="python")
+
+    # 第一次:loader 抛异常
+    with pytest.raises(RuntimeError, match="load failed"):
+        reg.register_mcp_tools(server)
+
+    # 第二次:loader 应再次被调用(失败未缓存)
+    registered = reg.register_mcp_tools(server)
+    assert call_count["n"] == 2, "失败后应允许重试,loader 应被再次调用"
+    assert "mcp:srv:fetch" in registered
+
+
+def test_loader_failure_then_retry_then_second_failure_still_not_cached():
+    """连续三次失败,cache 始终不写入,每次仍触发 loader。
+
+    守护契约:任何一次失败都不应入缓存,后续调用仍应触发 loader。
+    防止后续重构把 add 提前到 loader 调用前,或在异常路径也加入缓存。
+    """
+    from agentteam.tools.registry import ToolRegistry
+
+    call_count = {"n": 0}
+
+    def always_failing_loader(server):
+        call_count["n"] += 1
+        raise RuntimeError(f"fail #{call_count['n']}")
+
+    reg = ToolRegistry(mcp_loader=always_failing_loader)
+    server = MCPServer(name="srv", command="python")
+
+    # 三次连续失败,每次都应触发 loader
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match=r"fail #\d"):
+            reg.register_mcp_tools(server)
+    assert call_count["n"] == 3, "每次失败都不应缓存,loader 应每次被调用"
