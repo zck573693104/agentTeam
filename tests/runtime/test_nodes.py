@@ -72,9 +72,10 @@ def test_worker_node_direct_answer(fake_llm):
     assert "coder" in result["messages"][0].content
 
 
-def test_worker_node_react_with_tool(fake_llm, tmp_path):
+def test_worker_node_react_with_tool(fake_llm, tmp_path, monkeypatch):
     from agentteam.tools.skills.file_ops import write_file
 
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
     target = tmp_path / "out.txt"
     fake_llm.set_invoke_responses([
         AIMessage(
@@ -358,10 +359,11 @@ def test_finalize_emits_worker_end_trace(fake_llm, fake_trace_writer):
     assert fake_trace_writer.events[0]["actor"] == "w1"
 
 
-def test_tool_step_executes_tools(fake_llm, tmp_path):
+def test_tool_step_executes_tools(fake_llm, tmp_path, monkeypatch):
     """tool_step 执行工具，回灌 ToolMessage，递增 iteration，清空 tool_calls。"""
     from agentteam.tools.skills.file_ops import write_file
 
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
     target = tmp_path / "out.txt"
     worker = Worker(name="w1", role="r", description="", system_prompt="test")
     tool_calls = [{"name": "write_file", "args": {"path": str(target), "content": "hi"}, "id": "tc1", "type": "tool_call"}]
@@ -539,10 +541,11 @@ def test_worker_subgraph_direct_answer(fake_llm):
     assert "coder" in result["messages"][0].content
 
 
-def test_worker_subgraph_react_with_tool(fake_llm, tmp_path):
+def test_worker_subgraph_react_with_tool(fake_llm, tmp_path, monkeypatch):
     """子图：LLM 调工具 → 工具执行 → LLM 给最终答案。"""
     from agentteam.tools.skills.file_ops import write_file
 
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
     target = tmp_path / "out.txt"
     fake_llm.set_invoke_responses([
         AIMessage(

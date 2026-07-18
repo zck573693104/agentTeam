@@ -71,11 +71,28 @@ export interface Approval {
   reason: string | null;
 }
 
+export interface AgentNode {
+  name: string;
+  role: "supervisor" | "worker";
+  system_prompt?: string;
+  model?: Record<string, any> | null;
+  children?: (AgentNode | TeamRefNode)[];
+  approval_policy?: Record<string, any> | null;
+  tools?: string[];
+  max_iterations?: number;
+  ref?: string | null;
+}
+
+export interface TeamRefNode {
+  _type: "TeamRef";
+  name: string;
+  alias?: string | null;
+}
+
 export interface Team {
   name: string;
   description: string;
-  leader: Record<string, any>;
-  workers: Record<string, any>[];
+  root: AgentNode;
   default_model: Record<string, any> | null;
   skills: string[];
   mcp_servers: Record<string, any>[];

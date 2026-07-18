@@ -5,6 +5,7 @@ from typing import Callable
 
 from langchain_core.language_models import BaseChatModel
 
+from .base import BaseAdapter
 from ..provider import ModelRef
 
 
@@ -19,10 +20,7 @@ def _load_chat_class() -> Callable:
     return ChatAnthropic
 
 
-class AnthropicAdapter:
-    def __init__(self, api_keys: dict[str, str]) -> None:
-        self._api_keys = api_keys
-
+class AnthropicAdapter(BaseAdapter):
     def build(self, ref: ModelRef) -> BaseChatModel:
         ChatAnthropic = _load_chat_class()
         api_key = self._api_keys.get("anthropic") or os.environ.get("ANTHROPIC_API_KEY")

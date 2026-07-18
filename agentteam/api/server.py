@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -9,15 +10,20 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from starlette.staticfiles import StaticFiles
 
 from agentteam.api.events import EventBus
+from agentteam.api.routes.admin import admin_router
 from agentteam.api.routes.dashboard import dashboard_router
+from agentteam.api.routes.library import library_router
 from agentteam.api.routes.runs import runs_router
 from agentteam.api.routes.teams import teams_router
 from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
+from agentteam.domain.library import AgentLibrary
 from agentteam.models.provider import ModelProvider
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
+from agentteam.storage.library import LibraryRepo
 from agentteam.storage.runs import RunRepo
+from agentteam.storage.teams import TeamRepo
 from agentteam.tools.registry import ToolRegistry
 
 # 哨兵：web_dist 参数未显式传入时使用此值,区分"用默认路径"和"显式禁用挂载"。
@@ -31,36 +37,53 @@ def create_app(
     db_path: str = "data/agentteam.db",
     model_provider: ModelProvider | None = None,
     tool_registry: ToolRegistry | None = None,
+    agent_library: AgentLibrary | None = None,
     web_dist: Path | None | object = _DEFAULT,
 ) -> FastAPI:
-    app = FastAPI(title="AgentTeam")
-
     conn = init_db(db_path)
+
+    # BUG-07:用 lifespan 在 app shutdown 时显式 close conn,
+    # 避免 Windows 上 SQLite 文件锁残留(原实现 conn 仅在 app GC 时释放)。
+    # 注意:只有 `with TestClient(app):` 或真实 uvicorn 启停才触发 lifespan;
+    # 直接 TestClient(app) 不触发(与原行为一致,不影响现有测试)。
+    @asynccontextmanager
+    async def lifespan(app):
+        yield
+        conn.close()
+
+    app = FastAPI(title="AgentTeam", lifespan=lifespan)
+
     # 共享锁：SqliteSaver / RunRepo / AuditRepo 共用同一 sqlite3.Connection，
     # 必须用同一把锁串行化所有连接访问，否则多线程下会触发
     # sqlite3.InterfaceError: bad parameter or other API misuse。
     conn_lock = threading.Lock()
     run_repo = RunRepo(conn, lock=conn_lock)
     audit_repo = AuditRepo(conn, lock=conn_lock)
-    team_store = TeamStore()
+    team_repo = TeamRepo(conn, lock=conn_lock)
+    library_repo = LibraryRepo(conn, lock=conn_lock)
+    team_store = TeamStore(repo=team_repo)
     event_bus = EventBus()
-    run_manager = RunManager(run_repo, audit_repo, event_bus)
-    mp = model_provider or ModelProvider()
-    tr = tool_registry or ToolRegistry()
 
     saver = SqliteSaver(conn)
     saver.lock = conn_lock  # 让 SqliteSaver 也用同一把锁
     assert saver.lock is conn_lock  # 防御：若 langgraph 改名 lock 属性则静默失效
     saver.setup()
 
+    run_manager = RunManager(run_repo, audit_repo, event_bus, checkpointer=saver)
+    mp = model_provider or ModelProvider()
+    tr = tool_registry or ToolRegistry()
+    lib = agent_library or AgentLibrary(repo=library_repo)
+
     app.include_router(teams_router(team_store))
     app.include_router(
         runs_router(
             run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,
-            checkpointer=saver,
+            checkpointer=saver, agent_library=lib,
         )
     )
     app.include_router(dashboard_router(run_repo, audit_repo))
+    app.include_router(library_router(lib))
+    app.include_router(admin_router(team_store, lib))
 
     # 挂载前端静态文件(生产模式)。
     # - web_dist=_DEFAULT(默认): 使用 _DEFAULT_WEB_DIST,目录存在才挂载

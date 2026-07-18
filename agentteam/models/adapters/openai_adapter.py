@@ -5,6 +5,7 @@ from typing import Callable
 
 from langchain_core.language_models import BaseChatModel
 
+from .base import BaseAdapter
 from ..provider import ModelRef
 
 
@@ -19,10 +20,7 @@ def _load_chat_class() -> Callable:
     return ChatOpenAI
 
 
-class OpenAIAdapter:
-    def __init__(self, api_keys: dict[str, str]) -> None:
-        self._api_keys = api_keys
-
+class OpenAIAdapter(BaseAdapter):
     def build(self, ref: ModelRef) -> BaseChatModel:
         ChatOpenAI = _load_chat_class()
         api_key = self._api_keys.get("openai") or os.environ.get("OPENAI_API_KEY")

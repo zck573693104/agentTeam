@@ -46,3 +46,59 @@ def test_register_dev_team_connection_error(capsys):
         main(["register-dev-team"])
     captured = capsys.readouterr()
     assert "错误" in captured.out
+
+
+def test_register_team_command_calls_api(monkeypatch):
+    """register-team 命令调用 POST /api/teams。"""
+    import agentteam.cli as cli
+    called = {}
+    class FakeResp:
+        status_code = 200
+        def json(self): return {"name": "t"}
+    def fake_post(url, json=None, timeout=None):
+        called["url"] = url
+        called["json"] = json
+        return FakeResp()
+    monkeypatch.setattr(cli.requests, "post", fake_post)
+    # 模拟 importlib 动态加载模块
+    monkeypatch.setattr(cli, "_load_team_module", lambda path: {
+        "name": "t", "description": "d",
+        "root": {"name": "lead", "role": "supervisor", "children": []},
+        "default_model": {"provider": "qwen", "name": "qwen-max"},
+    })
+    rc = cli.main(["register-team", "some_file.py", "--api", "http://test"])
+    assert rc == 0
+    assert called["url"] == "http://test/api/teams"
+
+
+def test_list_teams_command_calls_api(monkeypatch):
+    """list-teams 命令调用 GET /api/teams。"""
+    import agentteam.cli as cli
+    class FakeResp:
+        status_code = 200
+        def json(self): return [{"name": "t1"}, {"name": "t2"}]
+    def fake_get(url, timeout=None):
+        return FakeResp()
+    monkeypatch.setattr(cli.requests, "get", fake_get)
+    rc = cli.main(["list-teams", "--api", "http://test"])
+    assert rc == 0
+
+
+def test_register_library_command_calls_api(monkeypatch):
+    """register-library 命令调用 POST /api/library/agents。"""
+    import agentteam.cli as cli
+    called = {}
+    class FakeResp:
+        status_code = 200
+        def json(self): return {"ok": True}
+    def fake_post(url, json=None, timeout=None):
+        called["url"] = url
+        called["json"] = json
+        return FakeResp()
+    monkeypatch.setattr(cli.requests, "post", fake_post)
+    monkeypatch.setattr(cli, "_load_library_module", lambda path: [
+        {"name": "coder", "role": "worker", "system_prompt": "code"},
+    ])
+    rc = cli.main(["register-library", "lib.py", "--api", "http://test"])
+    assert rc == 0
+    assert called["url"] == "http://test/api/library/agents"

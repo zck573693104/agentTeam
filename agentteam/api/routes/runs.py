@@ -12,6 +12,7 @@ from sse_starlette.sse import EventSourceResponse
 from agentteam.api.events import BroadcastTraceWriter, EventBus
 from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
+from agentteam.domain.library import AgentLibrary
 from agentteam.models.provider import ModelProvider
 from agentteam.runtime.graph import TeamCompiler
 from agentteam.storage.audit import AuditRepo
@@ -39,6 +40,24 @@ def run_to_dict(row) -> dict:
     return d
 
 
+def _build_compiler(
+    model_provider: ModelProvider,
+    tool_registry: ToolRegistry,
+    library: AgentLibrary,
+    team_store: TeamStore,
+) -> TeamCompiler:
+    """构造 TeamCompiler 并注册所有已知 Team(供 TeamRef 解析)。
+
+    抽成模块级 helper 供 approve_run 的 lazy recompile 路径调用,
+    与 create_run 中的编译逻辑保持一致,避免循环依赖
+    (RunManager 不直接依赖 ModelProvider/ToolRegistry)。
+    """
+    compiler = TeamCompiler(model_provider, tool_registry, library=library)
+    for t in team_store.list_all():
+        compiler.register_team(t)
+    return compiler
+
+
 def runs_router(
     run_manager: RunManager,
     team_store: TeamStore,
@@ -48,8 +67,10 @@ def runs_router(
     audit_repo: AuditRepo,
     event_bus: EventBus,
     checkpointer=None,
+    agent_library: AgentLibrary | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/runs", tags=["runs"])
+    lib = agent_library or AgentLibrary()
 
     @router.post("")
     def create_run(req: CreateRunRequest):
@@ -60,7 +81,10 @@ def runs_router(
         run_id = run_repo.create_run(team.name, req.task)
 
         trace_writer = BroadcastTraceWriter(audit_repo, event_bus)
-        compiler = TeamCompiler(model_provider, tool_registry)
+        compiler = TeamCompiler(model_provider, tool_registry, library=lib, run_manager=run_manager)
+        # 注册所有已知 Team 到 compiler._team_registry，使 TeamRef 可解析
+        for t in team_store.list_all():
+            compiler.register_team(t)
         try:
             graph = compiler.compile(
                 team,
@@ -167,9 +191,9 @@ def runs_router(
                         ),
                     }
                     return
-                if run_status and run_status["status"] in ("completed", "failed"):
+                if run_status and run_status["status"] in ("completed", "failed", "cancelled"):
                     # 重读历史：在初始历史读取（step 2）与状态检查之间，run 可能刚完成并写入
-                    # run_end 事件。若不重读，客户端会漏掉该事件。仅补发 id > last_id 的新事件。
+                    # run_end / run_cancelled 事件。若不重读，客户端会漏掉该事件。仅补发 id > last_id 的新事件。
                     updated_history = audit_repo.list_events(run_id)
                     for row in updated_history:
                         eid = dict(row).get("id", 0)
@@ -187,8 +211,12 @@ def runs_router(
                     if await request.is_disconnected():
                         break
                     try:
+                        # BUG-08 修复：timeout 缩短到 0.5s。
+                        # 原值 2.0s 会让客户端断开后最坏延迟 2s 才检测到，
+                        # 期间 threadpool 线程被阻塞，>40 个并发 SSE 客户端会耗尽 threadpool。
+                        # 0.5s 平衡了 disconnect 检测频率与 idle 时的 CPU 开销。
                         event = await loop.run_in_executor(
-                            None, lambda: q.get(timeout=2.0)
+                            None, lambda: q.get(timeout=0.5)
                         )
                     except queue_mod.Empty:
                         continue
@@ -199,8 +227,8 @@ def runs_router(
                         "event": event.get("event_type", "message"),
                         "data": json.dumps(event, default=str, ensure_ascii=False),
                     }
-                    # run_end / error 后关闭（run_interrupted 不关闭——等审批续跑）
-                    if event.get("event_type") in ("run_end", "error"):
+                    # run_end / error / run_cancelled 后关闭（run_interrupted 不关闭——等审批续跑）
+                    if event.get("event_type") in ("run_end", "error", "run_cancelled"):
                         break
             finally:
                 event_bus.unsubscribe(run_id, q)
@@ -223,11 +251,31 @@ def runs_router(
             )
 
         try:
-            run_manager.resume_run(run_id, req.approved, req.reason)
-        except ValueError as e:
-            # claim 成功但 resume 失败：服务重启后 graph/config 丢失，run 无法恢复。
-            # 标记为 failed（终态）而非回滚 interrupted——否则 run 永远卡住，
-            # 用户反复 approve 反复 409。
+            if run_manager.has_graph(run_id):
+                # fast path: graph 仍在内存(正常流程),直接 resume
+                run_manager.resume_run(run_id, req.approved, req.reason)
+            else:
+                # lazy recompile (P0): 服务重启后 _graphs/_configs 丢失,
+                # 从 team_store 取 Team 重新 compile,再 resume。
+                # SqliteSaver checkpoint 已持久化 interrupt 状态,
+                # 新 graph 持有原 saver 即可从 checkpoint 续跑。
+                team = team_store.get(run["team_name"])
+                if team is None:
+                    raise ValueError(
+                        f"Team '{run['team_name']}' not found (needed for recompile)"
+                    )
+                run_manager.recompile_and_resume(
+                    run_id, team,
+                    compiler_factory=lambda: _build_compiler(
+                        model_provider, tool_registry, lib, team_store,
+                    ),
+                    approved=req.approved, reason=req.reason,
+                )
+        except Exception as e:
+            # BUG-10 修复(沿用):catch Exception 确保任何 resume/recompile 异常
+            # 都回滚状态为 failed,避免 try_claim 已置 running 后无线程执行导致卡死。
+            # ValueError(team 不存在等预期错误)返回 409;
+            # 其他异常(锁竞争、compile 失败等)返回 500。
             run_repo.end_run(run_id, "failed")
             eid = audit_repo.add_event(
                 run_id, "error", "system", {"error": str(e)}
@@ -241,7 +289,29 @@ def runs_router(
                     "payload": {"error": str(e)},
                 },
             )
-            raise HTTPException(status_code=409, detail=str(e))
+            status_code = 409 if isinstance(e, ValueError) else 500
+            raise HTTPException(status_code=status_code, detail=str(e))
+        return {"ok": True}
+
+    @router.post("/{run_id}/cancel")
+    def cancel_run(run_id: str):
+        run = run_repo.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+        if run["status"] not in ("running", "interrupted"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Run '{run_id}' cannot be cancelled in status: {run['status']}",
+            )
+        if not run_manager.cancel_run(run_id):
+            # cancel_run 返回 False:run 不在可取消状态(并发竞态:已被其他请求取消/结束)
+            # 重新读取状态便于诊断(409 detail 含当前 status,与 approve_run 风格一致)
+            current = run_repo.get_run(run_id)
+            current_status = current["status"] if current else "unknown"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Run '{run_id}' not active or already cancelled (current status: {current_status})",
+            )
         return {"ok": True}
 
     return router

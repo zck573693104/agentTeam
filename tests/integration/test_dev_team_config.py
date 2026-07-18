@@ -1,6 +1,6 @@
 """DEV_TEAM 配置验证测试。"""
 from examples.dev_team import DEV_TEAM
-from agentteam.api.serializer import team_from_dict
+from agentteam.domain.serializer import team_from_dict
 from agentteam.domain.team import Team
 from agentteam.domain.worker import Worker
 from agentteam.domain.mcp_server import MCPServer

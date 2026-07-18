@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from agentteam.api.serializer import team_from_dict, team_to_dict
+from agentteam.domain.serializer import team_from_dict, team_to_dict
 from agentteam.api.store import TeamStore
 
 
@@ -20,7 +20,13 @@ def teams_router(store: TeamStore) -> APIRouter:
             team = team_from_dict(body)
         except (KeyError, TypeError) as e:
             raise HTTPException(status_code=422, detail=f"Invalid team JSON: {e}")
-        store.register(team)
+        # BUG-01:用原子 register_if_absent 替代 get-then-register,
+        # 避免并发 POST 同名 team 时两者都通过检查、互相覆盖。
+        if not store.register_if_absent(team):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Team already exists: {team.name}",
+            )
         return {"name": team.name}
 
     @router.get("/{name}")
@@ -35,5 +41,21 @@ def teams_router(store: TeamStore) -> APIRouter:
         if not store.delete(name):
             raise HTTPException(status_code=404, detail=f"Team '{name}' not found")
         return {"ok": True}
+
+    @router.put("/{name}")
+    def update_team(name: str, body: dict):
+        if store.get(name) is None:
+            raise HTTPException(status_code=404, detail=f"Team '{name}' not found")
+        try:
+            team = team_from_dict(body)
+        except (KeyError, TypeError) as e:
+            raise HTTPException(status_code=422, detail=f"Invalid team JSON: {e}")
+        if team.name != name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Name in body ({team.name}) must match URL ({name})",
+            )
+        store.update(team)
+        return {"name": team.name}
 
     return router

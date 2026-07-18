@@ -5,6 +5,7 @@ from typing import Callable
 
 from langchain_core.language_models import BaseChatModel
 
+from .base import BaseAdapter
 from ..provider import ModelRef
 
 
@@ -19,7 +20,7 @@ def _load_chat_class() -> Callable:
     return ChatOllama
 
 
-class OllamaAdapter:
+class OllamaAdapter(BaseAdapter):
     def __init__(self, api_keys: dict[str, str]) -> None:
         # 复用 api_keys dict 承载 ollama_base_url 等本地配置
         self._config = api_keys

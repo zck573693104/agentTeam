@@ -724,3 +724,320 @@ def test_e2e_mcp_tools_via_fake_loader(fake_llm, fake_trace_writer):
     # 验证 tool_call 轨迹事件
     event_types = [e["event_type"] for e in fake_trace_writer.events]
     assert "tool_call" in event_types
+
+
+# ============ SP1 Task 9: 递归编译多级层级测试 ============
+
+
+def test_compile_recursive_three_level_chain(fake_llm):
+    """3 级 supervisor 链编译成功，node_names 包含各层节点。"""
+    from agentteam.domain.agent import Agent
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t", description="3 level",
+        root=Agent(
+            name="ceo", role="supervisor", system_prompt="CEO",
+            children=[Agent(
+                name="cto", role="supervisor", system_prompt="CTO",
+                children=[Agent(name="eng", role="worker", system_prompt="eng")],
+            )],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    graph = compiler.compile(team)
+    node_names = set(graph.get_graph().nodes.keys())
+    assert "leader_plan" in node_names
+    assert "leader_review" in node_names
+    # ceo 的 child 是 cto（supervisor → agent_cto 节点，内部含子图）
+    assert "agent_cto" in node_names
+
+
+def test_compile_with_team_ref(fake_llm):
+    """Team 嵌套：父 Team 引用子 Team 作为 child。"""
+    from agentteam.domain.agent import Agent, TeamRef
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    sub_team = Team(
+        name="sub", description="sub",
+        root=Agent(
+            name="sub_lead", role="supervisor", system_prompt="sub",
+            children=[Agent(name="w", role="worker")],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    compiler.register_team(sub_team)
+    main_team = Team(
+        name="main", description="main",
+        root=Agent(
+            name="lead", role="supervisor", system_prompt="main",
+            children=[TeamRef(name="sub", alias="qa")],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    graph = compiler.compile(main_team)
+    node_names = set(graph.get_graph().nodes.keys())
+    assert "subteam_qa" in node_names
+
+
+def test_compile_team_ref_not_registered_raises(fake_llm):
+    """TeamRef 指向未注册 Team → KeyError。"""
+    import pytest
+    from agentteam.domain.agent import Agent, TeamRef
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t", description="t",
+        root=Agent(
+            name="lead", role="supervisor",
+            children=[TeamRef(name="nonexistent")],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    with pytest.raises(KeyError, match="Team not registered"):
+        compiler.compile(team)
+
+
+def test_compile_max_depth_exceeded_raises(fake_llm):
+    """depth > MAX_DEPTH → ValueError。"""
+    import pytest
+    from agentteam.domain.agent import Agent
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    compiler.MAX_DEPTH = 3  # 测试用调小
+
+    # 构造 4 级链
+    leaf = Agent(name="w", role="worker")
+    l3 = Agent(name="l3", role="supervisor", children=[leaf])
+    l2 = Agent(name="l2", role="supervisor", children=[l3])
+    l1 = Agent(name="l1", role="supervisor", children=[l2])
+    root = Agent(name="root", role="supervisor", children=[l1])
+    team = Team(
+        name="t", description="deep", root=root,
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    with pytest.raises(ValueError, match="Max depth exceeded"):
+        compiler.compile(team)
+
+
+def test_compile_circular_team_ref_raises(fake_llm):
+    """循环 TeamRef：A 引用 B，B 引用 A → ValueError。"""
+    import pytest
+    from agentteam.domain.agent import Agent, TeamRef
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+
+    # 通过 register_team 注册两个互相引用的 Team
+    # 通过 TeamRef 名称引用，运行时编译期检测循环
+    team_a = Team(
+        name="team_a", description="a",
+        root=Agent(name="la", role="supervisor",
+                   children=[TeamRef(name="team_b", alias="b")]),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    team_b = Team(
+        name="team_b", description="b",
+        root=Agent(name="lb", role="supervisor",
+                   children=[TeamRef(name="team_a", alias="a")]),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    compiler.register_team(team_a)
+    compiler.register_team(team_b)
+    with pytest.raises(ValueError, match="Circular team reference"):
+        compiler.compile(team_a)
+
+
+def test_compile_supervisor_with_tools_raises(fake_llm):
+    """supervisor 不能有 tools。"""
+    import pytest
+    from agentteam.domain.agent import Agent
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t", description="t",
+        root=Agent(
+            name="lead", role="supervisor",
+            children=[Agent(name="w", role="worker")],
+            tools=["read_file"],  # 非法
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    with pytest.raises(ValueError, match="supervisor cannot have tools"):
+        compiler.compile(team)
+
+
+def test_compile_worker_with_children_raises(fake_llm):
+    """worker 不能有 children。"""
+    import pytest
+    from agentteam.domain.agent import Agent
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    compiler = TeamCompiler(provider, ToolRegistry())
+    team = Team(
+        name="t", description="t",
+        root=Agent(
+            name="lead", role="supervisor",
+            children=[Agent(
+                name="w", role="worker",
+                children=[Agent(name="x", role="worker")],  # 非法
+            )],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    with pytest.raises(ValueError, match="worker cannot have children"):
+        compiler.compile(team)
+
+
+def test_compile_with_library_ref(fake_llm):
+    """专家库引用：Agent(ref=...) 经 resolve 后编译。"""
+    from langchain_core.tools import StructuredTool
+
+    from agentteam.domain.agent import Agent
+    from agentteam.domain.library import AgentLibrary
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+
+    lib = AgentLibrary()
+    lib.register(Agent(
+        name="code_engineer", role="worker",
+        system_prompt="template", tools=["read_file"], max_iterations=5,
+    ))
+    provider = FakeModelProvider({"qwen-max": fake_llm})
+    reg = ToolRegistry()
+    # 注册库模板中声明的 read_file 工具，否则 get_tools 会抛 KeyError
+    reg.register(StructuredTool.from_function(
+        name="read_file", description="read", func=lambda path: ""
+    ))
+    compiler = TeamCompiler(provider, reg, library=lib)
+    team = Team(
+        name="t", description="t",
+        root=Agent(
+            name="lead", role="supervisor",
+            children=[Agent(name="eng", role="worker", ref="library:code_engineer")],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    graph = compiler.compile(team)
+    assert graph is not None  # 编译成功
+
+
+def test_compile_registers_agent_mcp_servers():
+    """Worker Agent 的 mcp_servers 在编译期注册到 ToolRegistry。"""
+    from agentteam.domain.agent import Agent
+    from agentteam.domain.mcp_server import MCPServer
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+    from langchain_core.tools import StructuredTool
+
+    def fake_loader(server):
+        return [StructuredTool.from_function(
+            name="git_status", description="git status", func=lambda: "ok")]
+    reg = ToolRegistry(mcp_loader=fake_loader)
+
+    provider = FakeModelProvider({"qwen-max": FakeLLM()})
+    compiler = TeamCompiler(provider, reg)
+    team = Team(
+        name="t", description="d",
+        root=Agent(
+            name="lead", role="supervisor",
+            children=[Agent(
+                name="coder", role="worker",
+                mcp_servers=[MCPServer(name="git", command="git-mcp")],
+                tools=["mcp:git:git_status"],
+            )],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    compiler.compile(team)
+    assert "mcp:git:git_status" in reg.list_names()
+
+
+def test_compile_registers_teamref_mcp_overrides():
+    """TeamRef 的 mcp_overrides 在编译期注册到 ToolRegistry。"""
+    from agentteam.domain.agent import Agent, TeamRef
+    from agentteam.domain.mcp_server import MCPServer
+    from agentteam.domain.team import Team
+    from agentteam.models.provider import ModelRef
+    from agentteam.runtime.graph import TeamCompiler
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeModelProvider
+    from langchain_core.tools import StructuredTool
+
+    def fake_loader(server):
+        return [StructuredTool.from_function(
+            name="extra_tool", description="extra", func=lambda: "ok")]
+    reg = ToolRegistry(mcp_loader=fake_loader)
+
+    provider = FakeModelProvider({"qwen-max": FakeLLM()})
+    compiler = TeamCompiler(provider, reg)
+
+    sub_team = Team(
+        name="sub", description="sub",
+        root=Agent(
+            name="sub_lead", role="supervisor",
+            children=[Agent(name="w", role="worker")],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    compiler.register_team(sub_team)
+
+    main_team = Team(
+        name="main", description="main",
+        root=Agent(
+            name="lead", role="supervisor",
+            children=[TeamRef(
+                name="sub", alias="qa",
+                mcp_overrides=[MCPServer(name="extra", command="extra-mcp")],
+            )],
+        ),
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    compiler.compile(main_team)
+    assert "mcp:extra:extra_tool" in reg.list_names()
