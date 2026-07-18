@@ -1,7 +1,10 @@
+"""TeamCompiler：递归编译 Agent 树为 LangGraph StateGraph。"""
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
+from agentteam.domain.agent import Agent, TeamRef
+from agentteam.domain.library import AgentLibrary
 from agentteam.domain.team import Team
 from agentteam.models.provider import ModelProvider
 from agentteam.runtime.approval import make_step_gate, make_worker_gate
@@ -16,7 +19,10 @@ from agentteam.tools.registry import ToolRegistry
 
 
 def route_from_plan(state: TeamState) -> str:
-    """leader_plan 之后，路由到第一步的 worker；空计划直接结束。"""
+    """旧模块级函数：仅用于旧测试兼容。
+
+    新代码用 make_route_from_plan(child_targets) 工厂。
+    """
     plan = state.get("plan", [])
     if not plan:
         return END
@@ -24,7 +30,7 @@ def route_from_plan(state: TeamState) -> str:
 
 
 def route_from_review(state: TeamState) -> str:
-    """leader_review 之后，若还有步骤路由到下一个 worker，否则结束。"""
+    """旧模块级函数：仅用于旧测试兼容。"""
     current = state.get("current_step", 0)
     plan = state.get("plan", [])
     if current >= len(plan):
@@ -39,23 +45,69 @@ def route_to_worker(state: TeamState) -> str:
     return route_from_review(state)
 
 
+def make_route_from_plan(child_targets: dict[str, str]):
+    """创建路由函数：plan[0].worker → child_targets[name]。"""
+    def route(state: TeamState) -> str:
+        plan = state.get("plan", [])
+        if not plan:
+            return END
+        return child_targets[plan[0]["worker"]]
+    return route
+
+
+def make_route_from_review(child_targets: dict[str, str]):
+    """创建路由函数：current_step → child_targets[name]。"""
+    def route(state: TeamState) -> str:
+        current = state.get("current_step", 0)
+        plan = state.get("plan", [])
+        if current >= len(plan):
+            return END
+        return child_targets[plan[current]["worker"]]
+    return route
+
+
+def make_route_to_worker(child_targets: dict[str, str]):
+    """创建路由函数：拒绝→END，否则→make_route_from_review。"""
+    inner = make_route_from_review(child_targets)
+    def route(state: TeamState) -> str:
+        if is_rejected(state):
+            return END
+        return inner(state)
+    return route
+
+
 def make_route_after_worker_gate(worker_node_name: str):
     """创建 worker_gate 之后的路由函数：拒绝→END，否则→worker。"""
-
     def route(state: TeamState) -> str:
         if is_rejected(state):
             return END
         return worker_node_name
-
     return route
 
 
 class TeamCompiler:
-    """把 Team 配置编译成可执行的 LangGraph StateGraph。"""
+    """把 Team 配置（Agent 树）递归编译成可执行的 LangGraph StateGraph。"""
 
-    def __init__(self, model_provider: ModelProvider, tool_registry: ToolRegistry):
+    MAX_DEPTH = 8
+
+    def __init__(
+        self,
+        model_provider: ModelProvider,
+        tool_registry: ToolRegistry,
+        library: AgentLibrary | None = None,
+    ):
         self._mp = model_provider
         self._tr = tool_registry
+        self._lib = library or AgentLibrary()
+        self._team_registry: dict[str, Team] = {}
+
+    def register_team(self, team: Team) -> None:
+        """注册可被 TeamRef 引用的 Team。"""
+        self._team_registry[team.name] = team
+
+    def register_library(self, library: AgentLibrary) -> None:
+        """注入专家库（也可在构造时传入）。"""
+        self._lib = library
 
     def compile(
         self,
@@ -64,93 +116,182 @@ class TeamCompiler:
         trace_writer: TraceWriter | None = None,
         audit_repo=None,
     ):
-        graph = StateGraph(TeamState)
-
-        # 加载 MCP 工具到 registry（编译时 eager loading）
+        # 加载 team 级 MCP（沿用现状）
         for server in team.mcp_servers:
             self._tr.register_mcp_tools(server)
-
-        leader_model = team.leader.model or team.default_model
-        leader_llm = self._mp.get_llm(leader_model)
-        graph.add_node(
-            "leader_plan", make_leader_plan_node(team.leader, leader_llm, trace_writer)
+        # 校验 root
+        if team.root.role != "supervisor":
+            raise ValueError("Team.root must be supervisor")
+        # 递归编译 root
+        return self._compile_agent(
+            team.root, team.default_model, checkpointer,
+            trace_writer, audit_repo,
+            depth=0, path=f"team:{team.name}",
         )
-        graph.add_node(
-            "leader_review",
-            make_leader_review_node(team.leader, leader_llm, trace_writer),
+
+    def _compile_agent(
+        self, agent: Agent, default_model, checkpointer,
+        trace_writer, audit_repo, depth, path,
+    ):
+        # 1. 解析 ref（深拷贝库定义，保留覆盖）
+        agent = self._lib.resolve(agent)
+        # 2. 校验
+        self._validate(agent, depth, path)
+        # 3. 按 role 分派
+        if agent.role == "worker":
+            return self._compile_worker(agent, default_model, trace_writer, audit_repo)
+        return self._compile_supervisor(
+            agent, default_model, checkpointer, trace_writer, audit_repo,
+            depth, path,
         )
 
-        # Step gate（仅在 leader 有 step 级策略时添加）
-        step_policy = team.leader.approval_policy
+    def _validate(self, agent: Agent, depth: int, path: str) -> None:
+        if depth > self.MAX_DEPTH:
+            raise ValueError(f"Max depth exceeded: >{self.MAX_DEPTH} at {path}")
+        if agent.role == "supervisor":
+            if not agent.children:
+                raise ValueError(f"supervisor must have children: {agent.name}")
+            if agent.tools:
+                raise ValueError(f"supervisor cannot have tools: {agent.name}")
+        elif agent.role == "worker":
+            if agent.children:
+                raise ValueError(f"worker cannot have children: {agent.name}")
+        else:
+            raise ValueError(f"Unknown role: {agent.role}")
+
+    def _compile_supervisor(
+        self, agent: Agent, default_model, checkpointer,
+        trace_writer, audit_repo, depth, path,
+    ):
+        graph = StateGraph(TeamState)
+        llm = self._mp.get_llm(agent.model or default_model)
+
+        # leader_plan
+        graph.add_node("leader_plan",
+            make_leader_plan_node(agent, llm, trace_writer))
+
+        # step_gate（仅当本层 step 级审批）
+        step_policy = agent.approval_policy
         has_step_gate = step_policy is not None and step_policy.level == "step"
         if has_step_gate:
-            graph.add_node(
-                "step_gate", make_step_gate(step_policy, trace_writer, audit_repo)
-            )
+            graph.add_node("step_gate",
+                make_step_gate(step_policy, trace_writer, audit_repo))
 
-        # Worker 节点 + worker gate
+        # 递归编译 children
+        child_targets: dict[str, str] = {}  # logical name → physical node name
         worker_gates: dict[str, bool] = {}
-        for worker in team.workers:
-            worker_model = worker.model or team.default_model
-            llm = self._mp.get_llm(worker_model)
-            tools = self._tr.get_tools(worker.tools) if worker.tools else []
-            graph.add_node(
-                f"worker_{worker.name}",
-                make_worker_node(worker, llm, tools, trace_writer, audit_repo),
-            )
 
-            wp = worker.approval_policy
-            has_gate = wp is not None and wp.level == "worker"
-            if has_gate:
-                graph.add_node(
-                    f"worker_gate_{worker.name}",
-                    make_worker_gate(worker.name, wp, trace_writer, audit_repo),
+        for child in agent.children:
+            if isinstance(child, TeamRef):
+                sub_team = self._team_registry.get(child.name)
+                if sub_team is None:
+                    raise KeyError(f"Team not registered: {child.name}")
+                alias = child.alias or sub_team.root.name
+                if alias in path.split("."):
+                    raise ValueError(
+                        f"Circular team reference: {path}.{alias}"
+                    )
+                sub_graph = self._compile_agent(
+                    sub_team.root, sub_team.default_model, checkpointer,
+                    trace_writer, audit_repo,
+                    depth=depth + 1, path=f"{path}.{alias}",
                 )
-            worker_gates[worker.name] = has_gate
+                node_name = f"subteam_{alias}"
+                graph.add_node(node_name, sub_graph)
+                child_targets[alias] = node_name
+                worker_gates[alias] = False
+            else:
+                sub_graph = self._compile_agent(
+                    child, default_model, checkpointer, trace_writer, audit_repo,
+                    depth=depth + 1, path=f"{path}.{child.name}",
+                )
+                # worker 用 worker_{name} 保持与旧测试兼容；supervisor 用 agent_{name}
+                if child.role == "worker":
+                    node_name = f"worker_{child.name}"
+                else:
+                    node_name = f"agent_{child.name}"
+                graph.add_node(node_name, sub_graph)
+                child_targets[child.name] = node_name
 
-        # 路由目标映射：逻辑名 → 物理节点名（gate 或 worker）
-        def physical_target(worker_name: str) -> str:
-            if worker_gates.get(worker_name):
-                return f"worker_gate_{worker_name}"
-            return f"worker_{worker_name}"
+                # worker 级审批 gate（仅 worker 角色可能有）
+                wp = child.approval_policy
+                has_gate = wp is not None and wp.level == "worker"
+                if has_gate:
+                    gate_name = f"worker_gate_{child.name}"
+                    graph.add_node(
+                        gate_name,
+                        make_worker_gate(child.name, wp, trace_writer, audit_repo),
+                    )
+                worker_gates[child.name] = has_gate
 
-        worker_targets = {
-            f"worker_{w.name}": physical_target(w.name) for w in team.workers
-        }
-        worker_targets[END] = END
+        # leader_review
+        graph.add_node("leader_review",
+            make_leader_review_node(agent, llm, trace_writer))
 
-        # 边
+        # 路由目标映射：key 必须是路由函数返回值（物理节点名），
+        # value 是实际目标节点（gate 或节点本身）。与旧实现 worker_targets
+        # 结构一致：key 与无 gate 时的 value 相同。
+        physical_targets: dict[str, str] = {}
+        for logical, node_name in child_targets.items():
+            if worker_gates.get(logical):
+                physical_targets[node_name] = f"worker_gate_{logical}"
+            else:
+                physical_targets[node_name] = node_name
+        physical_targets[END] = END
+
+        # 边：START → leader_plan
         graph.add_edge(START, "leader_plan")
 
+        # leader_plan → step_gate 或直接路由
+        # 路由函数接收 child_targets（logical→physical），返回物理节点名；
+        # path_map 用 physical_targets（physical→destination，含 gate 重定向）。
         if has_step_gate:
             graph.add_edge("leader_plan", "step_gate")
-            graph.add_conditional_edges("step_gate", route_to_worker, worker_targets)
+            graph.add_conditional_edges(
+                "step_gate",
+                make_route_to_worker(child_targets),
+                physical_targets,
+            )
         else:
             graph.add_conditional_edges(
-                "leader_plan", route_from_plan, worker_targets
+                "leader_plan",
+                make_route_from_plan(child_targets),
+                physical_targets,
             )
 
-        # worker_gate → worker（条件边：拒绝→END）
-        for worker in team.workers:
-            if worker_gates[worker.name]:
-                gate_name = f"worker_gate_{worker.name}"
-                worker_node = f"worker_{worker.name}"
+        # worker_gate → agent（条件边：拒绝→END）
+        for logical, has_gate in worker_gates.items():
+            if has_gate:
+                gate_name = f"worker_gate_{logical}"
+                target_node = child_targets[logical]
                 graph.add_conditional_edges(
                     gate_name,
-                    make_route_after_worker_gate(worker_node),
-                    {worker_node: worker_node, END: END},
+                    make_route_after_worker_gate(target_node),
+                    {target_node: target_node, END: END},
                 )
 
-        # worker → leader_review
-        for worker in team.workers:
-            graph.add_edge(f"worker_{worker.name}", "leader_review")
+        # agent/subteam/worker → leader_review
+        for logical, node_name in child_targets.items():
+            graph.add_edge(node_name, "leader_review")
 
         # leader_review → step_gate 或直接路由
         if has_step_gate:
             graph.add_edge("leader_review", "step_gate")
         else:
             graph.add_conditional_edges(
-                "leader_review", route_from_review, worker_targets
+                "leader_review",
+                make_route_from_review(child_targets),
+                physical_targets,
             )
 
         return graph.compile(checkpointer=checkpointer)
+
+    def _compile_worker(
+        self, agent: Agent, default_model, trace_writer, audit_repo,
+    ):
+        """worker 沿用 make_worker_node（内部封装子图并剥离共享累加器字段，
+        避免子图 reducer 与父图 reducer 双重累积）。
+        """
+        llm = self._mp.get_llm(agent.model or default_model)
+        tools = self._tr.get_tools(agent.tools) if agent.tools else []
+        return make_worker_node(agent, llm, tools, trace_writer, audit_repo)
