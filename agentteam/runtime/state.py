@@ -11,6 +11,15 @@ def merge_dicts(left: dict, right: dict) -> dict:
     return {**left, **right}
 
 
+def set_union(left: set, right: set) -> set:
+    """合并两个 set(left ∪ right)。
+
+    作为 LangGraph Annotated reducer 使用:dag 模式下多个 worker 并行
+    返回 {completed_steps: {step_id}} 时,通过此 reducer 合并。
+    """
+    return left | right
+
+
 class Step(TypedDict):
     """计划中的一步。"""
 
@@ -33,6 +42,10 @@ class TeamState(TypedDict):
     total_tokens: Annotated[int, operator.add]
     # 跨层执行路径追踪，如 "team:dev.ceo.cto"
     path: str
+    # —— SP6-P1: DAG 模式字段 ——
+    execution_mode: str  # "sequential" | "dag"，默认 "sequential"
+    completed_steps: Annotated[set[str], set_union]  # dag 模式: 已完成的 step id
+    skipped_steps: Annotated[set[str], set_union]  # dag 模式: condition=False 跳过的 step id
 
 
 def is_rejected(state: dict) -> bool:
@@ -62,3 +75,8 @@ class WorkerState(TypedDict):
     iteration: int
     final_answer: str
     total_tokens: Annotated[int, operator.add]
+    # —— SP6-P1: DAG 模式字段(与 TeamState 共享,worker 回传 completed_steps) ——
+    current_step_id: str  # dag 模式: 当前执行的 step id
+    execution_mode: str  # 从父图透传
+    completed_steps: Annotated[set[str], set_union]  # worker 返回 {step_id} 经 reducer 合并
+    skipped_steps: Annotated[set[str], set_union]  # 透传

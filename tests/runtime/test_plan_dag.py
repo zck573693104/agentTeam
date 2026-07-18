@@ -31,3 +31,37 @@ def test_plan_step_with_depends_on_and_condition():
     assert step.id == "step_review"
     assert step.depends_on == ["step_code", "step_test"]
     assert step.condition == "len(worker_outputs) >= 2"
+
+
+def test_set_union_reducer_merges_sets():
+    """set_union reducer 合并两个 set(left ∪ right)。"""
+    from agentteam.runtime.state import set_union
+    left = {"a", "b"}
+    right = {"b", "c"}
+    result = set_union(left, right)
+    assert result == {"a", "b", "c"}
+
+
+def test_set_union_reducer_with_empty():
+    """set_union 与空 set 合并返回原集合副本。"""
+    from agentteam.runtime.state import set_union
+    assert set_union({"a"}, set()) == {"a"}
+    assert set_union(set(), {"b"}) == {"b"}
+    assert set_union(set(), set()) == set()
+
+
+def test_team_state_has_completed_and_skipped_steps_fields():
+    """TeamState TypedDict 包含 completed_steps/skipped_steps/execution_mode 字段。"""
+    from agentteam.runtime.state import TeamState
+    # TypedDict 的 __annotations__ 包含所有声明的字段
+    annotations = TeamState.__annotations__
+    assert "completed_steps" in annotations
+    assert "skipped_steps" in annotations
+    assert "execution_mode" in annotations
+
+
+def test_worker_state_has_current_step_id_field():
+    """WorkerState 包含 current_step_id 字段(dag 模式用)。"""
+    from agentteam.runtime.state import WorkerState
+    annotations = WorkerState.__annotations__
+    assert "current_step_id" in annotations
