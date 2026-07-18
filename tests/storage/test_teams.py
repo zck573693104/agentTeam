@@ -44,3 +44,49 @@ def test_team_repo_get_missing_returns_none(tmp_db: sqlite3.Connection):
 
     repo = TeamRepo(tmp_db)
     assert repo.get("nonexistent") is None
+
+
+def test_team_repo_list_all(tmp_db: sqlite3.Connection):
+    from agentteam.storage.teams import TeamRepo
+
+    repo = TeamRepo(tmp_db)
+    repo.upsert(_make_team("a"))
+    repo.upsert(_make_team("b"))
+    teams = repo.list_all()
+    names = sorted(t.name for t in teams)
+    assert names == ["a", "b"]
+
+
+def test_team_repo_list_all_empty(tmp_db: sqlite3.Connection):
+    from agentteam.storage.teams import TeamRepo
+
+    repo = TeamRepo(tmp_db)
+    assert repo.list_all() == []
+
+
+def test_team_repo_delete_existing(tmp_db: sqlite3.Connection):
+    from agentteam.storage.teams import TeamRepo
+
+    repo = TeamRepo(tmp_db)
+    repo.upsert(_make_team("dev"))
+    assert repo.delete("dev") is True
+    assert repo.get("dev") is None
+
+
+def test_team_repo_delete_missing_returns_false(tmp_db: sqlite3.Connection):
+    from agentteam.storage.teams import TeamRepo
+
+    repo = TeamRepo(tmp_db)
+    assert repo.delete("nonexistent") is False
+
+
+def test_team_repo_upsert_overwrites(tmp_db: sqlite3.Connection):
+    from agentteam.storage.teams import TeamRepo
+
+    repo = TeamRepo(tmp_db)
+    repo.upsert(_make_team("dev"))
+    team2 = _make_team("dev")
+    team2.description = "updated desc"
+    repo.upsert(team2)
+    got = repo.get("dev")
+    assert got.description == "updated desc"

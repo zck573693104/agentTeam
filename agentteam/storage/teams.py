@@ -49,3 +49,17 @@ class TeamRepo:
         if row is None:
             return None
         return team_from_dict(json.loads(row["config"]))
+
+    def list_all(self) -> list[Team]:
+        """SELECT all,反序列化为 Team 列表。"""
+        with self._lock:
+            cur = self._conn.execute("SELECT config FROM teams ORDER BY name")
+            rows = cur.fetchall()
+        return [team_from_dict(json.loads(r["config"])) for r in rows]
+
+    def delete(self, name: str) -> bool:
+        """DELETE,返回是否删除成功。"""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM teams WHERE name = ?", (name,))
+            self._conn.commit()
+            return cur.rowcount > 0
