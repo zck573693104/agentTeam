@@ -36,4 +36,20 @@ def teams_router(store: TeamStore) -> APIRouter:
             raise HTTPException(status_code=404, detail=f"Team '{name}' not found")
         return {"ok": True}
 
+    @router.put("/{name}")
+    def update_team(name: str, body: dict):
+        if store.get(name) is None:
+            raise HTTPException(status_code=404, detail=f"Team '{name}' not found")
+        try:
+            team = team_from_dict(body)
+        except (KeyError, TypeError) as e:
+            raise HTTPException(status_code=422, detail=f"Invalid team JSON: {e}")
+        if team.name != name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Name in body ({team.name}) must match URL ({name})",
+            )
+        store.update(team)
+        return {"name": team.name}
+
     return router

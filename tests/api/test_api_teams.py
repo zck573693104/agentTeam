@@ -91,3 +91,75 @@ def test_delete_team_not_found():
     client = TestClient(_make_app())
     resp = client.delete("/api/teams/nope")
     assert resp.status_code == 404
+
+
+def test_update_existing_team_via_put():
+    """PUT /api/teams/{name} 更新已存在 team,返回 200。"""
+    from fastapi.testclient import TestClient
+    from agentteam.api.server import create_app
+
+    app = create_app(web_dist=None)
+    client = TestClient(app)
+    # 先创建
+    team_payload = {
+        "name": "dev", "description": "v1",
+        "leader": {"name": "leader", "role": "主管", "system_prompt": "x"},
+        "workers": [{"name": "w1", "role": "r", "description": "", "system_prompt": "x"}],
+        "default_model": {"provider": "qwen", "name": "qwen-max"},
+        "skills": [],
+    }
+    client.post("/api/teams", json=team_payload)
+
+    # PUT 更新
+    updated_payload = dict(team_payload)
+    updated_payload["description"] = "v2"
+    resp = client.put("/api/teams/dev", json=updated_payload)
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "dev"
+
+    # 验证更新生效
+    resp = client.get("/api/teams/dev")
+    assert resp.json()["description"] == "v2"
+
+
+def test_update_missing_team_via_put_returns_404():
+    """PUT /api/teams/{name} 不存在返回 404。"""
+    from fastapi.testclient import TestClient
+    from agentteam.api.server import create_app
+
+    app = create_app(web_dist=None)
+    client = TestClient(app)
+    resp = client.put("/api/teams/nonexistent", json={
+        "name": "nonexistent", "description": "",
+        "leader": {"name": "leader", "role": "主管", "system_prompt": "x"},
+        "workers": [{"name": "w1", "role": "r", "description": "", "system_prompt": "x"}],
+        "default_model": {"provider": "qwen", "name": "qwen-max"},
+        "skills": [],
+    })
+    assert resp.status_code == 404
+
+
+def test_update_team_name_mismatch_returns_400():
+    """PUT /api/teams/{name} body.name 与 URL name 不匹配返回 400。"""
+    from fastapi.testclient import TestClient
+    from agentteam.api.server import create_app
+
+    app = create_app(web_dist=None)
+    client = TestClient(app)
+    # 先创建 dev
+    client.post("/api/teams", json={
+        "name": "dev", "description": "",
+        "leader": {"name": "leader", "role": "主管", "system_prompt": "x"},
+        "workers": [{"name": "w1", "role": "r", "description": "", "system_prompt": "x"}],
+        "default_model": {"provider": "qwen", "name": "qwen-max"},
+        "skills": [],
+    })
+    # PUT 时 body.name 与 URL 不匹配
+    resp = client.put("/api/teams/dev", json={
+        "name": "different_name", "description": "",
+        "leader": {"name": "leader", "role": "主管", "system_prompt": "x"},
+        "workers": [{"name": "w1", "role": "r", "description": "", "system_prompt": "x"}],
+        "default_model": {"provider": "qwen", "name": "qwen-max"},
+        "skills": [],
+    })
+    assert resp.status_code == 400
