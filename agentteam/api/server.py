@@ -9,6 +9,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from starlette.staticfiles import StaticFiles
 
 from agentteam.api.events import EventBus
+from agentteam.api.routes.admin import admin_router
 from agentteam.api.routes.dashboard import dashboard_router
 from agentteam.api.routes.library import library_router
 from agentteam.api.routes.runs import runs_router
@@ -70,6 +71,7 @@ def create_app(
     )
     app.include_router(dashboard_router(run_repo, audit_repo))
     app.include_router(library_router(lib))
+    app.include_router(admin_router(team_store, lib))
 
     # 挂载前端静态文件(生产模式)。
     # - web_dist=_DEFAULT(默认): 使用 _DEFAULT_WEB_DIST,目录存在才挂载
