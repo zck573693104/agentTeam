@@ -134,3 +134,80 @@ def test_resolve_unknown_library_agent_raises():
     a = Agent(name="x", role="worker", ref="library:nonexistent")
     with pytest.raises(KeyError, match="not found in library"):
         lib.resolve(a)
+
+
+def test_resolve_circular_ref_raises():
+    """直接循环引用 A→A 抛 ValueError，错误信息含 "Circular"。"""
+    lib = AgentLibrary()
+    lib.register(Agent(
+        name="A", role="supervisor",
+        system_prompt="template A",
+        children=[Agent(name="a_child", role="worker", ref="library:A")],
+    ))
+    a = Agent(name="caller", role="supervisor", ref="library:A")
+    with pytest.raises(ValueError, match="Circular"):
+        lib.resolve(a)
+
+
+def test_resolve_circular_ref_indirect():
+    """间接循环引用 A→B→A 抛 ValueError，错误信息展示链路。"""
+    lib = AgentLibrary()
+    lib.register(Agent(
+        name="A", role="supervisor",
+        system_prompt="template A",
+        children=[Agent(name="b_ref", role="worker", ref="library:B")],
+    ))
+    lib.register(Agent(
+        name="B", role="supervisor",
+        system_prompt="template B",
+        children=[Agent(name="a_ref", role="worker", ref="library:A")],
+    ))
+    a = Agent(name="caller", role="supervisor", ref="library:A")
+    with pytest.raises(ValueError, match="Circular"):
+        lib.resolve(a)
+    # 进一步验证错误信息包含完整链路
+    try:
+        lib.resolve(a)
+    except ValueError as e:
+        assert "A" in str(e)
+        assert "B" in str(e)
+
+
+def test_resolve_role_override_from_caller():
+    """调用处 role 始终覆盖模板 role（与 name 平行）。"""
+    lib = AgentLibrary()
+    lib.register(Agent(
+        name="worker_tmpl", role="worker",
+        system_prompt="worker template",
+    ))
+    # 调用处用 supervisor 实例化 worker 模板
+    a = Agent(name="lead", role="supervisor", ref="library:worker_tmpl")
+    resolved = lib.resolve(a)
+    assert resolved.role == "supervisor"  # 调用处 role 覆盖模板 worker
+    assert resolved.name == "lead"
+    assert resolved.system_prompt == "worker template"  # 其他字段仍来自模板
+
+
+def test_resolve_no_ref_passes_visited_through_children():
+    """无 ref 节点的 children 也能触发循环检测（visited 透传给无 ref 子树）。
+
+    构造链路：caller -> A -> mid(无 ref) -> B -> A
+    验证 visited 在无 ref 的 mid 节点处原样透传，最终在 B 的 child 处检出环。
+    """
+    lib = AgentLibrary()
+    lib.register(Agent(
+        name="A", role="supervisor",
+        system_prompt="template A",
+        children=[Agent(
+            name="mid", role="supervisor",  # 无 ref 的中间节点
+            children=[Agent(name="b_ref", role="worker", ref="library:B")],
+        )],
+    ))
+    lib.register(Agent(
+        name="B", role="supervisor",
+        system_prompt="template B",
+        children=[Agent(name="a_ref", role="worker", ref="library:A")],
+    ))
+    a = Agent(name="caller", role="supervisor", ref="library:A")
+    with pytest.raises(ValueError, match="Circular"):
+        lib.resolve(a)
