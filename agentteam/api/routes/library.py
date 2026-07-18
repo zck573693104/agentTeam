@@ -9,6 +9,12 @@ from agentteam.domain.library import AgentLibrary
 
 
 class AgentDict(BaseModel):
+    """POST/PUT /api/library/agents 的请求体。
+
+    完整字段契约(BUG-11 + Arch #3):除基本字段外,必须支持 children/ref/
+    mcp_servers,否则通过 API 创建的 library agent 无法携带这些字段
+    (Pydantic 会静默丢弃未声明字段)。
+    """
     name: str
     role: str
     system_prompt: str = ""
@@ -16,33 +22,22 @@ class AgentDict(BaseModel):
     max_iterations: int = 10
     model: dict | None = None
     approval_policy: dict | None = None
+    # BUG-11:此前缺失,POST 时被 Pydantic 静默丢弃。
+    children: list[dict] = []
+    ref: str | None = None
+    mcp_servers: list[dict] = []
 
 
 def _build_agent_from_dict(agent: AgentDict) -> Agent:
-    """从 AgentDict 构造 Agent(POST/PUT 共用)。"""
-    from agentteam.domain.approval import ApprovalPolicy
-    from agentteam.models.provider import ModelRef
-    model = None
-    if agent.model:
-        model = ModelRef(
-            provider=agent.model["provider"],
-            name=agent.model["name"],
-            temperature=agent.model.get("temperature", 0.7),
-            streaming=agent.model.get("streaming", True),
-        )
-    ap = None
-    if agent.approval_policy:
-        ap = ApprovalPolicy(
-            level=agent.approval_policy["level"],
-            targets=agent.approval_policy.get("targets"),
-            timeout_seconds=agent.approval_policy.get("timeout_seconds"),
-        )
-    return Agent(
-        name=agent.name, role=agent.role,
-        system_prompt=agent.system_prompt,
-        tools=list(agent.tools), max_iterations=agent.max_iterations,
-        model=model, approval_policy=ap,
-    )
+    """从 AgentDict 构造 Agent(POST/PUT 共用)。
+
+    委托给 domain.serializer._agent_from_dict,统一字段解析逻辑,
+    完整支持 children/ref/mcp_servers(BUG-11)。serializer 中的
+    _agent_from_dict 已正确处理 ModelRef/ApprovalPolicy/MCPServer/TeamRef
+    的递归解析,无需在此重复实现。
+    """
+    from agentteam.domain.serializer import _agent_from_dict
+    return _agent_from_dict(agent.model_dump())
 
 
 def library_router(library: AgentLibrary) -> APIRouter:
@@ -50,19 +45,21 @@ def library_router(library: AgentLibrary) -> APIRouter:
 
     @router.get("/agents")
     def list_agents():
-        return [
-            {"name": a.name, "role": a.role, "system_prompt": a.system_prompt,
-             "tools": list(a.tools), "max_iterations": a.max_iterations}
-            for a in library.agents.values()
-        ]
+        # Arch #3:返回完整字段(_agent_to_dict 含 children/ref/mcp_servers/
+        # model/approval_policy),客户端能看到 agent 全貌。此前只返回精简字段。
+        from agentteam.domain.serializer import _agent_to_dict
+        return [_agent_to_dict(a) for a in library.agents.values()]
 
     @router.post("/agents")
     def register_agent(agent: AgentDict):
-        existing = library.get(agent.name)
-        if existing is not None:
-            raise HTTPException(status_code=400, detail=f"Agent already exists: {agent.name}")
         a = _build_agent_from_dict(agent)
-        library.register(a)
+        # BUG-02:用原子 register_if_absent 替代 get-then-register,避免并发
+        # POST 同名 agent 时 register 内部抛 ValueError 未捕获 → 500。
+        if not library.register_if_absent(a):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Agent already exists: {agent.name}",
+            )
         return {"name": a.name}
 
     @router.put("/agents/{name}")

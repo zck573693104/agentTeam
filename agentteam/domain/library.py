@@ -1,6 +1,7 @@
 """专家 Agent 库:name → Agent 定义,支持 $ref 引用复用。"""
 from __future__ import annotations
 
+import threading
 from copy import deepcopy
 
 from agentteam.domain.agent import Agent, TeamRef
@@ -51,37 +52,67 @@ class AgentLibrary:
     def __init__(self, agents: dict[str, Agent] | None = None, repo=None) -> None:
         self.agents: dict[str, Agent] = dict(agents) if agents else {}
         self._repo = repo
+        self._lock = threading.Lock()
         if repo is not None:
             for a in repo.list_all():
                 self.agents[a.name] = a
 
     def register(self, agent: Agent) -> None:
-        if agent.name in self.agents:
-            raise ValueError(f"Agent already in library: {agent.name}")
-        self.agents[agent.name] = agent
-        if self._repo is not None:
-            self._repo.upsert(agent)
+        """注册命名 Agent。重名抛 ValueError。
+
+        DB 先、内存后(BUG-03):DB 失败则内存不变。
+        持锁保证 check-then-set 原子(BUG-02)。
+        """
+        with self._lock:
+            if agent.name in self.agents:
+                raise ValueError(f"Agent already in library: {agent.name}")
+            if self._repo is not None:
+                self._repo.upsert(agent)
+            self.agents[agent.name] = agent
+
+    def register_if_absent(self, agent: Agent) -> bool:
+        """原子注册:不存在则注册并返回 True,已存在返回 False(不抛错)。
+
+        check-then-set 在同一把锁内完成,并发 POST 同名 agent 时恰好一个
+        返回 True(BUG-02)。DB 先、内存后(BUG-03)。
+        """
+        with self._lock:
+            if agent.name in self.agents:
+                return False
+            if self._repo is not None:
+                self._repo.upsert(agent)
+            self.agents[agent.name] = agent
+            return True
 
     def get(self, name: str) -> Agent | None:
         return self.agents.get(name)
 
     def delete(self, name: str) -> bool:
-        """删除库中 agent。不存在返回 False(不抛错)。同步删除 DB。"""
-        if name not in self.agents:
-            return False
-        del self.agents[name]
-        if self._repo is not None:
-            self._repo.delete(name)
-        return True
+        """删除库中 agent。不存在返回 False(不抛错)。同步删除 DB。
+
+        DB 先、内存后(BUG-03):DB delete 失败时抛异常,内存保留该 agent,
+        避免"内存已删 DB 还在"导致重启后已删除 agent 复活。
+        """
+        with self._lock:
+            if name not in self.agents:
+                return False
+            if self._repo is not None:
+                self._repo.delete(name)
+            del self.agents[name]
+            return True
 
     def update(self, agent: Agent) -> bool:
-        """更新库中 agent(覆盖)。不存在返回 False(不创建)。同步 DB。"""
-        if agent.name not in self.agents:
-            return False
-        self.agents[agent.name] = agent
-        if self._repo is not None:
-            self._repo.upsert(agent)
-        return True
+        """更新库中 agent(覆盖)。不存在返回 False(不创建)。同步 DB。
+
+        DB 先、内存后(BUG-03):DB 失败则内存保留旧值。
+        """
+        with self._lock:
+            if agent.name not in self.agents:
+                return False
+            if self._repo is not None:
+                self._repo.upsert(agent)
+            self.agents[agent.name] = agent
+            return True
 
     def reload_from_db(self) -> int:
         """从 DB 重新加载所有 agents 到内存。返回加载数量。
