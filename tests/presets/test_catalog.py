@@ -40,3 +40,12 @@ def test_get_preset_enterprise_dev_returns_module():
     assert hasattr(mod, "LIB_AGENTS")
     assert hasattr(mod, "METADATA")
     assert mod.METADATA["name"] == "enterprise_dev"
+
+
+def test_list_presets_returns_all_four():
+    """list_presets 返回 4 个 preset(完成 Task 5 后)。"""
+    from agentteam.presets import list_presets
+    result = list_presets()
+    names = sorted(p["name"] for p in result)
+    assert names == ["content_marketing", "customer_support",
+                     "data_analysis", "enterprise_dev"]
