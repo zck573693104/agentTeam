@@ -211,3 +211,33 @@ def test_resolve_no_ref_passes_visited_through_children():
     a = Agent(name="caller", role="supervisor", ref="library:A")
     with pytest.raises(ValueError, match="Circular"):
         lib.resolve(a)
+
+
+def test_resolve_sibling_refs_to_same_library_no_false_positive():
+    """兄弟节点引用同一库 Agent 不应误报循环引用。
+
+    回归守护：保证 _visited 使用 "_visited + [lib_name]" 新建列表（不可变），
+    而非 _visited.append(lib_name) 共享可变列表。若未来误改为后者，
+    此测试会失败（兄弟 c2 解析时 c1 的 lib_name 仍留在 visited 中）。
+    """
+    lib = AgentLibrary()
+    lib.register(Agent(
+        name="worker_tmpl", role="worker",
+        system_prompt="shared template",
+    ))
+    parent = Agent(
+        name="lead", role="supervisor",
+        children=[
+            Agent(name="w1", role="worker", ref="library:worker_tmpl"),
+            Agent(name="w2", role="worker", ref="library:worker_tmpl"),
+        ],
+    )
+    resolved = lib.resolve(parent)
+    assert len(resolved.children) == 2
+    assert resolved.children[0].name == "w1"
+    assert resolved.children[1].name == "w2"
+    # 两个兄弟都应正确复用模板内容
+    assert resolved.children[0].system_prompt == "shared template"
+    assert resolved.children[1].system_prompt == "shared template"
+    assert resolved.children[0].ref is None
+    assert resolved.children[1].ref is None
