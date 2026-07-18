@@ -1,57 +1,66 @@
-"""专家 Agent 库：name → Agent 定义，支持 $ref 引用复用。"""
+"""专家 Agent 库:name → Agent 定义,支持 $ref 引用复用。"""
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
 
 from agentteam.domain.agent import Agent, TeamRef
 
 
-@dataclass
 class AgentLibrary:
     """专家 Agent 库。
 
     - register(agent): 注册命名 Agent
-    - get(name): 取库中 Agent（不拷贝）
-    - resolve(agent): 递归解析 ref —— 若 agent.ref 指向库，
-      深拷贝库定义，调用处非空字段覆盖模板
+    - get(name): 取库中 Agent(不拷贝)
+    - resolve(agent): 递归解析 ref —— 若 agent.ref 指向库,
+      深拷贝库定义,调用处非空字段覆盖模板
 
-    Limitations（sentinel 值限制，per spec L230-231）:
+    Persistence:
+    - repo=None(默认):纯内存模式,重启后丢失(向后兼容)
+    - repo 提供:初始化时从 DB 加载,register 同步到 DB
+
+    Limitations(sentinel 值限制,per spec L230-231):
     ---------------------------------------------------------------
-    resolve() 使用 "字段非空才覆盖" 的 sentinel 判定逻辑，这意味着
-    调用处无法将模板字段覆盖 *为* 以下"空/默认"值：
+    resolve() 使用 "字段非空才覆盖" 的 sentinel 判定逻辑,这意味着
+    调用处无法将模板字段覆盖 *为* 以下"空/默认"值:
 
-    - system_prompt: 无法覆盖为 ""（空字符串）。若模板 system_prompt="模板提示"，
-      调用处传 system_prompt="" 不会清空，仍保留模板值。
-    - tools: 无法覆盖为 []（空列表）。若模板 tools=["read_file"]，
-      调用处传 tools=[] 不会清空，仍保留模板值。
-    - children: 无法覆盖为 []（空列表）。若模板有 children，
-      调用处传 children=[] 不会清空，仍保留模板值。
-    - max_iterations: 无法覆盖为 10（默认值）。若模板 max_iterations=5，
-      调用处传 max_iterations=10 不会还原为 10，仍保留模板值 5。
-    - model / approval_policy: 这两个字段默认为 None，调用处传 None 表示
-      "不覆盖"，因此无法区分"清空为 None"与"不覆盖"两种语义。
+    - system_prompt: 无法覆盖为 ""(空字符串)。若模板 system_prompt="模板提示",
+      调用处传 system_prompt="" 不会清空,仍保留模板值。
+    - tools: 无法覆盖为 [](空列表)。若模板 tools=["read_file"],
+      调用处传 tools=[] 不会清空,仍保留模板值。
+    - children: 无法覆盖为 [](空列表)。若模板有 children,
+      调用处传 children=[] 不会清空,仍保留模板值。
+    - max_iterations: 无法覆盖为 10(默认值)。若模板 max_iterations=5,
+      调用处传 max_iterations=10 不会还原为 10,仍保留模板值 5。
+    - model / approval_policy: 这两个字段默认为 None,调用处传 None 表示
+      "不覆盖",因此无法区分"清空为 None"与"不覆盖"两种语义。
 
-    Workaround（绕过限制）:
-    - 如需清空某字段，直接修改库中模板对象（register 前修改 tmpl）。
-    - 如需将 max_iterations 还原为 10，可先用其他值（如 9）触发覆盖，再后处理。
-    - 如需彻底清空 tools/system_prompt，建议拆分为多个模板，或不用 ref 直接构造 Agent。
+    Workaround(绕过限制):
+    - 如需清空某字段,直接修改库中模板对象(register 前修改 tmpl)。
+    - 如需将 max_iterations 还原为 10,可先用其他值(如 9)触发覆盖,再后处理。
+    - 如需彻底清空 tools/system_prompt,建议拆分为多个模板,或不用 ref 直接构造 Agent。
 
-    此限制是 spec 有意为之（避免误清空），如需改变需修正 spec。
+    此限制是 spec 有意为之(避免误清空),如需改变需修正 spec。
 
     循环引用保护:
     ----------------
-    resolve() 内部维护 _visited 路径，追踪当前递归分支已展开的库 ref 名。
-    若 A 的 children 中有 ref="library:A"，或 A→B→A 形成间接环，
+    resolve() 内部维护 _visited 路径,追踪当前递归分支已展开的库 ref 名。
+    若 A 的 children 中有 ref="library:A",或 A→B→A 形成间接环,
     resolve() 会抛出 ValueError("Circular library reference: A -> B -> A")。
     """
 
-    agents: dict[str, Agent] = field(default_factory=dict)
+    def __init__(self, agents: dict[str, Agent] | None = None, repo=None) -> None:
+        self.agents: dict[str, Agent] = dict(agents) if agents else {}
+        self._repo = repo
+        if repo is not None:
+            for a in repo.list_all():
+                self.agents[a.name] = a
 
     def register(self, agent: Agent) -> None:
         if agent.name in self.agents:
             raise ValueError(f"Agent already in library: {agent.name}")
         self.agents[agent.name] = agent
+        if self._repo is not None:
+            self._repo.upsert(agent)
 
     def get(self, name: str) -> Agent | None:
         return self.agents.get(name)

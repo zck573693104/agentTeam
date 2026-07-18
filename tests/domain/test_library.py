@@ -287,3 +287,85 @@ def test_resolve_no_ref_preserves_mcp_servers():
     resolved = lib.resolve(a)
     assert len(resolved.mcp_servers) == 1
     assert resolved.mcp_servers[0].name == "git"
+
+
+def test_library_db_backed_register_persists(tmp_path):
+    """DB-backed AgentLibrary: register 后,新实例同 DB 能 get 到。"""
+    import sqlite3
+    from agentteam.storage.db import init_db
+    from agentteam.storage.library import LibraryRepo
+
+    db_path = tmp_path / "test.db"
+    conn = init_db(db_path)
+    repo = LibraryRepo(conn)
+    lib = AgentLibrary(repo=repo)
+    lib.register(Agent(name="coder", role="worker", system_prompt="code"))
+    # 新 lib 同 DB,模拟重启
+    lib2 = AgentLibrary(repo=LibraryRepo(conn))
+    got = lib2.get("coder")
+    assert got is not None
+    assert got.name == "coder"
+    assert got.system_prompt == "code"
+    conn.close()
+
+
+def test_library_db_backed_loads_existing_on_init(tmp_path):
+    """DB-backed AgentLibrary: 初始化时从 DB 加载已有 agents。"""
+    import sqlite3
+    from agentteam.storage.db import init_db
+    from agentteam.storage.library import LibraryRepo
+
+    db_path = tmp_path / "test.db"
+    conn = init_db(db_path)
+    repo = LibraryRepo(conn)
+    repo.upsert(Agent(name="pre_existing", role="worker", system_prompt="x"))
+    # 新 lib 初始化时应加载 pre_existing
+    lib = AgentLibrary(repo=repo)
+    assert lib.get("pre_existing") is not None
+    conn.close()
+
+
+def test_library_db_backed_register_still_rejects_duplicates(tmp_path):
+    """DB-backed AgentLibrary: register 仍拒绝重名(ValueError)。"""
+    import sqlite3
+    from agentteam.storage.db import init_db
+    from agentteam.storage.library import LibraryRepo
+
+    db_path = tmp_path / "test.db"
+    conn = init_db(db_path)
+    repo = LibraryRepo(conn)
+    lib = AgentLibrary(repo=repo)
+    lib.register(Agent(name="coder", role="worker"))
+    # 重名应抛错(即使 DB-backed)
+    with pytest.raises(ValueError, match="already in library"):
+        lib.register(Agent(name="coder", role="worker"))
+    conn.close()
+
+
+def test_library_db_backed_duplicate_raises_after_restart(tmp_path):
+    """DB-backed AgentLibrary: 重启后,再 register 同名 agent 仍抛错。"""
+    import sqlite3
+    from agentteam.storage.db import init_db
+    from agentteam.storage.library import LibraryRepo
+
+    db_path = tmp_path / "test.db"
+    conn = init_db(db_path)
+    repo = LibraryRepo(conn)
+    lib = AgentLibrary(repo=repo)
+    lib.register(Agent(name="coder", role="worker"))
+    # 模拟重启
+    lib2 = AgentLibrary(repo=LibraryRepo(conn))
+    # coder 已在 DB,再 register 同名应抛错
+    with pytest.raises(ValueError, match="already in library"):
+        lib2.register(Agent(name="coder", role="worker"))
+    conn.close()
+
+
+def test_library_no_repo_is_in_memory_only():
+    """无 repo 参数:纯内存模式(向后兼容)。"""
+    lib = AgentLibrary()
+    lib.register(Agent(name="coder", role="worker"))
+    assert lib.get("coder") is not None
+    # 新 lib 无 DB,模拟重启 —— 数据应丢失
+    lib2 = AgentLibrary()
+    assert lib2.get("coder") is None
