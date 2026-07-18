@@ -74,18 +74,23 @@ def test_is_cancelled_returns_false_for_unknown_run():
 
 
 def test_cancel_interrupted_run_ends_directly():
-    """interrupted run cancel:直接 end_run('cancelled') + 发 run_cancelled 事件 + cleanup。
+    """interrupted run cancel:try_claim("interrupted"→"cancelling") + end_run('cancelled') + 发 run_cancelled 事件 + cleanup。
 
     简化方案(spec §6.3):interrupted 状态无需 recompile,直接结束。
+    用 try_claim 原子转换避免与 approve_run 竞态(project_memory 教训:
+    check-then-act 非原子会导致 status 覆盖)。
     不应调用 update_status(interrupted 直接 end_run)。
     """
     rm = _make_run_manager()
     run_id = "run-interrupted"
     rm._run_repo.get_run.return_value = {"status": "interrupted"}
+    rm._run_repo.try_claim.return_value = True  # 模拟原子转换成功
 
     result = rm.cancel_run(run_id)
 
     assert result is True
+    # try_claim 原子转换 interrupted → cancelling
+    rm._run_repo.try_claim.assert_called_once_with(run_id, "interrupted", "cancelling")
     # 直接 end_run("cancelled")
     rm._run_repo.end_run.assert_called_once_with(run_id, "cancelled")
     # 不走 update_status 路径(interrupted 直接结束)
@@ -99,26 +104,70 @@ def test_cancel_interrupted_run_ends_directly():
     assert published["run_id"] == run_id
 
 
-def test_cancel_running_run_sets_event_and_status_cancelling():
-    """running run cancel:set cancel event + update_status('cancelling')。
+def test_cancel_interrupted_run_returns_false_when_try_claim_fails():
+    """interrupted run cancel:try_claim 失败(被 approve 抢走)时返回 False。
 
-    running 状态不直接 end_run,而是设置 event 让 worker 检测后抛
-    RunCancelledError,由 _handle_error 标 cancelled(Task 3)。
+    竞态场景:cancel_run 读到 interrupted,但 approve_run 同时把状态改为 running,
+    try_claim("interrupted"→"cancelling") 返回 False,cancel 应放弃。
+    """
+    rm = _make_run_manager()
+    run_id = "run-race"
+    rm._run_repo.get_run.return_value = {"status": "interrupted"}
+    rm._run_repo.try_claim.return_value = False  # 模拟竞态失败
+
+    result = rm.cancel_run(run_id)
+
+    assert result is False
+    # 不应调用 end_run(竞态失败,放弃 cancel)
+    rm._run_repo.end_run.assert_not_called()
+    rm._audit_repo.add_event.assert_not_called()
+
+
+def test_cancel_running_run_sets_event_and_status_cancelling():
+    """running run cancel:try_claim("running"→"cancelling") + set cancel event。
+
+    running 状态不直接 end_run,而是 try_claim 原子转换后设置 event,
+    让 worker 检测后抛 RunCancelledError,由 _handle_error 标 cancelled(Task 3)。
+    用 try_claim 避免 worker 自然完成时 update_status 被覆盖的竞态。
     """
     rm = _make_run_manager()
     run_id = "run-running"
     # 模拟 start_run 已创建 event
     rm._cancel_events[run_id] = threading.Event()
     rm._run_repo.get_run.return_value = {"status": "running"}
+    rm._run_repo.try_claim.return_value = True  # 模拟原子转换成功
 
     result = rm.cancel_run(run_id)
 
     assert result is True
+    # try_claim 原子转换 running → cancelling
+    rm._run_repo.try_claim.assert_called_once_with(run_id, "running", "cancelling")
     # event 被 set
     assert rm._cancel_events[run_id].is_set() is True
-    # 状态更新为 cancelling(中间态)
-    rm._run_repo.update_status.assert_called_once_with(run_id, "cancelling")
+    # 不走 update_status 路径(try_claim 已完成状态转换)
+    rm._run_repo.update_status.assert_not_called()
     # running 状态不直接 end_run(等 worker 抛 RunCancelledError)
+    rm._run_repo.end_run.assert_not_called()
+
+
+def test_cancel_running_run_returns_false_when_try_claim_fails():
+    """running run cancel:try_claim 失败(worker 已自然完成)时返回 False。
+
+    竞态场景:cancel_run 读到 running,但 worker 同时完成并 update_status("completed"),
+    try_claim("running"→"cancelling") 返回 False,cancel 应放弃。
+    """
+    rm = _make_run_manager()
+    run_id = "run-race-running"
+    rm._cancel_events[run_id] = threading.Event()
+    rm._run_repo.get_run.return_value = {"status": "running"}
+    rm._run_repo.try_claim.return_value = False  # 模拟竞态失败
+
+    result = rm.cancel_run(run_id)
+
+    assert result is False
+    # 不应 set event(竞态失败,放弃 cancel)
+    assert rm._cancel_events[run_id].is_set() is False
+    # 不应调用 end_run
     rm._run_repo.end_run.assert_not_called()
 
 

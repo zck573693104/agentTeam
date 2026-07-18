@@ -159,13 +159,16 @@ class RunManager:
         """请求取消 run。返回是否成功发出取消信号。
 
         两种状态分别处理(spec §6.3 简化方案):
-        - interrupted: 直接 end_run("cancelled") + 发 run_cancelled 事件 + cleanup。
-          无需 lazy recompile,因为 run 已暂停,直接结束即可。
-        - running: set cancel event + update_status("cancelling")。
-          worker 在下一次 agent_step 入口检测到 event 后抛 RunCancelledError,
-          由 _handle_error 标 cancelled。
+        - interrupted: try_claim("interrupted"→"cancelling") 原子转换,避免与
+          approve_run 竞态;成功后 end_run("cancelled") + 发 run_cancelled 事件 + cleanup。
+        - running: try_claim("running"→"cancelling") 原子转换,避免覆盖 worker 写入的
+          终态;成功后 set cancel event,worker 在下一次 agent_step 检测后抛
+          RunCancelledError,由 _handle_error 标 cancelled。
         - 其他状态(completed/failed/cancelled/pending): 返回 False,不可取消。
         - 未知 run_id(get_run 返回 None): 返回 False。
+
+        竞态保护:与 approve_run 一致使用 try_claim 原子条件转换,
+        避免 check-then-act 非原子导致的 status 覆盖(参见 project_memory 教训)。
         """
         run = self._run_repo.get_run(run_id)
         if run is None:
@@ -173,7 +176,9 @@ class RunManager:
         status = run["status"]
 
         if status == "interrupted":
-            # interrupted 直接结束,无需 recompile
+            # try_claim 原子转换:防止 approve_run 同时把 interrupted → running
+            if not self._run_repo.try_claim(run_id, "interrupted", "cancelling"):
+                return False  # 被 approve 抢走或状态已变
             self._run_repo.end_run(run_id, "cancelled")
             eid = self._audit_repo.add_event(run_id, "run_cancelled", "user")
             self._bus.publish(
@@ -189,14 +194,16 @@ class RunManager:
             return True
 
         if status == "running":
-            # set event 让 worker 检测
+            # try_claim 原子转换:防止 worker 自然完成时 update_status("interrupted"/"completed")被覆盖
+            if not self._run_repo.try_claim(run_id, "running", "cancelling"):
+                return False  # 状态已变(worker 已结束或被其他请求取消)
             event = self._cancel_events.get(run_id)
             if event is None:
-                # _cancel_events 缺失(异常情况):无法协作取消
+                # 异常:claim 成功但 event 缺失,回滚状态避免卡在 cancelling
+                self._run_repo.update_status(run_id, "running")
                 return False
             event.set()
-            # 标中间态 cancelling,等 worker 抛 RunCancelledError 后由 _handle_error 收尾
-            self._run_repo.update_status(run_id, "cancelling")
+            # worker 检测到 event 后抛 RunCancelledError,由 _handle_error 标 cancelled
             return True
 
         # completed / failed / cancelled / pending 等终态或不可取消状态
