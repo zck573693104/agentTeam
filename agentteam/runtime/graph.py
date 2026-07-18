@@ -1,6 +1,8 @@
 """TeamCompiler：递归编译 Agent 树为 LangGraph StateGraph。"""
 from __future__ import annotations
 
+from collections import deque
+
 from langgraph.graph import END, START, StateGraph
 
 from agentteam.domain.agent import Agent, TeamRef
@@ -29,7 +31,15 @@ def _eval_condition(cond: str, state: dict) -> bool:
       避免暴露 run_id/pending_approval 等内部字段
     - 任何异常(SyntaxError/NameError/TypeError/ZeroDivisionError 等)返回 False,
       宁可跳过该 step 也不让图崩溃
-    - 不允许 import:因为 __builtins__ 被替换,import 语句会抛 ImportError → 返回 False
+
+    安全限制(重要):此处 eval 的沙箱仅是「浅层限制」,不能视为安全边界:
+    - import 语句会被阻断(__builtins__ 被替换后 __import__ 不可用,会抛 ImportError)
+    - 但 Python 对象模型存在众所周知的逃逸路径,例如
+      ``().__class__.__bases__[0].__subclasses__()`` 可链式访问到
+      ``subprocess.Popen`` 等危险类型,从而绕过 __builtins__ 限制
+    - 由于 condition 字段会承载 LLM 生成内容,具备该逃逸风险,实际不可信
+    - 真正的隔离应在更高层(独立进程/容器/无网络沙箱)实施,本函数仅作
+      「减少误操作」用途,而非防御性安全屏障
 
     用法: condition="len(worker_outputs) >= 2" 或 condition="'step_a' in completed_steps"
     """
@@ -75,11 +85,11 @@ def _detect_dag_cycle(plan: list[dict]) -> bool:
             adj[dep].append(sid)
             in_degree[sid] += 1
 
-    # Kahn 算法:BFS 拓扑排序
-    queue = [n for n in nodes if in_degree[n] == 0]
+    # Kahn 算法:BFS 拓扑排序(用 deque 保证 popleft() 为 O(1),整体 O(V+E))
+    queue = deque(n for n in nodes if in_degree[n] == 0)
     visited = 0
     while queue:
-        n = queue.pop(0)
+        n = queue.popleft()
         visited += 1
         for m in adj[n]:
             in_degree[m] -= 1
@@ -152,7 +162,7 @@ def make_route_from_plan_dag(child_targets: dict[str, str]):
 
     返回 list[str] 而非 str:LangGraph conditional_edges 收到 list 时并行触发所有目标。
     """
-    def route(state):
+    def route(state: TeamState) -> list[str]:
         # dag 模式下若被拒绝(工具审批 reject),直接结束
         if is_rejected(state):
             return [END]
