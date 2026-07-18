@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 
-from agentteam.api.serializer import _agent_from_dict, _agent_to_dict
+from agentteam.domain.serializer import _agent_from_dict, _agent_to_dict
 from agentteam.domain.agent import Agent
 
 

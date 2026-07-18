@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from agentteam.api.serializer import team_from_dict, team_to_dict
+from agentteam.domain.serializer import team_from_dict, team_to_dict
 from agentteam.api.store import TeamStore
 
 

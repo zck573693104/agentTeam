@@ -57,7 +57,7 @@ def install_preset_to_api(name: str, api: str = "http://localhost:8000") -> dict
     幂等:重复安装时 POST→PUT 回退,不会因重复而失败。
     """
     from dataclasses import asdict
-    from agentteam.api.serializer import team_to_dict
+    from agentteam.domain.serializer import team_to_dict
 
     mod = get_preset(name)
     meta = mod.METADATA

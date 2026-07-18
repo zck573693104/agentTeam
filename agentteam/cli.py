@@ -34,7 +34,7 @@ def _load_team_module(path: str) -> dict:
     # 优先级：MULTI_LEVEL_TEAM > MODULE_LEVEL_TEAM > TEAM > DEV_TEAM
     for name in ("MULTI_LEVEL_TEAM", "MODULE_LEVEL_TEAM", "TEAM", "DEV_TEAM"):
         if hasattr(mod, name):
-            from agentteam.api.serializer import team_to_dict
+            from agentteam.domain.serializer import team_to_dict
             from agentteam.domain.team import Team
             val = getattr(mod, name)
             if isinstance(val, dict):

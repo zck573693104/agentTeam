@@ -1,4 +1,4 @@
-from agentteam.api.serializer import team_to_dict, team_from_dict
+from agentteam.domain.serializer import team_to_dict, team_from_dict
 from agentteam.domain.approval import ApprovalPolicy
 from agentteam.domain.mcp_server import MCPServer
 from agentteam.domain.team import Leader, Team
@@ -213,7 +213,7 @@ def test_team_from_dict_legacy_schema_still_works():
 def test_agent_to_dict_includes_mcp_servers():
     from agentteam.domain.agent import Agent
     from agentteam.domain.mcp_server import MCPServer
-    from agentteam.api.serializer import _agent_to_dict
+    from agentteam.domain.serializer import _agent_to_dict
     a = Agent(
         name="w", role="worker",
         mcp_servers=[MCPServer(name="git", command="git-mcp")],
@@ -226,7 +226,7 @@ def test_agent_to_dict_includes_mcp_servers():
 
 def test_agent_from_dict_parses_mcp_servers():
     from agentteam.domain.agent import Agent
-    from agentteam.api.serializer import _agent_from_dict
+    from agentteam.domain.serializer import _agent_from_dict
     d = {
         "name": "w", "role": "worker",
         "mcp_servers": [{"name": "git", "command": "git-mcp", "args": [], "env": {}, "transport": "stdio", "url": None}],
@@ -239,7 +239,7 @@ def test_agent_from_dict_parses_mcp_servers():
 def test_teamref_to_dict_includes_mcp_overrides():
     from agentteam.domain.agent import Agent, TeamRef
     from agentteam.domain.mcp_server import MCPServer
-    from agentteam.api.serializer import _agent_to_dict
+    from agentteam.domain.serializer import _agent_to_dict
     parent = Agent(
         name="lead", role="supervisor",
         children=[TeamRef(name="sub", alias="qa",
@@ -254,7 +254,7 @@ def test_teamref_to_dict_includes_mcp_overrides():
 
 def test_teamref_from_dict_parses_mcp_overrides():
     from agentteam.domain.agent import TeamRef
-    from agentteam.api.serializer import _agent_from_dict
+    from agentteam.domain.serializer import _agent_from_dict
     d = {
         "name": "lead", "role": "supervisor",
         "children": [{
@@ -274,7 +274,7 @@ def test_team_to_dict_roundtrip_with_mcp():
     from agentteam.domain.mcp_server import MCPServer
     from agentteam.domain.team import Team
     from agentteam.models.provider import ModelRef
-    from agentteam.api.serializer import team_to_dict, team_from_dict
+    from agentteam.domain.serializer import team_to_dict, team_from_dict
     team = Team(
         name="t", description="d",
         root=Agent(

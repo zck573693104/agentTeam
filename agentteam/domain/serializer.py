@@ -3,6 +3,8 @@
 支持新旧 schema：
 - 新 schema：dict 含 root（Agent 树）
 - 旧 schema：dict 含 leader + workers（自动转 root）
+
+本模块属于领域层（domain），不依赖 api/storage/presets 等外层。
 """
 from __future__ import annotations
 

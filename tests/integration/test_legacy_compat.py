@@ -2,7 +2,7 @@
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 
-from agentteam.api.serializer import team_from_dict, team_to_dict
+from agentteam.domain.serializer import team_from_dict, team_to_dict
 from agentteam.domain.agent import Agent
 from agentteam.domain.team import Leader, Team
 from agentteam.domain.worker import Worker
