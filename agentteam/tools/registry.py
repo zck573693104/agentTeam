@@ -5,18 +5,47 @@ from langchain_core.tools import BaseTool
 from agentteam.domain.mcp_server import MCPServer
 
 
+def _server_cache_key(server: MCPServer) -> tuple:
+    """生成 MCP server 的缓存 key。
+
+    用 (name, command, args, transport, url) 唯一标识一个 MCP server 配置。
+    同名但配置不同(command/args/transport/url 任一不同)的 server 视为
+    不同实例,应各自独立触发 loader 调用,避免第二个 server 被错误跳过
+    导致工具漏注册(SP6-P2 / BUG-12 修复)。
+
+    Args:
+        server: MCP server 配置 dataclass。
+
+    Returns:
+        可哈希的 tuple,可作为 set 元素。args list 转 tuple 以保证可哈希。
+    """
+    return (
+        server.name,
+        server.command,
+        tuple(server.args),
+        server.transport,
+        server.url,
+    )
+
+
 class ToolRegistry:
     """工具统一注册表。Worker 配置里按名字引用工具，运行时取出绑定到 LLM。"""
 
     def __init__(self, mcp_loader=None) -> None:
         self._tools: dict[str, BaseTool] = {}
         self._mcp_loader = mcp_loader  # None 时用 default_mcp_loader
-        # BUG-06:缓存已成功加载的 MCP server.name,避免 loader 重复调用。
+        # BUG-06:缓存已成功加载的 MCP server 配置,避免 loader 重复调用。
         # default_mcp_loader 会 spawn npx 子进程,而 TeamCompiler.compile()
         # 每次 create_run 都会触发 register_mcp_tools,无缓存时 n×m 次 run
         # 会泄漏 n×m 个子进程。loader 调用成功后才加入此集合;失败不加入
         # (允许重试)。
-        self._loaded_servers: set[str] = set()
+        # SP6-P2 / BUG-12 修正:用 (name, command, args, transport, url) tuple
+        # 作 key,而非 server.name。同名但配置不同的 server 应各自独立缓存,
+        # 否则第二个同名 server 会被错误跳过 loader 调用,工具不注册。
+        # 注意:工具名前缀仍用 mcp:{server.name}:,因此同名不同配置的 server
+        # 注册的同名工具会冲突(第二个被跳过),这是已知限制 — 用户若需多实例
+        # 应改 server.name。
+        self._loaded_servers: set[tuple] = set()
 
     def register(self, tool: BaseTool) -> None:
         if tool.name in self._tools:
