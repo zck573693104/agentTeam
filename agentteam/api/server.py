@@ -19,7 +19,9 @@ from agentteam.domain.library import AgentLibrary
 from agentteam.models.provider import ModelProvider
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
+from agentteam.storage.library import LibraryRepo
 from agentteam.storage.runs import RunRepo
+from agentteam.storage.teams import TeamRepo
 from agentteam.tools.registry import ToolRegistry
 
 # 哨兵：web_dist 参数未显式传入时使用此值,区分"用默认路径"和"显式禁用挂载"。
@@ -45,12 +47,14 @@ def create_app(
     conn_lock = threading.Lock()
     run_repo = RunRepo(conn, lock=conn_lock)
     audit_repo = AuditRepo(conn, lock=conn_lock)
-    team_store = TeamStore()
+    team_repo = TeamRepo(conn, lock=conn_lock)
+    library_repo = LibraryRepo(conn, lock=conn_lock)
+    team_store = TeamStore(repo=team_repo)
     event_bus = EventBus()
     run_manager = RunManager(run_repo, audit_repo, event_bus)
     mp = model_provider or ModelProvider()
     tr = tool_registry or ToolRegistry()
-    lib = agent_library or AgentLibrary()
+    lib = agent_library or AgentLibrary(repo=library_repo)
 
     saver = SqliteSaver(conn)
     saver.lock = conn_lock  # 让 SqliteSaver 也用同一把锁
