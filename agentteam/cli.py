@@ -16,6 +16,7 @@ from pathlib import Path
 import requests
 
 from examples.dev_team import DEV_TEAM
+from agentteam.presets import list_presets, get_preset, install_preset_to_api
 
 
 def _load_team_module(path: str) -> dict:
@@ -184,6 +185,69 @@ def register_library(file_path: str, api: str = "http://localhost:8000") -> int:
         return 1
 
 
+def list_presets_cmd() -> int:
+    """列出所有可用预置团队。"""
+    presets = list_presets()
+    if not presets:
+        print("(无预置团队)")
+        return 0
+    print(f"共 {len(presets)} 个预置团队:\n")
+    for p in presets:
+        print(f"  [{p['category']}] {p['name']}  {p['title']}")
+        print(f"      {p['description']}")
+        print(f"      tags: {', '.join(p['tags'])}")
+        if p['deps_library']:
+            print(f"      library: {', '.join(p['deps_library'])}")
+        if p['deps_teams']:
+            print(f"      sub-teams: {', '.join(p['deps_teams'])}")
+        print()
+    return 0
+
+
+def show_preset(name: str) -> int:
+    """显示指定预置团队的详细信息。"""
+    try:
+        mod = get_preset(name)
+    except KeyError as e:
+        print(f"错误: {e}")
+        return 1
+    meta = mod.METADATA
+    team = mod.TEAM
+    print(f"名称: {meta['name']}")
+    print(f"标题: {meta['title']}")
+    print(f"描述: {meta['description']}")
+    print(f"分类: {meta['category']}")
+    print(f"标签: {', '.join(meta['tags'])}")
+    print(f"\n主团队: {team.name}")
+    print(f"  描述: {team.description}")
+    print(f"  root: {team.root.name} ({team.root.role})")
+    if team.mcp_servers:
+        print(f"  MCP (team-level): {[s.name for s in team.mcp_servers]}")
+    print(f"\n专家库 agents ({len(mod.LIB_AGENTS)}):")
+    for a in mod.LIB_AGENTS:
+        print(f"  - {a.name} ({a.role}): tools={a.tools}")
+    if meta['deps_teams']:
+        print(f"\n依赖 sub-teams: {meta['deps_teams']}")
+    return 0
+
+
+def install_preset(name: str, api: str = "http://localhost:8000") -> int:
+    """安装预置团队到 API 服务。"""
+    try:
+        result = install_preset_to_api(name, api=api)
+    except KeyError as e:
+        print(f"错误: {e}")
+        return 1
+    except Exception as e:
+        print(f"错误: {e}")
+        return 1
+    print(f"预置团队 '{name}' 安装成功:")
+    if result["library"]:
+        print(f"  专家库: {result['library']}")
+    print(f"  团队: {result['teams']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentteam", description="AgentTeam CLI")
     sub = parser.add_subparsers(dest="command")
@@ -202,6 +266,13 @@ def main(argv: list[str] | None = None) -> int:
     p_lib.add_argument("file", help="库文件路径（.py，需定义 LIB 变量）")
     p_lib.add_argument("--api", default="http://localhost:8000", help="API 地址")
 
+    p_list_p = sub.add_parser("list-presets", help="列出所有预置团队")
+    p_show_p = sub.add_parser("show-preset", help="显示预置团队详情")
+    p_show_p.add_argument("name", help="预置团队名称")
+    p_install_p = sub.add_parser("install-preset", help="安装预置团队到 API")
+    p_install_p.add_argument("name", help="预置团队名称")
+    p_install_p.add_argument("--api", default="http://localhost:8000", help="API 地址")
+
     args = parser.parse_args(argv)
 
     if args.command == "register-dev-team":
@@ -212,6 +283,12 @@ def main(argv: list[str] | None = None) -> int:
         return list_teams(args.api)
     elif args.command == "register-library":
         return register_library(args.file, args.api)
+    elif args.command == "list-presets":
+        return list_presets_cmd()
+    elif args.command == "show-preset":
+        return show_preset(args.name)
+    elif args.command == "install-preset":
+        return install_preset(args.name, args.api)
     else:
         parser.print_help()
         return 0
