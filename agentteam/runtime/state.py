@@ -31,6 +31,8 @@ class TeamState(TypedDict):
     run_id: str
     pending_approval: dict | None
     total_tokens: Annotated[int, operator.add]
+    # 跨层执行路径追踪，如 "team:dev.ceo.cto"
+    path: str
 
 
 def is_rejected(state: dict) -> bool:

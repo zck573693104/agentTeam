@@ -106,3 +106,38 @@ def test_worker_state_typeddict_accepts_fields():
     assert state["final_answer"] == ""
     assert state["tool_calls"] == []
     assert state["react_messages"] == []
+
+
+def test_team_state_path_field_in_annotations():
+    """TeamState 应包含 path 字段用于跨层追踪。"""
+    assert "path" in TeamState.__annotations__
+
+
+def test_team_state_with_path_value():
+    """TeamState 实例可携带 path 字段值。"""
+    state: TeamState = {
+        "messages": [],
+        "task": "t",
+        "plan": [],
+        "current_step": 0,
+        "worker_outputs": {},
+        "audit_events": [],
+        "run_id": "r1",
+        "pending_approval": None,
+        "total_tokens": 0,
+        "path": "team:dev.ceo.cto",
+    }
+    assert state["path"] == "team:dev.ceo.cto"
+
+
+def test_is_rejected_ignores_path_field():
+    """is_rejected 不受 path 字段影响。"""
+    from agentteam.runtime.state import is_rejected
+
+    assert is_rejected(
+        {"pending_approval": {"approved": False}, "path": "team:t"}
+    ) is True
+    assert is_rejected(
+        {"pending_approval": {"approved": True}, "path": "team:t"}
+    ) is False
+    assert is_rejected({"pending_approval": None, "path": "team:t"}) is False
