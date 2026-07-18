@@ -11,6 +11,7 @@ from agentteam.runtime.approval import make_step_gate, make_worker_gate
 from agentteam.runtime.nodes import (
     make_leader_plan_node,
     make_leader_review_node,
+    make_supervisor_node,
     make_worker_node,
 )
 from agentteam.runtime.state import TeamState, is_rejected
@@ -197,7 +198,7 @@ class TeamCompiler:
                     depth=depth + 1, path=f"{path}.{alias}",
                 )
                 node_name = f"subteam_{alias}"
-                graph.add_node(node_name, sub_graph)
+                graph.add_node(node_name, make_supervisor_node(sub_graph, alias))
                 child_targets[alias] = node_name
                 worker_gates[alias] = False
             else:
@@ -208,9 +209,10 @@ class TeamCompiler:
                 # worker 用 worker_{name} 保持与旧测试兼容；supervisor 用 agent_{name}
                 if child.role == "worker":
                     node_name = f"worker_{child.name}"
+                    graph.add_node(node_name, sub_graph)  # worker 已由 make_worker_node 包装
                 else:
                     node_name = f"agent_{child.name}"
-                graph.add_node(node_name, sub_graph)
+                    graph.add_node(node_name, make_supervisor_node(sub_graph, child.name))
                 child_targets[child.name] = node_name
 
                 # worker 级审批 gate（仅 worker 角色可能有）

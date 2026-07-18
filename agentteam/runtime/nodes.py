@@ -334,6 +334,63 @@ def make_worker_node(
     return worker_node
 
 
+def make_supervisor_node(compiled_graph, agent_name: str):
+    """包装 compiled supervisor 子图，隔离其编排状态与父图。
+
+    supervisor 子图作为父图的子节点时：
+    - 输入：从父图 plan[current_step].instruction 提取子任务作为子图 task；
+      剥离 plan/current_step/path/累加器字段，子图从空白开始编排。
+    - 输出：只回传累加器增量（messages/audit_events/worker_outputs/total_tokens）
+      与 pending_approval（审批中断信号需冒泡）；不回传 plan/current_step，
+      避免覆盖父图状态机。
+
+    透传 config 以支持子图内 interrupt/resume（step 级审批）。
+    """
+    _STRIP_FROM_INPUT = frozenset({
+        "plan", "current_step", "path",  # 编排字段：子图自行生成
+        "messages", "audit_events", "worker_outputs", "total_tokens",  # 累加器：从空开始
+    })
+    _RETURN_KEYS = frozenset({
+        "messages", "audit_events", "worker_outputs", "total_tokens",
+        "pending_approval",  # 审批中断信号需冒泡到父图
+    })
+
+    def supervisor_node(state: TeamState, config=None) -> dict:
+        # 从父图 plan 取出本步的 instruction 作为子图 task
+        current = state.get("current_step", 0)
+        plan = state.get("plan", [])
+        if current < len(plan):
+            instruction = plan[current].get("instruction", state.get("task", ""))
+        else:
+            instruction = state.get("task", "")
+
+        subgraph_input = {
+            k: v for k, v in state.items() if k not in _STRIP_FROM_INPUT
+        }
+        subgraph_input["task"] = instruction
+        subgraph_input["plan"] = []
+        subgraph_input["current_step"] = 0
+        subgraph_input["path"] = f"{state.get('path', '')}.{agent_name}"
+        # 累加器给空初始值
+        subgraph_input["messages"] = []
+        subgraph_input["audit_events"] = []
+        subgraph_input["worker_outputs"] = {}
+        subgraph_input["total_tokens"] = 0
+
+        if config is not None:
+            sub_result = compiled_graph.invoke(subgraph_input, config)
+        else:
+            sub_result = compiled_graph.invoke(subgraph_input)
+
+        # 只回传累加器增量 + 审批信号；不回传 plan/current_step/path
+        return {
+            k: sub_result.get(k, [] if k != "total_tokens" else 0)
+            for k in _RETURN_KEYS
+        }
+
+    return supervisor_node
+
+
 def make_leader_review_node(
     agent: Agent, llm: BaseChatModel, trace_writer: TraceWriter | None = None
 ):
