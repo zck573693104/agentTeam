@@ -258,3 +258,40 @@ def test_approve_after_restart_team_deleted_returns_409(tmp_path):
     assert any(e["event_type"] == "error" for e in trace)
 
     conn.close()
+
+
+# ===== Task 4: fast path 不变 =====
+
+
+def test_approve_with_graph_present_uses_fast_path(tmp_path):
+    """graph 存在时(未重启),approve 走 fast path(resume_run),不触发 recompile_and_resume。
+
+    保护性测试:确保 P0 改造不破坏正常流程(graph 在内存时不应走 recompile)。
+    """
+    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(
+        tmp_path
+    )
+    client = TestClient(app)
+
+    client.post("/api/teams", json=make_team_json(with_approval=True))
+    resp = client.post("/api/runs", json={"team_name": "dev", "task": "fast path"})
+    run_id = resp.json()["run_id"]
+    status = _wait_for_run(client, run_id)
+    assert status == "interrupted"
+
+    # graph 仍存在(未重启)
+    assert run_manager.has_graph(run_id) is True
+
+    # mock recompile_and_resume 验证未被调用(fast path 应走 resume_run)
+    with patch.object(run_manager, "recompile_and_resume") as mock_recompile:
+        resp = client.post(
+            f"/api/runs/{run_id}/approve", json={"approved": True, "reason": "fast"}
+        )
+        assert resp.status_code == 200, f"fast path approve 应成功,实际: {resp.status_code}"
+        mock_recompile.assert_not_called()
+
+    # run 应正常完成(fast path resume_run 续跑)
+    status = _wait_for_run(client, run_id, timeout=15.0)
+    assert status == "completed", f"fast path 后 run 应完成,实际: {status}"
+
+    conn.close()
