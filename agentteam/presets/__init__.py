@@ -17,7 +17,9 @@ from types import ModuleType
 from typing import Any
 
 # Preset 注册表:name → 模块路径。后续 task 逐步填充。
-PRESET_REGISTRY: dict[str, str] = {}
+PRESET_REGISTRY: dict[str, str] = {
+    "enterprise_dev": "agentteam.presets.enterprise_dev",
+}
 
 
 def list_presets() -> list[dict[str, Any]]:
