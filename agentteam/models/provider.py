@@ -22,7 +22,25 @@ class ModelProvider:
     """把 ModelRef 解析成具体的 LangChain BaseChatModel。
 
     适配器按需懒加载，缺失依赖时由适配器抛出清晰错误。
+    Provider 通过 class-level _registry 注册，新增 provider 无需修改本类源码（开闭原则）。
     """
+
+    _registry: dict[str, type] = {}
+
+    @classmethod
+    def register(cls, name: str, adapter_cls: type) -> None:
+        """注册 adapter 类。第三方 provider 在 import 时调用此方法。
+
+        重名注册抛 ValueError，防止意外覆盖。
+        """
+        if name in cls._registry:
+            raise ValueError(f"Provider already registered: {name}")
+        cls._registry[name] = adapter_cls
+
+    @classmethod
+    def list_providers(cls) -> list[str]:
+        """返回所有已注册 provider name。"""
+        return list(cls._registry.keys())
 
     def __init__(self, api_keys: dict[str, str] | None = None) -> None:
         self._api_keys = api_keys or {}
