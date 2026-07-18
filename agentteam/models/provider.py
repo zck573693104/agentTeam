@@ -46,20 +46,10 @@ class ModelProvider:
         self._api_keys = api_keys or {}
 
     def get_llm(self, ref: ModelRef) -> BaseChatModel:
-        if ref.provider == "qwen":
-            from .adapters.qwen import QwenAdapter
-
-            return QwenAdapter(self._api_keys).build(ref)
-        if ref.provider == "openai":
-            from .adapters.openai_adapter import OpenAIAdapter
-
-            return OpenAIAdapter(self._api_keys).build(ref)
-        if ref.provider == "anthropic":
-            from .adapters.anthropic import AnthropicAdapter
-
-            return AnthropicAdapter(self._api_keys).build(ref)
-        if ref.provider == "ollama":
-            from .adapters.ollama import OllamaAdapter
-
-            return OllamaAdapter(self._api_keys).build(ref)
-        raise ValueError(f"Unknown provider: {ref.provider}")
+        adapter_cls = self._registry.get(ref.provider)
+        if adapter_cls is None:
+            raise ValueError(
+                f"Unknown provider: {ref.provider}. "
+                f"Registered: {self.list_providers()}"
+            )
+        return adapter_cls(self._api_keys).build(ref)

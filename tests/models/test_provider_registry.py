@@ -90,3 +90,47 @@ def test_list_providers_returns_all(clean_registry):
     ModelProvider.register("beta", FakeB)
     providers = ModelProvider.list_providers()
     assert set(providers) == {"alpha", "beta"}
+
+
+# ===== Task 3: get_llm 用 registry 替代 if/elif =====
+
+
+def test_get_llm_resolves_registered_provider(clean_registry):
+    """注册 fake adapter 后，get_llm 调用其 build 并返回结果。"""
+    from agentteam.models.adapters.base import BaseAdapter
+    from agentteam.models.provider import ModelProvider, ModelRef
+
+    sentinel = object()  # 哨兵对象，验证 build 被调用且结果被透传
+
+    class FakeAdapter(BaseAdapter):
+        def build(self, ref):
+            return sentinel
+
+    ModelProvider.register("fake", FakeAdapter)
+    ref = ModelRef(provider="fake", name="fake-model")
+    llm = ModelProvider().get_llm(ref)
+    assert llm is sentinel
+
+
+def test_get_llm_unknown_provider_lists_registered(clean_registry):
+    """未知 provider 抛 ValueError，错误信息含 'Registered:' 与已注册列表。"""
+    from agentteam.models.adapters.base import BaseAdapter
+    from agentteam.models.provider import ModelProvider, ModelRef
+
+    class FakeAdapter(BaseAdapter):
+        def build(self, ref):
+            return None
+
+    ModelProvider.register("alpha", FakeAdapter)
+    ModelProvider.register("beta", FakeAdapter)
+
+    # 用非法 provider 值绕过 Literal 检查
+    bad = ModelRef(provider="qwen", name="x")
+    object.__setattr__(bad, "provider", "unknown")
+    with pytest.raises(ValueError) as exc_info:
+        ModelProvider().get_llm(bad)
+    msg = str(exc_info.value)
+    assert "Unknown provider" in msg
+    assert "Registered:" in msg
+    assert "alpha" in msg
+    assert "beta" in msg
