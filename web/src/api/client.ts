@@ -97,3 +97,39 @@ export interface Team {
   skills: string[];
   mcp_servers: Record<string, any>[];
 }
+
+// ---- SP7: Skills + Evolution ----
+
+export interface SkillItem {
+  name: string;
+}
+
+export interface SkillDetail {
+  name: string;
+  content: string;
+}
+
+export interface EvolutionRecord {
+  id: number;
+  agent_name: string;
+  version: number;
+  dimension: string;
+  before_value: string;
+  after_value: string;
+  diff: string;
+  reason: string;
+  run_id: string | null;
+  success: boolean;
+  error: string | null;
+  timestamp: string;
+}
+
+export interface VersionSnapshot {
+  version: number;
+  records: EvolutionRecord[];
+}
+
+export interface RollbackResult {
+  ok: boolean;
+  new_version: number;
+}

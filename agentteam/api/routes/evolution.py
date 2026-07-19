@@ -6,7 +6,6 @@ from dataclasses import replace
 
 from fastapi import APIRouter, HTTPException
 
-from agentteam.domain.agent import Agent
 from agentteam.domain.approval import ApprovalPolicy
 from agentteam.domain.library import AgentLibrary
 from agentteam.storage.evolution import EvolutionRepo
