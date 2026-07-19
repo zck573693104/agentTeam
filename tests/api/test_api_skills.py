@@ -129,3 +129,23 @@ def test_runs_router_accepts_skill_loader_param(tmp_path):
     assert resp.status_code == 400
     assert "Compile failed" in resp.json()["detail"]
     assert captured["skill_loader"] is loader
+
+
+def test_cli_list_skills_calls_api(tmp_path, capsys):
+    """agentteam list-skills 调用 GET /api/skills 并打印结果。"""
+    from unittest.mock import MagicMock, patch
+    import agentteam.cli as cli_mod
+
+    # mock requests.get
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"skills": ["alpha", "code_review"]}
+    with patch.object(cli_mod, "requests") as mock_req:
+        mock_req.get.return_value = mock_resp
+        exit_code = cli_mod.main(["list-skills", "--api", "http://fake:8000"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "alpha" in captured.out
+    assert "code_review" in captured.out
+    mock_req.get.assert_called_once_with("http://fake:8000/api/skills/", timeout=10)
