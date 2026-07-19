@@ -119,11 +119,13 @@ def test_runs_router_accepts_skill_loader_param(tmp_path):
             root=Agent(name="root", role="supervisor"),
         ))
         with TestClient(app) as client:
-            try:
-                client.post("/api/runs", json={"team_name": "t1", "task": "do x"})
-            except Exception:
-                pass  # FakeCompiler.compile 抛 RuntimeError,但 skill_loader 已被捕获
+            # FakeCompiler.compile 抛 RuntimeError,被 create_run 的 except 捕获后
+            # 转为 HTTPException(400, "Compile failed: ..."),TestClient 返回 400 响应而非抛出。
+            # 用显式断言替代 try/except,失败时有清晰诊断且顺带验证错误处理路径。
+            resp = client.post("/api/runs", json={"team_name": "t1", "task": "do x"})
     finally:
         graph_mod.TeamCompiler = original
 
+    assert resp.status_code == 400
+    assert "Compile failed" in resp.json()["detail"]
     assert captured["skill_loader"] is loader
