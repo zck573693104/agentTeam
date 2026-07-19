@@ -68,4 +68,28 @@ def init_db(path: str | Path = "data/agentteam.db") -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     conn.commit()
+    # SP7b: evolution_history 表
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS evolution_history (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name   TEXT NOT NULL,
+            version      INTEGER NOT NULL,
+            dimension    TEXT NOT NULL,
+            before_value TEXT,
+            after_value  TEXT,
+            diff         TEXT,
+            reason       TEXT,
+            run_id       TEXT,
+            success      BOOLEAN NOT NULL,
+            error        TEXT,
+            timestamp    TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_evo_agent ON evolution_history(agent_name, version);
+    """)
+    # library_agents 加 version 列(若不存在)
+    try:
+        conn.execute("ALTER TABLE library_agents ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass  # 列已存在
+    conn.commit()
     return conn
