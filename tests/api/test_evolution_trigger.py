@@ -2,7 +2,8 @@
 import threading
 from unittest.mock import MagicMock
 
-from agentteam.api.run_manager import RunCancelledError, RunManager
+from agentteam.api.run_manager import RunManager
+from agentteam.runtime.errors import RunCancelledError
 
 
 def _make_run_manager(evolution_engine=None):

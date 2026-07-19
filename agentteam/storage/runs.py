@@ -3,11 +3,8 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
 
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from agentteam.storage.utils import utcnow_iso as _now
 
 
 class RunRepo:
@@ -56,10 +53,53 @@ class RunRepo:
             )
             self._conn.commit()
 
-    def list_runs(self) -> list[sqlite3.Row]:
+    def list_runs(self, limit: int | None = None, offset: int = 0) -> list[sqlite3.Row]:
+        """按创建时间倒序返回 runs,支持分页。
+
+        limit=None 不分页(向后兼容);limit=N 只返回前 N 条;
+        offset 跳过前 offset 条(常与 limit 配合做翻页)。
+        """
         with self._lock:
-            cur = self._conn.execute("SELECT * FROM runs ORDER BY created_at DESC")
+            if limit is None:
+                cur = self._conn.execute(
+                    "SELECT * FROM runs ORDER BY created_at DESC"
+                )
+            else:
+                cur = self._conn.execute(
+                    "SELECT * FROM runs ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                )
             return cur.fetchall()
+
+    def count_runs(self) -> int:
+        """返回 runs 表总行数(用于分页元数据)。"""
+        with self._lock:
+            cur = self._conn.execute("SELECT COUNT(*) FROM runs")
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    def aggregate_by_status(self) -> dict[str, int]:
+        """SELECT status, COUNT(*) GROUP BY status — 用于 dashboard。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT status, COUNT(*) AS n FROM runs GROUP BY status"
+            )
+            return {row["status"]: row["n"] for row in cur.fetchall()}
+
+    def aggregate_by_team(self) -> dict[str, int]:
+        """SELECT team_name, COUNT(*) GROUP BY team_name — 用于 dashboard。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT team_name, COUNT(*) AS n FROM runs GROUP BY team_name"
+            )
+            return {row["team_name"]: row["n"] for row in cur.fetchall()}
+
+    def sum_total_tokens(self) -> int:
+        """SELECT SUM(total_tokens) — 用于 dashboard。"""
+        with self._lock:
+            cur = self._conn.execute("SELECT COALESCE(SUM(total_tokens), 0) AS s FROM runs")
+            row = cur.fetchone()
+            return row["s"] if row else 0
 
     def try_claim(
         self, run_id: str, expected_status: str, new_status: str

@@ -4,14 +4,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
 
 from agentteam.domain.serializer import _agent_from_dict, _agent_to_dict
 from agentteam.domain.agent import Agent
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from agentteam.storage.utils import utcnow_iso as _now
 
 
 class LibraryRepo:

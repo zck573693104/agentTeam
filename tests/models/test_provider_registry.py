@@ -2,15 +2,18 @@
 import pytest
 
 
-def test_base_adapter_requires_build_method():
-    """BaseAdapter 是 ABC：子类未实现 build 无法实例化。"""
+def test_base_adapter_default_build_usable():
+    """BaseAdapter 提供默认 build() 实现:子类设类属性即可实例化,无需重写 build。"""
     from agentteam.models.adapters.base import BaseAdapter
 
-    class IncompleteAdapter(BaseAdapter):
-        pass
+    class MinimalAdapter(BaseAdapter):
+        provider_name = "fake"
+        env_var = "FAKE_API_KEY"
+        chat_class_path = "some.module.FakeClass"
 
-    with pytest.raises(TypeError, match="abstract method"):
-        IncompleteAdapter({"k": "v"})
+    adapter = MinimalAdapter({"k": "v"})
+    assert adapter._api_keys == {"k": "v"}
+    assert adapter.provider_name == "fake"
 
 
 def test_base_adapter_complete_subclass_instantiable():

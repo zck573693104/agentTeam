@@ -5,11 +5,16 @@ import queue as queue_mod
 import threading
 from typing import Any
 
+from agentteam.config import get_settings
+from agentteam.logging_config import get_logger
 from agentteam.storage.audit import AuditRepo
+
+logger = get_logger("api.events")
 
 # 每个订阅者队列上限。事件已持久化到 SQLite，慢消费者溢出时丢弃旧事件，
 # SSE 重连后可从 SQLite 回放补全。
-_MAX_QUEUE_SIZE = 1000
+# 从集中式 Settings 读取(原 os.environ.get 已收敛到 agentteam.config)。
+_MAX_QUEUE_SIZE = get_settings().event_queue_size
 
 
 class EventBus:
@@ -21,6 +26,13 @@ class EventBus:
     def __init__(self) -> None:
         self._subscribers: dict[str, list[queue_mod.Queue]] = {}
         self._lock = threading.Lock()
+        # 监控指标:丢弃事件计数(供运维观测慢消费者)
+        self._dropped_count: int = 0
+
+    @property
+    def dropped_count(self) -> int:
+        """返回累计因队列满而丢弃的事件数。"""
+        return self._dropped_count
 
     def subscribe(self, run_id: str) -> queue_mod.Queue:
         """订阅 run_id 的事件流，返回一个 Queue。"""
@@ -43,6 +55,7 @@ class EventBus:
             try:
                 q.put_nowait(event)
             except queue_mod.Full:
+                self._dropped_count += 1
                 try:
                     q.get_nowait()  # 丢最旧
                 except queue_mod.Empty:
