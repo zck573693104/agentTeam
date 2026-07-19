@@ -1,0 +1,145 @@
+<h2>SP7 整体架构图(方案 B)</h2>
+<p class="subtitle">SP7a Skill 系统 + SP7b 自进化系统,绿色为 SP7a 新增,橙色为 SP7b 新增</p>
+
+<div class="mockup">
+  <div class="mockup-header">组件关系与数据流</div>
+  <div class="mockup-body" style="padding: 24px; font-family: monospace; font-size: 12px; line-height: 1.6;">
+
+<pre style="margin:0; overflow-x:auto;">
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           用户层 / API 层                                │
+│  POST /api/runs    POST /api/teams   POST /api/agents/{n}/rollback     │
+│  (现有)             (现有)            (SP7b 新增:回滚到 version N)       │
+└────────────┬─────────────────────────┬──────────────────────────────────┘
+             │                         │
+             ▼                         ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          RunManager (现有)                               │
+│                                                                          │
+│  start_run() ──► graph.invoke() ──► _handle_invoke_result()             │
+│                                          │                               │
+│                            ┌─────────────┴───────────────┐              │
+│                            │                             │              │
+│                            ▼                             ▼              │
+│                   run_end/completed            <span style="color:#e67e22;font-weight:bold">EvolutionEngine.trigger(run_id)</span>
+│                            │                    <span style="color:#e67e22">(SP7b 异步,不阻塞响应)</span>
+│                            │                             │              │
+└────────────────────────────┼─────────────────────────────┼─────────────┘
+                             │                             │
+                             ▼                             ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      TeamCompiler (现有 + SP7a 改造)                     │
+│                                                                          │
+│  compile(team)                                                           │
+│    │                                                                     │
+│    ├──► <span style="color:#27ae60;font-weight:bold">SkillLoader.load(agent.skills)</span>  <span style="color:#27ae60">─ SP7a: 从 skills/ 目录加载 .md</span>  │
+│    │         │                                                           │
+│    │         ▼                                                           │
+│    │    <span style="color:#27ae60;font-weight:bold">skill_contents: dict[name, md_text]</span>                                   │
+│    │                                                                     │
+│    ├──► _compile_worker(agent, ...)                                      │
+│    │         │                                                           │
+│    │         ├──► make_worker_node(agent, llm, tools, ..., <span style="color:#27ae60;font-weight:bold">skills=skill_contents</span>)            │
+│    │         │         │                                                 │
+│    │         │         ▼                                                 │
+│    │         │    <span style="color:#27ae60;font-weight:bold">make_worker_subgraph(..., skills)</span>  <span style="color:#27ae60">─ 注入 SystemMessage</span>   │
+│    │         │         │                                                 │
+│    │         │         ▼                                                 │
+│    │         │    <span style="color:#27ae60;font-weight:bold">make_init_worker(agent, skills)</span>                               │
+│    │         │         │  把 skills 包装成 SystemMessage 放到 react_messages │
+│    │         │         │  首部,LLM 把 skill 视为"行为指导"                  │
+│    │         │                                                           │
+│    │         ▼                                                           │
+│    └──► _compile_supervisor(agent, ...)  (同上,supervisor 也可装 skill)   │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        SP7b: EvolutionEngine (新增)                      │
+│                                                                          │
+│  trigger(run_id)  ◄─── RunManager 在 run 终态后异步调用                  │
+│    │                                                                     │
+│    ├──► 收集 run trace (audit_repo.list_events)                          │
+│    │                                                                     │
+│    ├──► 并行触发 4 个进化维度(每个独立 LLM 调用,独立写 history):         │
+│    │                                                                     │
+│    │   ┌─────────────────────────┐  ┌─────────────────────────┐          │
+│    │   │ <span style="color:#e67e22">PromptOptimizer</span>       │  │ <span style="color:#e67e22">ParamTuner</span>             │          │
+│    │   │ 分析 trace + 重写 prompt │  │ 统计历史 + 调整参数      │          │
+│    │   │ 写 evolution_history     │  │ 写 evolution_history     │          │
+│    │   │ 更新 Agent.system_prompt │  │ 更新 Agent.max_iter 等   │          │
+│    │   └─────────────────────────┘  └─────────────────────────┘          │
+│    │   ┌─────────────────────────┐  ┌─────────────────────────┐          │
+│    │   │ <span style="color:#e67e22">SkillGenerator</span>       │  │ <span style="color:#e67e22">SkillSelector</span>         │          │
+│    │   │ 从成功 run 提炼模式      │  │ 任务匹配 skill 库        │          │
+│    │   │ 生成 .md 写入 skills/    │  │ 临时装备(不改配置)       │          │
+│    │   │ 写 evolution_history     │  │ 写 evolution_history     │          │
+│    │   └─────────────────────────┘  └─────────────────────────┘          │
+│    │                                                                     │
+│    ├──► Agent.version += 1                                               │
+│    └──► 失败保护:任一维度失败仅记录 error,不影响其他维度/run 结果        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          存储层 (SQLite)                                 │
+│                                                                          │
+│  现有表:                                                                 │
+│    runs(id, status, ...)         teams(name, spec_json, ...)            │
+│    library_agents(name, spec)    audit_events(id, run_id, ...)          │
+│                                                                          │
+│  <span style="color:#27ae60">SP7a 改造:</span>                                                          │
+│    library_agents.spec_json  ◄── Agent 加 <span style="color:#27ae60">skills: list[str]</span> 字段(序列化)              │
+│                                                                          │
+│  <span style="color:#e67e22">SP7b 新增:</span>                                                          │
+│    library_agents  加 <span style="color:#e67e22">version: int</span> 字段(默认 1)                            │
+│    <span style="color:#e67e22">evolution_history(</span>                                                       │
+│    <span style="color:#e67e22">  id, agent_name, version, dimension,</span>                                  │
+│    <span style="color:#e67e22">  before_value, after_value, diff, reason,</span>                             │
+│    <span style="color:#e67e22">  run_id, success, error, timestamp</span>                                   │
+│    <span style="color:#e67e22">)</span>                                                                   │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          文件系统                                        │
+│                                                                          │
+│  <span style="color:#27ae60">skills/                    ← SP7a:用户预置 skill 目录</span>                │
+│    code_review.md          ← 例:代码审查 skill                          │
+│    error_handling.md       ← 例:错误处理 skill                          │
+│    testing_strategy.md     ← 例:测试策略 skill                          │
+│    <span style="color:#e67e22">auto_*.md                 ← SP7b:SkillGenerator 自动生成</span>         │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+</pre>
+
+  </div>
+</div>
+
+<div class="section" style="margin-top: 20px;">
+  <h3>关键设计决策</h3>
+  <ul>
+    <li><strong>Skill 注入位置:</strong> <code>make_init_worker</code> 把 skill 内容包装为 SystemMessage,放到 react_messages 首部。LLM 把 skill 视为"行为指导"而非"身份描述"</li>
+    <li><strong>异步触发:</strong> RunManager 在 run 终态(completed/failed/cancelled)后 <code>threading.Thread(daemon=True)</code> 触发 EvolutionEngine,不阻塞 API 响应</li>
+    <li><strong>4 维度并行:</strong> 每个维度独立 LLM 调用、独立写 history,互不影响。失败仅记录 error,不回滚已成功的维度</li>
+    <li><strong>版本原子性:</strong> 一次 trigger 内 4 维度全部完成后,Agent.version += 1(单个 history 记录可能多条,共享同一 version)</li>
+    <li><strong>回滚:</strong> <code>POST /api/agents/{name}/rollback?version=N</code> 从 history 取 version N 的 after_value 写回 Agent,创建新 history 记录标记为 rollback</li>
+  </ul>
+</div>
+
+<div class="options" data-multiselect>
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)">
+    <div class="letter">✓</div>
+    <div class="content">
+      <h3>架构图确认无误,继续下一节(SP7a 详细设计)</h3>
+      <p>整体架构、组件关系、数据流符合预期</p>
+    </div>
+  </div>
+  <div class="option" data-choice="modify" onclick="toggleSelect(this)">
+    <div class="letter">?</div>
+    <div class="content">
+      <h3>有修改意见</h3>
+      <p>在终端说明需要调整的部分</p>
+    </div>
+  </div>
+</div>

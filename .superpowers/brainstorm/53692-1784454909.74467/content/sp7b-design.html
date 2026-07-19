@@ -1,0 +1,482 @@
+<h2>SP7b: 自进化系统详细设计</h2>
+<p class="subtitle">EvolutionEngine 主控 / 4 维度 / 触发机制 / 版本化 / 回滚</p>
+
+<h3>1. EvolutionEngine 主控流程</h3>
+<div class="mockup">
+  <div class="mockup-header">新增 agentteam/runtime/evolution.py</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+class EvolutionEngine:
+    """Run 终态后异步触发,协调 4 个进化维度。
+
+    设计原则:
+    - 异步:不阻塞 RunManager 的 API 响应
+    - 隔离:4 维度独立 LLM 调用 + 独立写 history,互不影响
+    - 失败保护:任一维度失败仅记 error,不影响其他维度 / run 结果
+    - 防抖:同一 agent 短时间内(5 分钟)只触发一次,避免连续 run 雪崩
+    - 版本原子性:一次 trigger 内 4 维度全部尝试后,Agent.version += 1
+    """
+
+    def __init__(
+        self,
+        model_provider: ModelProvider,
+        agent_library: AgentLibrary,        <span style="color:#7f8c8d"># 读 / 写 Agent 配置</span>
+        evolution_repo: EvolutionRepo,      <span style="color:#7f8c8d"># 写 evolution_history</span>
+        run_repo: RunRepo,                  <span style="color:#7f8c8d"># 读 run 状态</span>
+        audit_repo: AuditRepo,              <span style="color:#7f8c8d"># 读 run trace</span>
+        skill_loader: SkillLoader | None = None,  <span style="color:#7f8c8d"># SkillGenerator 写 .md</span>
+        skills_dir: Path | None = None,
+    ):
+        self._mp = model_provider
+        self._lib = agent_library
+        self._evo_repo = evolution_repo
+        self._run_repo = run_repo
+        self._audit = audit_repo
+        self._skill_loader = skill_loader
+        self._skills_dir = skills_dir
+        self._last_trigger: dict[str, float] = {}  <span style="color:#7f8c8d"># agent_name → timestamp,防抖</span>
+        self._lock = threading.Lock()
+
+    def trigger(self, run_id: str) -> None:
+        <span style="color:#7f8c8d">"""RunManager 在 run 终态后异步调用。"""</span>
+        run = self._run_repo.get_run(run_id)
+        if run is None:
+            return
+        <span style="color:#7f8c8d"># 收集 run 涉及的所有 agent(supervisor + workers)</span>
+        agents = self._collect_agents_from_trace(run_id)
+        if not agents:
+            return
+        for agent_name in agents:
+            self._evolve_agent(agent_name, run_id)
+
+    def _evolve_agent(self, agent_name: str, run_id: str) -> None:
+        <span style="color:#7f8c8d"># 防抖:5 分钟内同 agent 不重复触发</span>
+        now = time.time()
+        with self._lock:
+            last = self._last_trigger.get(agent_name, 0)
+            if now - last &lt; 300:
+                return
+            self._last_trigger[agent_name] = now
+
+        agent = self._lib.get(agent_name)
+        if agent is None:
+            return
+
+        trace = self._audit.list_events(run_id)
+        old_version = agent.version or 1
+
+        <span style="color:#7ae22;font-weight:bold"># 4 维度顺序执行(避免 LLM 并发调用抢资源,且后维度可看前维度结果)</span>
+        <span style="color:#27ae60">results = []</span>
+        <span style="color:#27ae60">results.append(self._optimize_prompt(agent, trace, run_id))</span>
+        <span style="color:#27ae60">results.append(self._tune_params(agent, trace, run_id))</span>
+        <span style="color:#27ae60">results.append(self._generate_skill(agent, trace, run_id))</span>
+        <span style="color:#27ae60">results.append(self._select_skills(agent, trace, run_id))</span>
+
+        <span style="color:#7f8c8d"># 版本递增(只要有 1 个维度成功)</span>
+        if any(r.success for r in results):
+            new_version = old_version + 1
+            self._lib.update_version(agent_name, new_version)
+</pre>
+
+  </div>
+</div>
+
+<h3>2. 4 个进化维度详细设计</h3>
+
+<div class="mockup">
+  <div class="mockup-header">维度 1: PromptOptimizer — 自动优化 system_prompt</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+def _optimize_prompt(self, agent, trace, run_id) -> EvolutionResult:
+    <span style="color:#7f8c8d">"""分析 trace + LLM 重写 system_prompt。"""</span>
+    old_prompt = agent.system_prompt
+    <span style="color:#7f8c8d"># 提取 trace 关键事件(worker_start/tool_call/error/worker_end)</span>
+    trace_summary = self._summarize_trace(trace)
+
+    llm = self._mp.get_llm(None)  <span style="color:#7f8c8d"># 用默认 model</span>
+    response = llm.invoke([
+        SystemMessage(content=PROMPT_OPTIMIZER_INSTRUCTION),
+        HumanMessage(content=f"""
+当前 system_prompt:
+{old_prompt}
+
+本次 run trace:
+{trace_summary}
+
+请基于 trace 分析 prompt 是否需要优化,若需要则给出新版本。
+若 prompt 已合理则原样返回(避免无意义改动)。
+"""),
+    ])
+
+    new_prompt = self._parse_prompt_from_response(response.content)
+    if new_prompt == old_prompt:
+        return EvolutionResult(success=True, dimension="prompt",
+                                reason="no change needed", ...)
+
+    <span style="color:#27ae60"># 写 history + 更新 Agent</span>
+    self._evo_repo.add_record(
+        agent_name=agent.name, dimension="prompt",
+        before_value=old_prompt, after_value=new_prompt,
+        diff=self._compute_diff(old_prompt, new_prompt),
+        reason=response.content, run_id=run_id, success=True,
+    )
+    self._lib.update_prompt(agent.name, new_prompt)
+    return EvolutionResult(success=True, ...)
+</pre>
+
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">维度 2: ParamTuner — 调整 max_iterations / approval_policy</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+def _tune_params(self, agent, trace, run_id) -> EvolutionResult:
+    <span style="color:#7f8c8d">"""统计历史 N 次 run + LLM 建议参数调整。"""</span>
+    <span style="color:#7f8c8d"># 取最近 5 次该 agent 的 run 指标</span>
+    history = self._evo_repo.list_recent_runs(agent.name, limit=5)
+    stats = {
+        "avg_iterations": mean([h.iterations for h in history]),
+        "max_iterations_reached_rate": sum(h.hit_max for h in history) / len(history),
+        "approval_rejected_rate": sum(h.rejected for h in history) / len(history),
+        "tool_call_error_rate": ...,
+    }
+
+    llm = self._mp.get_llm(None)
+    response = llm.invoke([
+        SystemMessage(content=PARAM_TUNER_INSTRUCTION),
+        HumanMessage(content=f"""
+当前参数:max_iterations={agent.max_iterations}, approval_policy={agent.approval_policy}
+最近 5 次统计:{stats}
+建议调整(只给必要改动,否则原样返回)?
+"""),
+    ])
+
+    new_params = self._parse_params(response.content)
+    <span style="color:#7f8c8d"># 边界保护:max_iterations 限制 [1, 20],避免极端值</span>
+    new_params["max_iterations"] = max(1, min(20, new_params.get("max_iterations", agent.max_iterations)))
+    ...
+</pre>
+
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">维度 3: SkillGenerator — 从成功 run 提炼 skill 文件</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+def _generate_skill(self, agent, trace, run_id) -> EvolutionResult:
+    <span style="color:#7f8c8d">"""仅在 run 成功时尝试提炼 skill。"""</span>
+    if not self._is_successful_run(trace):
+        return EvolutionResult(success=True, dimension="skill_gen",
+                                reason="run failed, skip", ...)
+
+    llm = self._mp.get_llm(None)
+    response = llm.invoke([
+        SystemMessage(content=SKILL_GENERATOR_INSTRUCTION),
+        HumanMessage(content=f"""
+Agent: {agent.name} (role={agent.role})
+Task: {self._extract_task(trace)}
+Tool calls: {self._extract_tool_calls(trace)}
+Final answer: {self._extract_final_answer(trace)}
+
+从本次成功执行中提炼可复用的 skill 模式。
+若无可复用模式则返回 SKIP。否则返回 markdown skill 内容 + 建议 skill 名。
+命名规则:auto_<pattern>.md(避免覆盖用户预置 skill)。
+"""),
+    ])
+
+    if response.content.strip() == "SKIP":
+        return EvolutionResult(success=True, dimension="skill_gen",
+                                reason="no reusable pattern", ...)
+
+    skill_name, skill_md = self._parse_skill_response(response.content)
+    <span style="color:#27ae60"># 写入 skills/ 目录(命名 auto_*.md)</span>
+    skill_path = self._skills_dir / f"{skill_name}.md"
+    skill_path.write_text(skill_md, encoding="utf-8")
+
+    <span style="color:#27ae60"># 通知 SkillLoader 重载缓存</span>
+    if self._skill_loader:
+        self._skill_loader.reload()
+
+    self._evo_repo.add_record(
+        agent_name=agent.name, dimension="skill_gen",
+        before_value="", after_value=str(skill_path),
+        reason=f"Generated skill: {skill_name}", run_id=run_id, success=True,
+    )
+    return EvolutionResult(success=True, ...)
+</pre>
+
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">维度 4: SkillSelector — 动态 skill 选择(临时装备)</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+def _select_skills(self, agent, trace, run_id) -> EvolutionResult:
+    <span style="color:#7f8c8d">"""根据任务描述推荐 skill,临时装备(不改 Agent.skills 配置)。
+
+    此维度产生"建议",实际装备由下次 run 时 TeamCompiler 读取。
+    建议写入 evolution_history,作为 Agent.skills 的"软推荐"。
+    """</span>
+    available = self._skill_loader.list_available() if self._skill_loader else []
+    <span style="color:#7f8c8d"># 排除已装备的</span>
+    candidates = [s for s in available if s not in agent.skills]
+    if not candidates:
+        return EvolutionResult(success=True, dimension="skill_select",
+                                reason="no new skills to recommend", ...)
+
+    task = self._extract_task(trace)
+    llm = self._mp.get_llm(None)
+    response = llm.invoke([
+        SystemMessage(content=SKILL_SELECTOR_INSTRUCTION),
+        HumanMessage(content=f"""
+Agent: {agent.name}, role={agent.role}
+Task: {task}
+Already equipped skills: {agent.skills}
+Candidate skills: {candidates}
+
+推荐本次任务应装备的 skill(可多选,空则不推荐)。返回 skill 名列表。
+"""),
+    ])
+
+    recommended = self._parse_skill_list(response.content)
+    if not recommended:
+        return EvolutionResult(success=True, dimension="skill_select",
+                                reason="no recommendation", ...)
+
+    <span style="color:#27ae60"># 写入 history(标记为"建议"),不直接改 Agent.skills</span>
+    <span style="color:#27ae60"># 用户可在 review history 后手动 apply</span>
+    self._evo_repo.add_record(
+        agent_name=agent.name, dimension="skill_select",
+        before_value=str(agent.skills), after_value=str(recommended),
+        reason=f"Recommended for tasks like: {task[:100]}",
+        run_id=run_id, success=True,
+    )
+    return EvolutionResult(success=True, ...)
+</pre>
+
+  </div>
+</div>
+
+<h3>3. 触发时序图</h3>
+<div class="mockup">
+  <div class="mockup-header">RunManager → EvolutionEngine 异步触发</div>
+  <div class="mockup-body" style="padding: 24px;">
+
+<pre style="margin:0; font-size: 12px;">
+RunManager           Graph (worker)        AuditRepo         EvolutionEngine
+    │                     │                    │                    │
+    │  start_run()        │                    │                    │
+    │────────────────────►│                    │                    │
+    │                     │ invoke()           │                    │
+    │                     │─── tool_call ─────►│                    │
+    │                     │─── worker_end ────►│                    │
+    │                     │ run_end            │                    │
+    │                     │──────────────────►│                    │
+    │  _handle_invoke_result()                 │                    │
+    │  update_status(completed)                │                    │
+    │                     │                    │                    │
+    │  <span style="color:#27ae60;font-weight:bold">threading.Thread(target=evolution.trigger,</span>      │                    │
+    │  <span style="color:#27ae60;font-weight:bold">  daemon=True).start()                    │                    │</span>
+    │  <span style="color:#27ae60;font-weight:bold">─────────────────────────────────────────────────────────────────────►│</span>
+    │  <span style="color:#7f8c8d"># API 立即返回(run 状态已完成)</span>          │                    │
+    │                                          │   trigger(run_id)  │
+    │                                          │◄───────────────────│
+    │                                          │                    │
+    │                                          │              _collect_agents
+    │                                          │              _evolve_agent(agent)
+    │                                          │              ├─ _optimize_prompt
+    │                                          │              │   └─ LLM 调用 ──► 写 history
+    │                                          │              ├─ _tune_params
+    │                                          │              │   └─ LLM 调用 ──► 写 history
+    │                                          │              ├─ _generate_skill
+    │                                          │              │   └─ LLM 调用 ──► 写 .md + history
+    │                                          │              └─ _select_skills
+    │                                          │                  └─ LLM 调用 ──► 写 history
+    │                                          │                    │
+    │                                          │              version += 1
+    │                                          │              update Agent in library
+    │                                          │                    │
+</pre>
+
+  </div>
+</div>
+
+<h3>4. 数据模型:evolution_history 表</h3>
+<div class="mockup">
+  <div class="mockup-header">storage/evolution.py — EvolutionRepo</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+<span style="color:#7f8c8d">-- SQLite schema 新增</span>
+CREATE TABLE IF NOT EXISTS evolution_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name  TEXT NOT NULL,
+    version     INTEGER NOT NULL,          <span style="color:#7f8c8d">-- Agent 在该次进化后的 version</span>
+    dimension   TEXT NOT NULL,             <span style="color:#7f8c8d">-- 'prompt' | 'params' | 'skill_gen' | 'skill_select' | 'rollback'</span>
+    before_value TEXT,                     <span style="color:#7f8c8d">-- JSON 序列化</span>
+    after_value  TEXT,                     <span style="color:#7f8c8d">-- JSON 序列化</span>
+    diff         TEXT,                     <span style="color:#7f8c8d">-- 文本 diff(prompt 维度)或 ""</span>
+    reason       TEXT,                     <span style="color:#7f8c8d">-- LLM 分析理由</span>
+    run_id       TEXT,                     <span style="color:#7f8c8d">-- 触发此次进化的 run</span>
+    success      BOOLEAN NOT NULL,         <span style="color:#7f8c8d">-- False 表示该维度失败</span>
+    error        TEXT,                     <span style="color:#7f8c8d">-- 失败时的错误信息</span>
+    timestamp    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_evo_agent ON evolution_history(agent_name, version);
+
+<span style="color:#7f8c8d">-- Agent 表加 version 字段(SP7a 已加 skills,SP7b 再加 version)</span>
+ALTER TABLE library_agents ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+
+
+class EvolutionRepo:
+    def add_record(self, agent_name, version, dimension,
+                   before_value, after_value, diff, reason,
+                   run_id, success, error=None) -> int: ...
+
+    def list_history(self, agent_name: str, limit: int = 20) -> list[dict]: ...
+
+    def get_version_snapshot(self, agent_name: str, version: int) -> list[dict]:
+        <span style="color:#7f8c8d">"""取指定 version 的所有 history 记录(可能多条,因 4 维度)。"""</span>
+
+    def list_recent_runs(self, agent_name: str, limit: int = 5) -> list[dict]:
+        <span style="color:#7f8c8d">"""取该 agent 最近 N 次进化的 run_id(用于 ParamTuner 统计)。"""</span>
+</pre>
+
+  </div>
+</div>
+
+<h3>5. 回滚 API</h3>
+<div class="mockup">
+  <div class="mockup-header">POST /api/agents/{name}/rollback</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+@router.post("/api/agents/{agent_name}/rollback")
+def rollback_agent(agent_name: str, version: int):
+    <span style="color:#7f8c8d"># 1. 取目标 version 的所有 history 记录</span>
+    records = evo_repo.get_version_snapshot(agent_name, version)
+    if not records:
+        raise HTTPException(404, f"Version {version} not found")
+
+    <span style="color:#7f8c8d"># 2. 把 before_value 应用回 Agent(取最早一条作为基线)</span>
+    agent = library.get(agent_name)
+    for record in records:
+        if record["dimension"] == "prompt":
+            agent.system_prompt = record["before_value"]
+        elif record["dimension"] == "params":
+            params = json.loads(record["before_value"])
+            agent.max_iterations = params["max_iterations"]
+            agent.approval_policy = params["approval_policy"]
+        <span style="color:#7f8c8d"># skill_gen / skill_select 不回滚(已写入文件的 skill 保留)</span>
+
+    <span style="color:#7f8c8d"># 3. 写新 history 记录(类型: rollback)</span>
+    new_version = agent.version + 1
+    evo_repo.add_record(
+        agent_name=agent_name, version=new_version, dimension="rollback",
+        before_value=f"v{agent.version}", after_value=f"v{version}",
+        reason=f"User rolled back to v{version}", run_id=None, success=True,
+    )
+    agent.version = new_version
+    library.update(agent)
+    return {"ok": True, "new_version": new_version}
+</pre>
+
+  </div>
+</div>
+
+<h3>6. 文件结构</h3>
+<div class="mockup">
+  <div class="mockup-header">SP7b 新增 / 改动文件</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+agentteam/
+  runtime/
+    <span style="color:#27ae60">evolution.py           ← 新增:EvolutionEngine + 4 维度</span>
+    skills.py             ← SP7a 已新增
+  storage/
+    <span style="color:#27ae60">evolution.py           ← 新增:EvolutionRepo</span>
+    db.py                 ← 改:create_table 加 evolution_history 表
+    library.py            ← 改:Agent 加 version 字段
+  api/
+    routes/
+      <span style="color:#27ae60">evolution.py          ← 新增:rollback endpoint + history 查询</span>
+      runs.py             ← 改:_handle_invoke_result 后异步触发 evolution
+    run_manager.py        ← 改:_handle_error / _handle_invoke_result 触发 evolution
+  server.py               ← 改:create_app 创建 EvolutionRepo + EvolutionEngine 注入
+
+tests/
+  runtime/
+    <span style="color:#27ae60">test_evolution.py      ← 新增:4 维度单元测试</span>
+  storage/
+    <span style="color:#27ae60">test_evolution_repo.py ← 新增:EvolutionRepo 单元测试</span>
+  api/
+    <span style="color:#27ae60">test_api_evolution.py  ← 新增:rollback + history endpoint</span>
+</pre>
+
+  </div>
+</div>
+
+<h3>7. 关键设计权衡</h3>
+<div class="mockup">
+  <div class="mockup-header">设计决策清单</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+1. <strong>4 维度顺序 vs 并行</strong>:选顺序
+   - 避免 LLM 并发抢资源(API rate limit)
+   - 后维度可看前维度结果(prompt 优化后,params 调整可基于新 prompt)
+   - 单次 trigger 总耗时 = 4 * LLM 调用,可接受(异步不阻塞)
+
+2. <strong>SkillSelector 是否自动 apply</strong>:选"软推荐"
+   - 不直接改 Agent.skills(避免误推荐污染配置)
+   - 写入 history,用户 review 后手动 apply
+   - 提供后续 API: POST /agents/{name}/apply-suggestion
+
+3. <strong>SkillGenerator 是否覆盖已有 skill</strong>:选"不覆盖"
+   - 自动生成的 skill 命名 auto_*.md,与用户预置 skill 隔离
+   - 若 auto_X.md 已存在,本次生成跳过(或附加版本号 auto_X_v2.md)
+
+4. <strong>进化失败如何处理</strong>:选"独立记录"
+   - 4 维度任一失败仅写 success=False + error,不影响其他维度
+   - 4 维度全部失败则 version 不递增
+   - 防抖 5 分钟避免短时间内连续失败重试
+
+5. <strong>version 何时递增</strong>:选"任一维度成功即递增"
+   - 一次 trigger 可能有 0-4 条 history 记录,共享同一 version
+   - version 是 Agent 的进化代数,便于回滚定位
+
+6. <strong>异步触发 vs 同步</strong>:选异步(daemon thread)
+   - 不阻塞 RunManager 的 API 响应
+   - 失败不影响 run 结果
+   - 防抖避免连续 run 雪崩
+</pre>
+
+  </div>
+</div>
+
+<div class="options" data-multiselect>
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)">
+    <div class="letter">✓</div>
+    <div class="content">
+      <h3>SP7b 设计确认,进入 spec 文档撰写</h3>
+      <p>EvolutionEngine / 4 维度 / 触发机制 / 版本化 / 回滚 都符合预期</p>
+    </div>
+  </div>
+  <div class="option" data-choice="modify" onclick="toggleSelect(this)">
+    <div class="letter">?</div>
+    <div class="content">
+      <h3>有修改意见</h3>
+      <p>在终端说明需调整的部分</p>
+    </div>
+  </div>
+</div>

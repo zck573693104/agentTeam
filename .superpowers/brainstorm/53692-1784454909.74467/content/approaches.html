@@ -1,0 +1,56 @@
+<h2>SP7 整体架构 — 3 种方案对比</h2>
+<p class="subtitle">Skill 系统 + 自进化(4 维度)。请选择整体架构走向</p>
+
+<div class="options" data-multiselect>
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>方案 A:最小集成</h3>
+      <p><strong>Skill 注入:</strong> 启动时拼到 system_prompt 末尾,用 <code>&lt;skill&gt;</code> 标签包裹</p>
+      <p><strong>进化维度:</strong> 仅 prompt 优化(1/4)</p>
+      <p><strong>存储:</strong> AgentLibrary 直接覆盖,无版本</p>
+      <p><strong>触发:</strong> 用户手动 <code>POST /evolve</code></p>
+      <p style="color:#27ae60"><strong>优势:</strong> 改动最小、1 个 SP 完成</p>
+      <p style="color:#c0392b"><strong>劣势:</strong> 不满足用户"4 维度 + 自动触发"需求</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>方案 B:解耦版(推荐)</h3>
+      <p><strong>Skill 注入:</strong> TeamCompiler 编译期加载 skill .md,作为独立 SystemMessage 注入 react_messages 首部(与 system_prompt 解耦)</p>
+      <p><strong>进化维度:</strong> 全 4 维度(prompt / 参数 / skill 生成 / 动态 skill 选择)</p>
+      <p><strong>存储:</strong> Agent 加 version 字段 + 新增 evolution_history 表(before/after/diff/reason)</p>
+      <p><strong>触发:</strong> Run 结束后异步自动触发(不阻塞 API 响应)</p>
+      <p><strong>SP 拆分:</strong> SP7a(skill 系统)+ SP7b(自进化),分阶段实施</p>
+      <p style="color:#27ae60"><strong>优势:</strong> 满足全部需求、skill 与 prompt 解耦便于独立演进、版本化可回滚</p>
+      <p style="color:#c0392b"><strong>劣势:</strong> 改动较大、需要 2 个 SP 周期</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>方案 C:RAG 增强版</h3>
+      <p><strong>Skill 注入:</strong> Skill 库 + 向量索引,Agent 每次迭代按任务描述检索 top-K skill,动态注入</p>
+      <p><strong>进化维度:</strong> 全 4 维度 + skill 自动标注/聚类</p>
+      <p><strong>存储:</strong> SQLite skill 元数据 + 向量数据库(FAISS/Chroma)</p>
+      <p><strong>触发:</strong> Run 结束后自动 + 周期性 skill 重排序</p>
+      <p style="color:#27ae60"><strong>优势:</strong> Skill 选择智能化、可扩展到大 skill 库(1000+)</p>
+      <p style="color:#c0392b"><strong>劣势:</strong> 引入向量数据库依赖、复杂度高、调试困难、过度工程化</p>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top: 24px; padding: 16px; background: rgba(46, 204, 113, 0.1); border-left: 3px solid #27ae60;">
+  <h3 style="margin-top:0">💡 推荐:方案 B</h3>
+  <p>理由:</p>
+  <ol>
+    <li><strong>满足全部 4 维度需求</strong>,同时通过 SP 拆分控制单次实施范围</li>
+    <li><strong>Skill 作为 SystemMessage 注入</strong>比拼到 system_prompt 更清晰:LLM 把 skill 视为"行为指导"而非"身份描述",且 prompt 长度可控</li>
+    <li><strong>版本化 history 表</strong>是安全网:进化退化时可回滚,生产环境必需</li>
+    <li><strong>异步自动触发</strong>满足用户需求,但通过"不阻塞 API + 失败保护"控制风险</li>
+    <li><strong>方案 C 的 RAG</strong> 在 skill 数量 &lt; 100 时收益有限,反而增加运维负担。若后期 skill 库做大可平滑升级</li>
+  </ol>
+</div>

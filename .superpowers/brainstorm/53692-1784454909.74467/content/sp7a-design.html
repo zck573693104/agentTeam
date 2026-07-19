@@ -1,0 +1,304 @@
+<h2>SP7a: Skill 系统详细设计</h2>
+<p class="subtitle">数据模型 / SkillLoader / TeamCompiler 集成 / 注入流程 / API</p>
+
+<h3>1. 数据模型变更</h3>
+<div class="mockup">
+  <div class="mockup-header">domain/agent.py — Agent 加 skills 字段</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+<span style="color:#7f8c8d">// 现有 Agent 字段</span>
+class Agent:
+    name: str
+    role: Literal["supervisor", "worker"]
+    system_prompt: str
+    tools: list[str]
+    model: str | None
+    max_iterations: int
+    approval_policy: ApprovalPolicy
+    subordinates: list[Agent | TeamRef]   <span style="color:#7f8c8d"># supervisor 才有</span>
+
+<span style="color:#27ae60;font-weight:bold">// SP7a 新增</span>
+    <span style="color:#27ae60">skills: list[str] = []                  # skill 名列表,默认空(向后兼容)</span>
+</pre>
+
+  </div>
+</div>
+
+<h3>2. SkillLoader 组件</h3>
+<div class="mockup">
+  <div class="mockup-header">新增 agentteam/runtime/skills.py</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+<span style="color:#7f8c8d">"""Skill 加载器:从 skills/ 目录读取 .md 文件,提供按名查询接口。"""</span>
+from pathlib import Path
+
+
+class SkillLoader:
+    """从文件系统加载 markdown skill 文件,内存缓存避免重读。
+
+    skill 名 = 文件名 stem(如 skills/code_review.md → "code_review")。
+    若 skill 不存在,load 时抛 KeyError(编译期 fail-fast,避免运行时静默缺失)。
+    """
+
+    def __init__(self, skills_dir: Path | None = None) -> None:
+        <span style="color:#27ae60">self._skills_dir = skills_dir</span>
+        <span style="color:#27ae60">self._cache: dict[str, str] = {}    # name → md_content</span>
+        <span style="color:#27ae60">self._scanned = False</span>
+
+    def _scan(self) -> None:
+        <span style="color:#7f8c8d">"""惰性扫描 skills_dir,构建 name → content 缓存。"""</span>
+        if self._scanned or self._skills_dir is None:
+            self._scanned = True
+            return
+        for path in self._skills_dir.glob("*.md"):
+            self._cache[path.stem] = path.read_text(encoding="utf-8")
+        self._scanned = True
+
+    def load(self, names: list[str]) -> dict[str, str]:
+        <span style="color:#7f8c8d">"""按名批量加载 skill,返回 {name: content}。
+
+        缺失的 skill 名抛 KeyError(列出缺失项便于诊断)。
+        空名列表返回空 dict(默认场景,Agent.skills == [])。
+        """</span>
+        if not names:
+            return {}
+        self._scan()
+        missing = [n for n in names if n not in self._cache]
+        if missing:
+            raise KeyError(f"Skills not found: {missing}")
+        return {n: self._cache[n] for n in names}
+
+    def list_available(self) -> list[str]:
+        <span style="color:#7f8c8d">"""列出所有可用 skill 名(供 API / CLI 查询)。"""</span>
+        self._scan()
+        return sorted(self._cache.keys())
+
+    def reload(self) -> None:
+        <span style="color:#7f8c8d">"""清缓存重扫(支持 skills/ 目录热更新)。"""</span>
+        self._cache.clear()
+        self._scanned = False
+        self._scan()
+</pre>
+
+  </div>
+</div>
+
+<h3>3. TeamCompiler 集成</h3>
+<div class="mockup">
+  <div class="mockup-header">runtime/graph.py — TeamCompiler 接受 SkillLoader</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+class TeamCompiler:
+    def __init__(
+        self,
+        model_provider: ModelProvider,
+        tool_registry: ToolRegistry,
+        library: AgentLibrary | None = None,
+        run_manager=None,                    <span style="color:#7f8c8d"># P4 已加</span>
+        <span style="color:#27ae60;font-weight:bold">skill_loader: SkillLoader | None = None,  # SP7a 新增</span>
+    ):
+        ...
+        self._skill_loader = skill_loader or SkillLoader()  <span style="color:#27ae60"># 默认空 loader</span>
+
+    def _compile_worker(self, agent: Agent, default_model, trace_writer, audit_repo):
+        <span style="color:#7f8c8d"># 加载该 agent 装备的 skills</span>
+        <span style="color:#27ae60">skills = self._skill_loader.load(agent.skills)</span>
+        llm = self._mp.get_llm(agent.model or default_model)
+        tools = self._tr.get_tools(agent.tools) if agent.tools else []
+        return make_worker_node(
+            agent, llm, tools, trace_writer, audit_repo,
+            run_manager=self._run_manager,
+            <span style="color:#27ae60">skills=skills,  # 透传给 worker subgraph</span>
+        )
+</pre>
+
+  </div>
+</div>
+
+<h3>4. Skill 注入流程(关键)</h3>
+<div class="mockup">
+  <div class="mockup-header">runtime/nodes.py — make_init_worker 把 skills 注入 react_messages</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+def make_init_worker(agent: Agent, trace_writer=None, <span style="color:#27ae60">skills: dict[str, str] | None = None</span>):
+    def init_worker(state: dict) -> dict:
+        <span style="color:#7f8c8d"># 原有初始化逻辑(system_prompt + task)</span>
+        react_messages = [
+            SystemMessage(content=agent.system_prompt),
+            HumanMessage(content=state.get("task", "")),
+        ]
+
+        <span style="color:#27ae60;font-weight:bold"># SP7a: 把 skills 包装为 SystemMessage 插入 react_messages 首部之后</span>
+        <span style="color:#27ae60">if skills:</span>
+            <span style="color:#27ae60">skill_text = "\n\n".join(</span>
+                <span style="color:#27ae60">f'<skill name="{name}">\n{content}\n</skill>'</span>
+                <span style="color:#27ae60">for name, content in skills.items()</span>
+            <span style="color:#27ae60">)</span>
+            <span style="color:#27ae60">react_messages.insert(1, SystemMessage(content=skill_text))</span>
+            <span style="color:#7f8c8d"># ↑ insert(1, ...) 让 skill 在 system_prompt 之后、task 之前</span>
+
+        return {
+            "react_messages": react_messages,
+            "tool_calls": [],
+            "iteration": 0,
+            "final_answer": "",
+            <span style="color:#7f8c8d"># dag 模式字段...</span>
+        }
+    return init_worker
+</pre>
+
+  </div>
+</div>
+
+<h3>5. Skill 注入位置示意图</h3>
+<div class="mockup">
+  <div class="mockup-header">react_messages 结构对比</div>
+  <div class="mockup-body" style="padding: 24px;">
+
+<pre style="margin:0; font-size: 12px;">
+<span style="color:#7f8c8d">【改造前】react_messages 结构:</span>
+┌──────────────────────────────────┐
+│ SystemMessage(system_prompt)     │  ← Agent 身份描述
+├──────────────────────────────────┤
+│ HumanMessage(task)               │  ← 用户任务
+├──────────────────────────────────┤
+│ AIMessage / ToolMessage ...      │  ← ReAct 循环
+└──────────────────────────────────┘
+
+<span style="color:#27ae60;font-weight:bold">【改造后】react_messages 结构(有 skills 时):</span>
+┌──────────────────────────────────┐
+│ SystemMessage(system_prompt)     │  ← Agent 身份描述(不变)
+├──────────────────────────────────┤
+│ <span style="color:#27ae60">SystemMessage(skill_text)         │  ← SP7a 新增:行为指导</span>
+│   &lt;skill name="code_review"&gt;     │
+│   审查代码时先检查...             │
+│   &lt;/skill&gt;                       │
+│   &lt;skill name="testing"&gt;         │
+│   测试覆盖率达到...               │
+│   &lt;/skill&gt;                       │
+├──────────────────────────────────┤
+│ HumanMessage(task)               │  ← 用户任务
+├──────────────────────────────────┤
+│ AIMessage / ToolMessage ...      │  ← ReAct 循环
+└──────────────────────────────────┘
+
+<span style="color:#7f8c8d">设计理由:</span>
+- skill 放在 system_prompt 之后:LLM 先建立身份,再接收行为指导
+- skill 放在 task 之前:LLM 处理任务时已"知道"该用什么模式
+- 用 &lt;skill&gt; 标签包裹:便于 LLM 区分多个 skill 边界
+- 不混入 system_prompt:身份描述与行为指导解耦,便于独立演进
+</pre>
+
+  </div>
+</div>
+
+<h3>6. API / CLI 改造</h3>
+<div class="mockup">
+  <div class="mockup-header">server.py + CLI</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+<span style="color:#7f8c8d"># server.py — 创建 SkillLoader 并注入 TeamCompiler</span>
+def create_app(db_path, model_provider, tool_registry, <span style="color:#27ae60">skills_dir: Path | None = None</span>):
+    ...
+    <span style="color:#27ae60">skill_loader = SkillLoader(skills_dir)</span>
+    <span style="color:#27ae60">compiler_factory = lambda: TeamCompiler(</span>
+        <span style="color:#27ae60">model_provider, tool_registry, library=lib,</span>
+        <span style="color:#27ae60">run_manager=run_manager, skill_loader=skill_loader,</span>
+    <span style="color:#27ae60">)</span>
+
+<span style="color:#7f8c8d"># 新增 API:GET /api/skills — 列出可用 skill</span>
+@router.get("/api/skills")
+def list_skills():
+    return {"skills": skill_loader.list_available()}
+
+<span style="color:#7f8c8d"># CLI 新增:agentteam list-skills</span>
+<span style="color:#7f8c8d"># agentteam validate-team(改造)— 检查 skill 引用是否存在</span>
+</pre>
+
+  </div>
+</div>
+
+<h3>7. 文件结构与预置 skill</h3>
+<div class="mockup">
+  <div class="mockup-header">新增文件</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+agentteam/
+  runtime/
+    <span style="color:#27ae60">skills.py              ← 新增:SkillLoader</span>
+    graph.py              ← 改:TeamCompiler 加 skill_loader
+    nodes.py              ← 改:make_init_worker 加 skills 参数
+  api/
+    routes/
+      <span style="color:#27ae60">skills.py            ← 新增:list_skills endpoint</span>
+  server.py               ← 改:create_app 加 skills_dir 参数
+
+<span style="color:#27ae60">skills/                   ← 新增:用户预置 skill 目录(项目根)</span>
+  <span style="color:#27ae60">code_review.md          ← 示例 skill</span>
+  <span style="color:#27ae60">error_handling.md       ← 示例 skill</span>
+  <span style="color:#27ae60">testing_strategy.md     ← 示例 skill</span>
+
+tests/
+  runtime/
+    <span style="color:#27ae60">test_skills.py         ← 新增:SkillLoader 单元测试</span>
+  api/
+    <span style="color:#27ae60">test_api_skills.py     ← 新增:list_skills endpoint 测试</span>
+</pre>
+
+  </div>
+</div>
+
+<h3>8. 测试策略</h3>
+<div class="mockup">
+  <div class="mockup-header">SP7a 测试覆盖</div>
+  <div class="mockup-body" style="padding: 16px;">
+
+<pre style="margin:0; overflow-x:auto; font-size: 12px;">
+单元测试(test_skills.py):
+  ✓ SkillLoader 空目录返回空 list
+  ✓ SkillLoader 扫描 .md 文件,stem 作为 name
+  ✓ SkillLoader.load 空名列表返回空 dict
+  ✓ SkillLoader.load 缺失 skill 抛 KeyError(含缺失名)
+  ✓ SkillLoader.load 命中返回 {name: content}
+  ✓ SkillLoader.reload 清缓存重扫
+  ✓ SkillLoader.list_available 排序返回
+
+集成测试(test_plan_dag.py 追加):
+  ✓ Agent with skills 字段构造
+  ✓ TeamCompiler + SkillLoader E2E(skill 注入到 react_messages)
+  ✓ make_init_worker 多 skill 注入顺序正确
+  ✓ 无 skills 时行为与改造前一致(向后兼容)
+
+API 测试(test_api_skills.py):
+  ✓ GET /api/skills 返回 skill 列表
+  ✓ 空目录返回 {"skills": []}
+
+回归测试:
+  ✓ 全部现有测试 PASS(Agent.skills 默认 [],无 skill 注入)
+</pre>
+
+  </div>
+</div>
+
+<div class="options" data-multiselect>
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)">
+    <div class="letter">✓</div>
+    <div class="content">
+      <h3>SP7a 设计确认,继续 SP7b 详细设计</h3>
+      <p>SkillLoader / Agent.skills 字段 / 注入流程 / API 都符合预期</p>
+    </div>
+  </div>
+  <div class="option" data-choice="modify" onclick="toggleSelect(this)">
+    <div class="letter">?</div>
+    <div class="content">
+      <h3>有修改意见</h3>
+      <p>在终端说明需调整的部分</p>
+    </div>
+  </div>
+</div>
