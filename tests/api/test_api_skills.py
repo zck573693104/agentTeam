@@ -131,8 +131,8 @@ def test_runs_router_accepts_skill_loader_param(tmp_path):
     assert captured["skill_loader"] is loader
 
 
-def test_cli_list_skills_calls_api(tmp_path, capsys):
-    """agentteam list-skills 调用 GET /api/skills 并打印结果。"""
+def test_cli_list_skills_calls_api(capsys):
+    """agentteam list-skills 调用 GET /api/skills/ 并打印结果。"""
     from unittest.mock import MagicMock, patch
     import agentteam.cli as cli_mod
 
