@@ -205,3 +205,110 @@ def test_make_init_worker_dag_mode_with_skills():
     assert len(msgs) == 3
     assert msgs[1].content.startswith('<skill name="plan_skill">')
     assert result["current_step_id"] == "step1"
+
+
+from unittest.mock import MagicMock
+
+from agentteam.runtime.graph import TeamCompiler
+from agentteam.runtime.skills import SkillLoader
+
+
+def test_team_compiler_accepts_skill_loader_param(tmp_path):
+    """TeamCompiler.__init__ 接受 skill_loader 参数(默认 None 时创建空 loader)。"""
+    (tmp_path / "code_review.md").write_text("CR", encoding="utf-8")
+    loader = SkillLoader(tmp_path)
+    compiler = TeamCompiler(
+        model_provider=MagicMock(),
+        tool_registry=MagicMock(),
+        skill_loader=loader,
+    )
+    assert compiler._skill_loader is loader
+
+
+def test_team_compiler_default_skill_loader_when_not_provided():
+    """未传 skill_loader 时,默认创建一个空 loader(skills_dir=None)。"""
+    compiler = TeamCompiler(
+        model_provider=MagicMock(),
+        tool_registry=MagicMock(),
+    )
+    assert compiler._skill_loader is not None
+    assert compiler._skill_loader.list_available() == []
+
+
+def test_team_compiler_compile_worker_loads_agent_skills(tmp_path):
+    """_compile_worker 调用 skill_loader.load(agent.skills) 并透传到 make_worker_node。"""
+    (tmp_path / "code_review.md").write_text("审查代码 skill", encoding="utf-8")
+    loader = SkillLoader(tmp_path)
+    compiler = TeamCompiler(
+        model_provider=MagicMock(),
+        tool_registry=MagicMock(),
+        skill_loader=loader,
+    )
+    # 构造一个 worker Agent 装备 skill
+    agent = Agent(
+        name="coder",
+        role="worker",
+        system_prompt="coder",
+        tools=[],  # 无工具,避免 mock tool_registry 复杂度
+        skills=["code_review"],
+    )
+    # mock make_worker_node 捕获 skills 参数
+    captured_skills = {}
+
+    def fake_make_worker_node(agent, llm, tools, trace_writer, audit_repo,
+                              run_manager=None, skills=None):
+        captured_skills["skills"] = skills
+        return lambda state, config=None: {"messages": []}
+
+    # monkeypatch make_worker_node
+    import agentteam.runtime.graph as graph_mod
+    original = graph_mod.make_worker_node
+    graph_mod.make_worker_node = fake_make_worker_node
+    try:
+        compiler._compile_worker(agent, default_model=None, trace_writer=None, audit_repo=None)
+    finally:
+        graph_mod.make_worker_node = original
+
+    assert captured_skills["skills"] == {"code_review": "审查代码 skill"}
+
+
+def test_team_compiler_compile_worker_no_skills_passes_empty_dict(tmp_path):
+    """agent.skills=[] 时,skills 透传为空 dict(不是 None,便于 make_init_worker 统一判断)。"""
+    loader = SkillLoader(tmp_path)
+    compiler = TeamCompiler(
+        model_provider=MagicMock(),
+        tool_registry=MagicMock(),
+        skill_loader=loader,
+    )
+    agent = Agent(name="w", role="worker", system_prompt="w", tools=[], skills=[])
+    captured_skills = {}
+
+    def fake_make_worker_node(agent, llm, tools, trace_writer, audit_repo,
+                              run_manager=None, skills=None):
+        captured_skills["skills"] = skills
+        return lambda state, config=None: {"messages": []}
+
+    import agentteam.runtime.graph as graph_mod
+    original = graph_mod.make_worker_node
+    graph_mod.make_worker_node = fake_make_worker_node
+    try:
+        compiler._compile_worker(agent, default_model=None, trace_writer=None, audit_repo=None)
+    finally:
+        graph_mod.make_worker_node = original
+
+    assert captured_skills["skills"] == {}
+
+
+def test_team_compiler_compile_worker_missing_skill_raises_keyerror(tmp_path):
+    """agent.skills 引用不存在的 skill 时,_compile_worker 抛 KeyError(编译期 fail-fast)。"""
+    loader = SkillLoader(tmp_path)  # 空目录
+    compiler = TeamCompiler(
+        model_provider=MagicMock(),
+        tool_registry=MagicMock(),
+        skill_loader=loader,
+    )
+    agent = Agent(name="w", role="worker", system_prompt="w", tools=[],
+                  skills=["nonexistent_skill"])
+    import pytest
+    with pytest.raises(KeyError):
+        compiler._compile_worker(agent, default_model=None, trace_writer=None, audit_repo=None)

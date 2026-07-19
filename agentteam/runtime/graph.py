@@ -16,6 +16,7 @@ from agentteam.runtime.nodes import (
     make_supervisor_node,
     make_worker_node,
 )
+from agentteam.runtime.skills import SkillLoader
 from agentteam.runtime.state import TeamState, is_rejected
 from agentteam.runtime.trace import TraceWriter
 from agentteam.tools.registry import ToolRegistry
@@ -253,12 +254,14 @@ class TeamCompiler:
         tool_registry: ToolRegistry,
         library: AgentLibrary | None = None,
         run_manager=None,
+        skill_loader: SkillLoader | None = None,
     ):
         self._mp = model_provider
         self._tr = tool_registry
         self._lib = library or AgentLibrary()
         self._team_registry: dict[str, Team] = {}
         self._run_manager = run_manager
+        self._skill_loader = skill_loader or SkillLoader()
 
     def register_team(self, team: Team) -> None:
         """注册可被 TeamRef 引用的 Team。"""
@@ -469,10 +472,15 @@ class TeamCompiler:
     ):
         """worker 沿用 make_worker_node（内部封装子图并剥离共享累加器字段，
         避免子图 reducer 与父图 reducer 双重累积）。
+
+        SP7a:加载 agent.skills(缺失抛 KeyError,编译期 fail-fast)并透传给
+        make_worker_node → make_init_worker,注入到 react_messages。
         """
         llm = self._mp.get_llm(agent.model or default_model)
         tools = self._tr.get_tools(agent.tools) if agent.tools else []
+        skills = self._skill_loader.load(agent.skills)
         return make_worker_node(
             agent, llm, tools, trace_writer, audit_repo,
             run_manager=self._run_manager,
+            skills=skills,
         )
