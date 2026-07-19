@@ -96,6 +96,10 @@ def test_rollback_applies_before_value_and_increments_version():
     assert agent.system_prompt == "old_prompt"
     assert agent.max_iterations == 3
     assert agent.version == 6
+    # approval_policy 也被正确回滚(Issue 5:补强断言堵住测试盲区)
+    assert agent.approval_policy is not None
+    assert agent.approval_policy.level == "tool"
+    assert agent.approval_policy.targets == ["x"]
     # rollback 记录已写入 history
     evo_repo.add_record.assert_called_once()
     call_kwargs = evo_repo.add_record.call_args
