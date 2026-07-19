@@ -14,11 +14,13 @@ from agentteam.api.routes.admin import admin_router
 from agentteam.api.routes.dashboard import dashboard_router
 from agentteam.api.routes.library import library_router
 from agentteam.api.routes.runs import runs_router
+from agentteam.api.routes.skills import skills_router
 from agentteam.api.routes.teams import teams_router
 from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
 from agentteam.domain.library import AgentLibrary
 from agentteam.models.provider import ModelProvider
+from agentteam.runtime.skills import SkillLoader
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
 from agentteam.storage.library import LibraryRepo
@@ -38,6 +40,7 @@ def create_app(
     model_provider: ModelProvider | None = None,
     tool_registry: ToolRegistry | None = None,
     agent_library: AgentLibrary | None = None,
+    skills_dir: Path | None = None,
     web_dist: Path | None | object = _DEFAULT,
 ) -> FastAPI:
     conn = init_db(db_path)
@@ -73,6 +76,7 @@ def create_app(
     mp = model_provider or ModelProvider()
     tr = tool_registry or ToolRegistry()
     lib = agent_library or AgentLibrary(repo=library_repo)
+    skill_loader = SkillLoader(skills_dir)
 
     app.include_router(teams_router(team_store))
     app.include_router(
@@ -84,6 +88,7 @@ def create_app(
     app.include_router(dashboard_router(run_repo, audit_repo))
     app.include_router(library_router(lib))
     app.include_router(admin_router(team_store, lib))
+    app.include_router(skills_router(skill_loader))
 
     # 挂载前端静态文件(生产模式)。
     # - web_dist=_DEFAULT(默认): 使用 _DEFAULT_WEB_DIST,目录存在才挂载
