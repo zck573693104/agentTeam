@@ -687,3 +687,89 @@ def test_tune_params_float_max_iterations_truncates_to_int():
     assert result.success is True
     update_args = engine._agent_library.update_params.call_args
     assert update_args.args[1]["max_iterations"] == 10
+
+
+def test_generate_skill_skips_failed_run():
+    """run 失败 → 跳过(不调用 LLM)。"""
+    engine = _make_engine()
+    agent = Agent(name="coder", role="worker", version=1)
+    trace = [{"event_type": "error", "payload": {"error": "x"}}]  # 无 run_end
+    result = engine._generate_skill(agent, trace, "r1")
+    assert result.success is True
+    assert "skip" in result.reason.lower() or "failed" in result.reason.lower()
+    engine._mp.get_llm.assert_not_called()
+
+
+def test_generate_skill_no_skills_dir_skips():
+    """skills_dir=None → 跳过。"""
+    engine = _make_engine(skills_dir=None)
+    agent = Agent(name="coder", role="worker", version=1)
+    trace = [{"event_type": "run_end"}]
+    result = engine._generate_skill(agent, trace, "r1")
+    assert result.success is True
+    assert "no skills_dir" in result.reason.lower() or "skip" in result.reason.lower()
+
+
+def test_generate_skill_llm_returns_skip():
+    """LLM 返回 SKIP → 不生成文件。"""
+    engine = _make_engine(skills_dir=MagicMock())
+    agent = Agent(name="coder", role="worker", version=1)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(content="SKIP")
+    result = engine._generate_skill(agent, trace, "r1")
+    assert result.success is True
+    assert "no reusable" in result.reason.lower() or "skip" in result.reason.lower()
+
+
+def test_generate_skill_creates_file_and_notifies_loader(tmp_path):
+    """LLM 返回 skill → 写入 auto_*.md + 通知 SkillLoader.reload + 写 history。"""
+    mock_loader = MagicMock()
+    engine = _make_engine(skill_loader=mock_loader, skills_dir=tmp_path)
+    agent = Agent(name="coder", role="worker", version=1)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content="```markdown\n# Skill: auto_pattern1\ndo x then y\n```"
+    )
+    result = engine._generate_skill(agent, trace, "r1")
+    assert result.success is True
+    # 文件已创建
+    skill_path = tmp_path / "auto_pattern1.md"
+    assert skill_path.exists()
+    assert "auto_pattern1" in skill_path.read_text(encoding="utf-8")
+    # SkillLoader.reload 被调用
+    mock_loader.reload.assert_called_once()
+    # history 写入
+    engine._evolution_repo.add_record.assert_called_once()
+    call_kwargs = engine._evolution_repo.add_record.call_args
+    assert call_kwargs.kwargs["dimension"] == "skill_gen"
+    assert call_kwargs.kwargs["success"] is True
+
+
+def test_generate_skill_existing_file_appends_version(tmp_path):
+    """auto_X.md 已存在 → 写 auto_X_v2.md。"""
+    # 预创建 auto_pattern1.md
+    (tmp_path / "auto_pattern1.md").write_text("existing", encoding="utf-8")
+    mock_loader = MagicMock()
+    engine = _make_engine(skill_loader=mock_loader, skills_dir=tmp_path)
+    agent = Agent(name="coder", role="worker", version=1)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content="```markdown\n# Skill: auto_pattern1\nnew content\n```"
+    )
+    engine._generate_skill(agent, trace, "r1")
+    # 应写入 auto_pattern1_v2.md(不覆盖原文件)
+    assert (tmp_path / "auto_pattern1_v2.md").exists()
+    assert (tmp_path / "auto_pattern1.md").read_text(encoding="utf-8") == "existing"
+
+
+def test_generate_skill_llm_failure_records_error():
+    """LLM 失败 → 写 success=False history。"""
+    engine = _make_engine(skills_dir=MagicMock())
+    agent = Agent(name="coder", role="worker", version=1)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.side_effect = RuntimeError("fail")
+    result = engine._generate_skill(agent, trace, "r1")
+    assert result.success is False
+    engine._evolution_repo.add_record.assert_called_once()
+    call_kwargs = engine._evolution_repo.add_record.call_args
+    assert call_kwargs.kwargs["success"] is False

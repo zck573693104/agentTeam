@@ -272,8 +272,78 @@ class EvolutionEngine:
             return EvolutionResult(False, "params", "error", str(e))
 
     def _generate_skill(self, agent: Agent, trace: list, run_id: str) -> EvolutionResult:
-        """维度 3:从成功 run 提炼 skill。Task 8 实现。"""
-        return EvolutionResult(True, "skill_gen", "not implemented yet")
+        """维度 3:从成功 run 提炼 skill。
+
+        仅在 run 成功时尝试;LLM 返回 SKIP 跳过;
+        生成的 skill 命名 auto_*.md,已存在则附加 _v2/_v3。
+
+        LLM 选择:优先 agent.model,否则 fallback 到 engine.default_model
+        (C1 修复:生产 ModelProvider.get_llm(None) 会抛 AttributeError)。
+        """
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from agentteam.runtime.evolution_prompts import SKILL_GENERATOR_INSTRUCTION
+
+        try:
+            if not _is_successful_run(trace):
+                return EvolutionResult(True, "skill_gen", "run failed, skip")
+
+            if self._skills_dir is None:
+                return EvolutionResult(True, "skill_gen", "no skills_dir configured")
+
+            task = _extract_task(trace)
+            tool_calls = _extract_tool_calls(trace)
+            final_answer = _extract_final_answer(trace)
+
+            # C1 修复:必须传 ModelRef,优先 agent.model,fallback default_model
+            llm = self._mp.get_llm(agent.model or self._default_model)
+            response = llm.invoke([
+                SystemMessage(content=SKILL_GENERATOR_INSTRUCTION),
+                HumanMessage(content=(
+                    f"Agent: {agent.name} (role={agent.role})\n"
+                    f"Task: {task}\n"
+                    f"Tool calls: {tool_calls}\n"
+                    f"Final answer: {final_answer[:500]}\n\n"
+                    f"从本次成功执行中提炼可复用的 skill 模式。"
+                    f"若无可复用模式则返回 SKIP。"
+                    f"否则返回 markdown skill 内容,开头用 '# Skill: auto_<name>' 标注。"
+                )),
+            ])
+
+            if response.content.strip() == "SKIP":
+                return EvolutionResult(True, "skill_gen", "no reusable pattern")
+
+            skill_name, skill_md = _parse_skill_response(response.content)
+
+            # 处理重名:auto_X.md 已存在 → auto_X_v2.md
+            skill_path = self._skills_dir / f"{skill_name}.md"
+            if skill_path.exists():
+                version = 2
+                while (self._skills_dir / f"{skill_name}_v{version}.md").exists():
+                    version += 1
+                skill_path = self._skills_dir / f"{skill_name}_v{version}.md"
+
+            skill_path.write_text(skill_md, encoding="utf-8")
+
+            # 通知 SkillLoader 重载缓存
+            if self._skill_loader is not None:
+                self._skill_loader.reload()
+
+            self._evolution_repo.add_record(
+                agent_name=agent.name, version=agent.version,
+                dimension="skill_gen", before_value="",
+                after_value=str(skill_path),
+                diff="", reason=f"Generated skill: {skill_name}",
+                run_id=run_id, success=True,
+            )
+            return EvolutionResult(True, "skill_gen", f"generated {skill_name}")
+        except Exception as e:
+            self._evolution_repo.add_record(
+                agent_name=agent.name, version=agent.version,
+                dimension="skill_gen", before_value="", after_value="",
+                diff="", reason=f"error: {e}", run_id=run_id,
+                success=False, error=str(e),
+            )
+            return EvolutionResult(False, "skill_gen", "error", str(e))
 
     def _select_skills(self, agent: Agent, trace: list, run_id: str) -> EvolutionResult:
         """维度 4:任务匹配 skill 软推荐。Task 9 实现。"""
