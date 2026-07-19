@@ -210,7 +210,6 @@ def test_make_init_worker_dag_mode_with_skills():
 from unittest.mock import MagicMock
 
 from agentteam.runtime.graph import TeamCompiler
-from agentteam.runtime.skills import SkillLoader
 
 
 def test_team_compiler_accepts_skill_loader_param(tmp_path):
@@ -309,6 +308,5 @@ def test_team_compiler_compile_worker_missing_skill_raises_keyerror(tmp_path):
     )
     agent = Agent(name="w", role="worker", system_prompt="w", tools=[],
                   skills=["nonexistent_skill"])
-    import pytest
     with pytest.raises(KeyError):
         compiler._compile_worker(agent, default_model=None, trace_writer=None, audit_repo=None)
