@@ -63,3 +63,67 @@ def test_get_skill_no_skills_dir_returns_empty(tmp_path):
         resp = client.get("/api/skills/")
     assert resp.status_code == 200
     assert resp.json() == {"skills": []}
+
+
+def test_runs_router_accepts_skill_loader_param(tmp_path):
+    """runs_router 接受 skill_loader 参数,并透传到 create_run 中构造的 TeamCompiler。"""
+    from unittest.mock import MagicMock
+    from agentteam.api.routes.runs import runs_router
+    from agentteam.api.store import TeamStore
+    from agentteam.runtime.skills import SkillLoader
+    from agentteam.storage.db import init_db
+    from agentteam.storage.runs import RunRepo
+    from agentteam.storage.audit import AuditRepo
+    from agentteam.storage.teams import TeamRepo
+    from agentteam.api.events import EventBus
+    from agentteam.domain.team import Team
+    from agentteam.domain.agent import Agent
+    from agentteam.models.provider import ModelRef
+    import agentteam.runtime.graph as graph_mod
+
+    # 用临时 db
+    import threading
+    conn = init_db(str(tmp_path / "test.db"))
+    lock = threading.Lock()
+    run_repo = RunRepo(conn, lock=lock)
+    audit_repo = AuditRepo(conn, lock=lock)
+    team_repo = TeamRepo(conn, lock=lock)
+    team_store = TeamStore(repo=team_repo)
+    bus = EventBus()
+    loader = SkillLoader(tmp_path)
+
+    # patch TeamCompiler 捕获 skill_loader
+    captured = {}
+    class FakeCompiler:
+        def __init__(self, mp, tr, library=None, run_manager=None, skill_loader=None):
+            captured["skill_loader"] = skill_loader
+        def register_team(self, t): pass
+        def compile(self, *a, **k): raise RuntimeError("stop before invoke")
+
+    original = graph_mod.TeamCompiler
+    graph_mod.TeamCompiler = FakeCompiler
+    try:
+        router = runs_router(
+            MagicMock(), team_store, MagicMock(), MagicMock(),
+            run_repo, audit_repo, bus, agent_library=MagicMock(),
+            skill_loader=loader,
+        )
+        # 触发 create_run
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        app = FastAPI()
+        app.include_router(router)
+        # 需要先注册 team
+        team_store.register(Team(
+            name="t1", description="d", default_model=ModelRef("qwen", "qwen-max"),
+            root=Agent(name="root", role="supervisor"),
+        ))
+        with TestClient(app) as client:
+            try:
+                client.post("/api/runs", json={"team_name": "t1", "task": "do x"})
+            except Exception:
+                pass  # FakeCompiler.compile 抛 RuntimeError,但 skill_loader 已被捕获
+    finally:
+        graph_mod.TeamCompiler = original
+
+    assert captured["skill_loader"] is loader

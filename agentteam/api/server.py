@@ -82,7 +82,7 @@ def create_app(
     app.include_router(
         runs_router(
             run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,
-            checkpointer=saver, agent_library=lib,
+            checkpointer=saver, agent_library=lib, skill_loader=skill_loader,
         )
     )
     app.include_router(dashboard_router(run_repo, audit_repo))
