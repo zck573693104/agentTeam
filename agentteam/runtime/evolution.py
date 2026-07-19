@@ -14,7 +14,6 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from agentteam.domain.agent import Agent
 from agentteam.domain.library import AgentLibrary
@@ -64,34 +63,40 @@ class EvolutionEngine:
         run = self._run_repo.get_run(run_id)
         if run is None:
             return
-        agents = self._collect_agents_from_trace(run_id)
+        # 取 trace 一次,传给 _collect_agents_from_trace 和 _evolve_agent,
+        # 避免 N+1 次重复 DB 查询,并保证两者看到一致的 trace 快照。
+        trace = self._load_trace(run_id)
+        agents = self._collect_agents_from_trace(trace)
         if not agents:
             return
         for agent_name in agents:
-            self._evolve_agent(agent_name, run_id)
+            self._evolve_agent(agent_name, run_id, trace)
 
-    def _collect_agents_from_trace(self, run_id: str) -> list[str]:
-        """从 audit_events 提取涉及的 agent 名(去重)。
-
-        扫描 worker_start / leader_plan 事件的 actor 字段。
-        失败返回空列表。
-        """
+    def _load_trace(self, run_id: str) -> list[dict]:
+        """加载 run 的 audit_events 并统一转为 dict(生产 sqlite3.Row → dict)。"""
         try:
-            events = self._audit.list_events(run_id)
+            raw_events = self._audit.list_events(run_id)
         except Exception:
             return []
+        return [dict(ev) if not isinstance(ev, dict) else ev for ev in raw_events]
+
+    def _collect_agents_from_trace(self, trace: list[dict]) -> list[str]:
+        """从 trace 提取涉及的 agent 名(去重)。
+
+        扫描 worker_start / leader_plan 事件的 actor 字段。
+        """
         names: list[str] = []
         seen: set[str] = set()
-        for ev in events:
-            ev_type = ev.get("event_type", "") if isinstance(ev, dict) else ""
+        for ev in trace:
+            ev_type = ev.get("event_type", "")
             if ev_type in ("worker_start", "leader_plan"):
-                actor = ev.get("actor", "") if isinstance(ev, dict) else ""
+                actor = ev.get("actor", "")
                 if actor and actor not in seen:
                     seen.add(actor)
                     names.append(actor)
         return names
 
-    def _evolve_agent(self, agent_name: str, run_id: str) -> None:
+    def _evolve_agent(self, agent_name: str, run_id: str, trace: list[dict]) -> None:
         """对单个 agent 执行 4 维度进化。"""
         # 防抖
         now = time.time()
@@ -105,8 +110,7 @@ class EvolutionEngine:
         if agent is None:
             return
 
-        trace = self._audit.list_events(run_id)
-        old_version = agent.version or 1
+        old_version = agent.version
 
         # 4 维度顺序执行(每个维度独立 try/except,失败仅记 error)
         results: list[EvolutionResult] = []
