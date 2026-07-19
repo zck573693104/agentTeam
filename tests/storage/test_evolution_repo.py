@@ -112,17 +112,22 @@ def test_get_version_snapshot_unknown_version_returns_empty(tmp_db):
 
 
 def test_list_recent_runs_returns_successful_records(tmp_db):
-    """list_recent_runs 返回该 agent 最近 N 次成功的进化记录(用于 ParamTuner 统计)。"""
+    """list_recent_runs 返回该 agent 最近 N 次成功的进化记录(用于 ParamTuner 统计)。
+
+    数据排列故意将失败的记录放在最新位置(version=4):
+    - 若实现误移除 `AND success = 1` 过滤,失败的 v=4 会落入 limit=2 窗口,
+      导致 `recent[0]["version"] == 3` 断言失败,提供真正的回归防护。
+    """
     repo = _make_repo(tmp_db)
     repo.add_record("coder", 1, "prompt", "a", "b", "", "r1", "r1", True)
-    repo.add_record("coder", 1, "params", "{}", "{}", "", "r1", "r1", False, error="x")  # 失败,排除
     repo.add_record("coder", 2, "prompt", "b", "c", "", "r2", "r2", True)
     repo.add_record("coder", 3, "params", "{}", "{}", "", "r3", "r3", True)
+    repo.add_record("coder", 4, "params", "{}", "{}", "", "r4", "r4", False, error="boom")  # 最新但失败
     recent = repo.list_recent_runs("coder", limit=2)
-    # 只返回成功的,按时间倒序
+    # 只返回成功的,跳过失败的 v=4
     assert len(recent) == 2
-    assert all(r["success"] == 1 or r["success"] is True for r in recent)
-    # 最新版本在前
+    assert all(r["success"] == 1 for r in recent)
+    # 最新成功版本在前(v=3 而非 v=4)
     assert recent[0]["version"] == 3
     assert recent[1]["version"] == 2
 
