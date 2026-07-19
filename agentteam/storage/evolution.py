@@ -66,3 +66,36 @@ class EvolutionRepo:
                 (agent_name, limit),
             )
             return [dict(row) for row in cur.fetchall()]
+
+    def get_version_snapshot(self, agent_name: str, version: int) -> list[dict]:
+        """取指定 version 的所有 history 记录(可能多条,因一次 trigger 触发 4 维度)。
+
+        用于回滚:把该 version 所有 dimension 的 before_value 应用回 Agent。
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT * FROM evolution_history
+                WHERE agent_name = ? AND version = ?
+                ORDER BY id ASC
+                """,
+                (agent_name, version),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def list_recent_runs(self, agent_name: str, limit: int = 5) -> list[dict]:
+        """取该 agent 最近 N 次成功的进化记录(用于 ParamTuner 统计历史指标)。
+
+        按 timestamp 倒序,只返回 success=True 的记录。
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT * FROM evolution_history
+                WHERE agent_name = ? AND success = 1
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?
+                """,
+                (agent_name, limit),
+            )
+            return [dict(row) for row in cur.fetchall()]

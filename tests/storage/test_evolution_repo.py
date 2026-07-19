@@ -89,3 +89,45 @@ def test_list_history_unknown_agent_returns_empty(tmp_db):
     """未知 agent:list_history 返回空 list,不抛异常。"""
     repo = _make_repo(tmp_db)
     assert repo.list_history("nonexistent") == []
+
+
+def test_get_version_snapshot_returns_all_records_for_version(tmp_db):
+    """get_version_snapshot 返回指定 version 的所有记录(可能多条,因 4 维度)。"""
+    repo = _make_repo(tmp_db)
+    # version 2 有 3 条记录(4 维度中 3 个成功)
+    repo.add_record("coder", 2, "prompt", "a", "b", "", "r", "r1", True)
+    repo.add_record("coder", 2, "params", "{}", "{}", "", "r", "r1", True)
+    repo.add_record("coder", 2, "skill_gen", "", "auto_x.md", "", "r", "r1", True)
+    # version 3 有 1 条
+    repo.add_record("coder", 3, "prompt", "b", "c", "", "r", "r2", True)
+    snapshot = repo.get_version_snapshot("coder", 2)
+    assert len(snapshot) == 3
+    assert all(s["version"] == 2 for s in snapshot)
+
+
+def test_get_version_snapshot_unknown_version_returns_empty(tmp_db):
+    """未知 version 返回空 list,不抛异常。"""
+    repo = _make_repo(tmp_db)
+    assert repo.get_version_snapshot("coder", 999) == []
+
+
+def test_list_recent_runs_returns_successful_records(tmp_db):
+    """list_recent_runs 返回该 agent 最近 N 次成功的进化记录(用于 ParamTuner 统计)。"""
+    repo = _make_repo(tmp_db)
+    repo.add_record("coder", 1, "prompt", "a", "b", "", "r1", "r1", True)
+    repo.add_record("coder", 1, "params", "{}", "{}", "", "r1", "r1", False, error="x")  # 失败,排除
+    repo.add_record("coder", 2, "prompt", "b", "c", "", "r2", "r2", True)
+    repo.add_record("coder", 3, "params", "{}", "{}", "", "r3", "r3", True)
+    recent = repo.list_recent_runs("coder", limit=2)
+    # 只返回成功的,按时间倒序
+    assert len(recent) == 2
+    assert all(r["success"] == 1 or r["success"] is True for r in recent)
+    # 最新版本在前
+    assert recent[0]["version"] == 3
+    assert recent[1]["version"] == 2
+
+
+def test_list_recent_runs_unknown_agent_returns_empty(tmp_db):
+    """未知 agent 返回空 list。"""
+    repo = _make_repo(tmp_db)
+    assert repo.list_recent_runs("nonexistent") == []

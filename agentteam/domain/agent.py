@@ -61,3 +61,6 @@ class Agent:
     # SP7a: 装备的 skill 名列表(对应 skills/ 目录下 .md 文件的 stem)
     # 编译期由 SkillLoader.load 解析;缺失抛 KeyError(编译期 fail-fast)。
     skills: list[str] = field(default_factory=list)
+
+    # SP7b: 进化代数,默认 1(每次 EvolutionEngine.trigger 任一维度成功后 +=1)
+    version: int = 1
