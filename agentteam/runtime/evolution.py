@@ -183,8 +183,81 @@ class EvolutionEngine:
             return EvolutionResult(False, "prompt", "error", str(e))
 
     def _tune_params(self, agent: Agent, trace: list, run_id: str) -> EvolutionResult:
-        """维度 2:统计历史 + LLM 建议参数调整。Task 7 实现。"""
-        return EvolutionResult(True, "params", "not implemented yet")
+        """维度 2:统计历史 N 次 run + LLM 建议参数调整。
+
+        边界保护:max_iterations 限制 [1, 20]。
+        LLM 返回与当前相同 → 不写 history。
+        LLM 失败 → 写 success=False history(保留 old_params 上下文)。
+
+        LLM 选择:优先 agent.model,否则 fallback 到 engine.default_model
+        (C1 修复:生产 ModelProvider.get_llm(None) 会抛 AttributeError)。
+        """
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from agentteam.runtime.evolution_prompts import PARAM_TUNER_INSTRUCTION
+        import json as _json
+
+        # old_params 在 try 之前计算,确保 except 也能访问到上下文(I1)
+        old_params = {
+            "max_iterations": agent.max_iterations,
+            "approval_policy": (
+                _json.dumps(agent.approval_policy.__dict__, default=str)
+                if agent.approval_policy else None
+            ),
+        }
+        try:
+            history = self._evolution_repo.list_recent_runs(agent.name, limit=5)
+            stats = _compute_stats(history)
+
+            current_params = {
+                "max_iterations": agent.max_iterations,
+                "approval_policy": old_params["approval_policy"],
+            }
+
+            # C1 修复:必须传 ModelRef,优先 agent.model,fallback default_model
+            llm = self._mp.get_llm(agent.model or self._default_model)
+            response = llm.invoke([
+                SystemMessage(content=PARAM_TUNER_INSTRUCTION),
+                HumanMessage(content=(
+                    f"当前参数: {current_params}\n"
+                    f"最近 {len(history)} 次统计: {stats}\n"
+                    f"建议调整(只给必要改动,否则返回空 dict)。"
+                )),
+            ])
+            new_params = _parse_params(response.content)
+
+            # 边界保护:max_iterations 限制 [1, 20]
+            if "max_iterations" in new_params:
+                new_params["max_iterations"] = max(1, min(20, int(new_params["max_iterations"])))
+
+            # 判断是否有变化(只比对实际会改动的字段)
+            has_change = False
+            if "max_iterations" in new_params and new_params["max_iterations"] != agent.max_iterations:
+                has_change = True
+            if "approval_policy" in new_params:
+                has_change = True
+
+            if not has_change:
+                return EvolutionResult(True, "params", "no change needed")
+
+            self._evolution_repo.add_record(
+                agent_name=agent.name, version=agent.version,
+                dimension="params",
+                before_value=_json.dumps(old_params, default=str),
+                after_value=_json.dumps(new_params, default=str),
+                diff="", reason=response.content, run_id=run_id, success=True,
+            )
+            self._agent_library.update_params(agent.name, new_params)
+            return EvolutionResult(True, "params", "params tuned")
+        except Exception as e:
+            self._evolution_repo.add_record(
+                agent_name=agent.name, version=agent.version,
+                dimension="params",
+                before_value=_json.dumps(old_params, default=str),
+                after_value="",
+                diff="", reason=f"error: {e}", run_id=run_id,
+                success=False, error=str(e),
+            )
+            return EvolutionResult(False, "params", "error", str(e))
 
     def _generate_skill(self, agent: Agent, trace: list, run_id: str) -> EvolutionResult:
         """维度 3:从成功 run 提炼 skill。Task 8 实现。"""

@@ -492,3 +492,120 @@ def test_optimize_prompt_falls_back_to_default_model_when_agent_model_is_none():
     engine._optimize_prompt(agent, trace, "r1")
     # 验证 get_llm fallback 到 default_model
     engine._mp.get_llm.assert_called_once_with(_DEFAULT_MODEL)
+
+
+def test_tune_params_no_change_skips_history():
+    """LLM 返回与当前相同参数 → 不写 history,不更新 Agent。"""
+    from agentteam.domain.approval import ApprovalPolicy
+    engine = _make_engine()
+    agent = Agent(
+        name="coder", role="worker",
+        max_iterations=5, approval_policy=ApprovalPolicy(level="worker"),
+        version=1,
+    )
+    trace = [{"event_type": "run_end"}]
+    engine._evolution_repo.list_recent_runs.return_value = []
+    # LLM 返回的 max_iterations 与当前相同 → no change
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content='```json\n{"max_iterations": 5}\n```'
+    )
+    result = engine._tune_params(agent, trace, "r1")
+    assert result.success is True
+    assert "no change" in result.reason.lower()
+    engine._evolution_repo.add_record.assert_not_called()
+    engine._agent_library.update_params.assert_not_called()
+
+
+def test_tune_params_change_writes_history_and_updates_agent():
+    """LLM 返回新参数 → 写 history + 更新 Agent。"""
+    from agentteam.domain.approval import ApprovalPolicy
+    engine = _make_engine()
+    agent = Agent(
+        name="coder", role="worker",
+        max_iterations=5, approval_policy=ApprovalPolicy(level="worker"),
+        version=1,
+    )
+    trace = [{"event_type": "run_end"}]
+    engine._evolution_repo.list_recent_runs.return_value = []
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content='```json\n{"max_iterations": 15}\n```'
+    )
+    result = engine._tune_params(agent, trace, "r1")
+    assert result.success is True
+    engine._evolution_repo.add_record.assert_called_once()
+    call_kwargs = engine._evolution_repo.add_record.call_args
+    assert call_kwargs.kwargs["dimension"] == "params"
+    assert call_kwargs.kwargs["success"] is True
+    engine._agent_library.update_params.assert_called_once()
+    update_args = engine._agent_library.update_params.call_args
+    assert update_args.args[0] == "coder"
+    assert update_args.args[1]["max_iterations"] == 15
+
+
+def test_tune_params_clamps_max_iterations_to_range():
+    """max_iterations 边界保护:LLM 返回 100 → clamp 到 20。"""
+    from agentteam.domain.approval import ApprovalPolicy
+    engine = _make_engine()
+    agent = Agent(
+        name="coder", role="worker",
+        max_iterations=5, approval_policy=ApprovalPolicy(level="worker"),
+        version=1,
+    )
+    trace = [{"event_type": "run_end"}]
+    engine._evolution_repo.list_recent_runs.return_value = []
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content='```json\n{"max_iterations": 100}\n```'
+    )
+    engine._tune_params(agent, trace, "r1")
+    update_args = engine._agent_library.update_params.call_args
+    assert update_args.args[1]["max_iterations"] == 20
+
+
+def test_tune_params_clamps_max_iterations_to_min_1():
+    """max_iterations 边界保护:LLM 返回 0 → clamp 到 1。"""
+    from agentteam.domain.approval import ApprovalPolicy
+    engine = _make_engine()
+    agent = Agent(
+        name="coder", role="worker",
+        max_iterations=5, approval_policy=ApprovalPolicy(level="worker"),
+        version=1,
+    )
+    trace = [{"event_type": "run_end"}]
+    engine._evolution_repo.list_recent_runs.return_value = []
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content='```json\n{"max_iterations": 0}\n```'
+    )
+    engine._tune_params(agent, trace, "r1")
+    update_args = engine._agent_library.update_params.call_args
+    assert update_args.args[1]["max_iterations"] == 1
+
+
+def test_tune_params_llm_failure_records_error():
+    """LLM 失败 → 写 success=False history(保留 old_params 上下文),不更新 Agent。
+
+    I3 强化:不再用 or tautology,改为精确断言。
+    I1 强化:验证 except 分支 before_value 保留 old_params 上下文。
+    """
+    from agentteam.domain.approval import ApprovalPolicy
+    engine = _make_engine()
+    agent = Agent(
+        name="coder", role="worker",
+        max_iterations=5, approval_policy=ApprovalPolicy(level="worker"),
+        version=1,
+    )
+    trace = [{"event_type": "run_end"}]
+    engine._evolution_repo.list_recent_runs.return_value = []
+    engine._mp.get_llm.return_value.invoke.side_effect = RuntimeError("fail")
+    result = engine._tune_params(agent, trace, "r1")
+    assert result.success is False
+    assert result.error == "fail"
+    assert result.reason == "error"
+    engine._evolution_repo.add_record.assert_called_once()
+    call_args = engine._evolution_repo.add_record.call_args.kwargs
+    assert call_args["success"] is False
+    assert call_args["error"] == "fail"
+    assert call_args["reason"] == "error: fail"
+    # I1: before_value 应保留 old_params 上下文(含 max_iterations=5)
+    assert call_args["before_value"] != ""
+    assert "5" in call_args["before_value"]
+    engine._agent_library.update_params.assert_not_called()
