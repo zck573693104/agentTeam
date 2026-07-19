@@ -143,3 +143,24 @@ def test_rollback_does_not_revert_skill_gen_or_select():
     # skills 未被回滚(保留 auto_x)
     agent = lib.get("coder")
     assert agent.skills == ["auto_x"]
+
+
+def test_create_app_includes_evolution_routes(tmp_path):
+    """create_app 集成后,evolution endpoint 可访问。"""
+    from agentteam.api.server import create_app
+    from agentteam.models.provider import ModelProvider
+    from agentteam.tools.registry import ToolRegistry
+
+    app = create_app(
+        db_path=str(tmp_path / "test.db"),
+        model_provider=ModelProvider(),
+        tool_registry=ToolRegistry(),
+        skills_dir=tmp_path,
+        web_dist=None,
+    )
+    with TestClient(app) as client:
+        # history endpoint 可访问(返回空,因无 agent history)
+        resp = client.get("/api/agents/nonexistent/history")
+        assert resp.status_code == 200
+        assert resp.json() == {"history": []}
+
