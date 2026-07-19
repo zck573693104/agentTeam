@@ -336,13 +336,6 @@ def test_e2e_compiler_with_skills_injects_into_react_messages(tmp_path):
     make_worker_node → make_worker_subgraph → make_init_worker,
     最终注入到 react_messages[1]。
     """
-    from langchain_core.messages import SystemMessage, HumanMessage
-    from unittest.mock import MagicMock
-
-    from agentteam.domain.agent import Agent
-    from agentteam.runtime.graph import TeamCompiler
-    from agentteam.runtime.skills import SkillLoader
-
     # 准备 skill 文件
     (tmp_path / "code_review.md").write_text("E2E 审查 skill 内容", encoding="utf-8")
     loader = SkillLoader(tmp_path)
@@ -389,7 +382,6 @@ def test_e2e_compiler_with_skills_injects_into_react_messages(tmp_path):
         pass  # agent_step 失败可接受,我们用另一种方式验证
 
     # 直接验证:重新调用 make_init_worker(用相同的 skills)确认结构
-    from agentteam.runtime.nodes import make_init_worker
     skills = loader.load(agent.skills)
     init_fn = make_init_worker(agent, skills=skills)
     result = init_fn(state)
@@ -403,10 +395,6 @@ def test_e2e_compiler_with_skills_injects_into_react_messages(tmp_path):
 
 def test_e2e_backward_compat_no_skills_loader():
     """E2E 向后兼容:不传 skill_loader 时,TeamCompiler 仍可正常编译(空 skills)。"""
-    from unittest.mock import MagicMock
-    from agentteam.domain.agent import Agent
-    from agentteam.runtime.graph import TeamCompiler
-
     # 不传 skill_loader
     compiler = TeamCompiler(
         model_provider=MagicMock(),
