@@ -7,10 +7,13 @@ import {
   Modal,
   Popconfirm,
   Table,
+  Tabs,
+  Tag,
   message,
 } from "antd";
 import { useFetch } from "../hooks/useFetch";
 import { api, type AgentNode, type Team, type TeamRefNode } from "../api/client";
+import EvolutionHistory from "../components/EvolutionHistory";
 
 /** 统计 Agent 树中 worker 节点数量。 */
 function countWorkers(node: AgentNode | TeamRefNode): number {
@@ -112,23 +115,74 @@ export default function Teams() {
           rowKey="name"
           loading={loading}
           expandable={{
-            expandedRowRender: (r: Team) => (
-              <Descriptions column={1} bordered size="small">
-                <Descriptions.Item label="Root">
-                  {r.root.name} ({r.root.role})
-                </Descriptions.Item>
-                <Descriptions.Item label="Workers">
-                  {collectWorkers(r.root)
-                    .map((w) => `${w.name}(${w.role})`)
-                    .join(", ")}
-                </Descriptions.Item>
-                <Descriptions.Item label="Agent 树">
-                  <pre style={{ margin: 0, fontSize: 12 }}>
-                    {renderAgentTree(r.root)}
-                  </pre>
-                </Descriptions.Item>
-              </Descriptions>
-            ),
+            expandedRowRender: (r: Team) => {
+              /** 收集所有 worker 名称用于 evolution。 */
+              const workers = collectWorkers(r.root).filter(
+                (w) => w.role !== "subteam"
+              );
+              return (
+                <Tabs
+                  items={[
+                    {
+                      key: "info",
+                      label: "团队信息",
+                      children: (
+                        <Descriptions column={1} bordered size="small">
+                          <Descriptions.Item label="Root">
+                            {r.root.name} ({r.root.role})
+                          </Descriptions.Item>
+                          <Descriptions.Item label="Workers">
+                            {collectWorkers(r.root)
+                              .map((w) => `${w.name}(${w.role})`)
+                              .join(", ")}
+                          </Descriptions.Item>
+                          <Descriptions.Item label="Agent 树">
+                            <pre style={{ margin: 0, fontSize: 12 }}>
+                              {renderAgentTree(r.root)}
+                            </pre>
+                          </Descriptions.Item>
+                          {r.skills?.length > 0 && (
+                            <Descriptions.Item label="Skills">
+                              {r.skills.map((s) => (
+                                <Tag key={s} color="blue">
+                                  {s}
+                                </Tag>
+                              ))}
+                            </Descriptions.Item>
+                          )}
+                        </Descriptions>
+                      ),
+                    },
+                    {
+                      key: "evolution",
+                      label: "进化历史",
+                      children: (
+                        <div>
+                          {workers.length === 0 ? (
+                            <div style={{ color: "#999" }}>
+                              该团队无 worker agent
+                            </div>
+                          ) : (
+                            <Tabs
+                              items={workers.map((w) => ({
+                                key: w.name,
+                                label: w.name,
+                                children: (
+                                  <EvolutionHistory
+                                    agentName={w.name}
+                                    onRollback={refetch}
+                                  />
+                                ),
+                              }))}
+                            />
+                          )}
+                        </div>
+                      ),
+                    },
+                  ]}
+                />
+              );
+            },
           }}
         />
       </Card>
