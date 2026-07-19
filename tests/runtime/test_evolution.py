@@ -393,3 +393,58 @@ def test_parse_skill_response_no_skill_header_returns_default_name():
     name, content = _parse_skill_response(response)
     assert name == "auto_unknown"
     assert "只有内容" in content
+
+
+from langchain_core.messages import AIMessage
+
+
+def test_optimize_prompt_no_change_skips_history():
+    """LLM 返回相同 prompt → 不写 history,不更新 Agent。"""
+    engine = _make_engine()
+    agent = Agent(name="coder", role="worker", system_prompt="You are a coder.", version=1)
+    trace = [{"event_type": "run_start", "payload": {"task": "x"}},
+             {"event_type": "run_end"}]
+    # mock LLM 返回相同 prompt
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content="```\nYou are a coder.\n```"
+    )
+    result = engine._optimize_prompt(agent, trace, "r1")
+    assert result.success is True
+    assert "no change" in result.reason.lower()
+    engine._evolution_repo.add_record.assert_not_called()
+    engine._agent_library.update_prompt.assert_not_called()
+
+
+def test_optimize_prompt_change_writes_history_and_updates_agent():
+    """LLM 返回新 prompt → 写 history + 更新 Agent。"""
+    engine = _make_engine()
+    agent = Agent(name="coder", role="worker", system_prompt="old prompt", version=1)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content="```\nnew prompt with detail\n```"
+    )
+    result = engine._optimize_prompt(agent, trace, "r1")
+    assert result.success is True
+    engine._evolution_repo.add_record.assert_called_once()
+    call_kwargs = engine._evolution_repo.add_record.call_args
+    assert call_kwargs.kwargs["dimension"] == "prompt"
+    assert call_kwargs.kwargs["before_value"] == "old prompt"
+    assert call_kwargs.kwargs["after_value"] == "new prompt with detail"
+    assert call_kwargs.kwargs["success"] is True
+    engine._agent_library.update_prompt.assert_called_once_with("coder", "new prompt with detail")
+
+
+def test_optimize_prompt_llm_failure_records_error():
+    """LLM 调用失败 → 写 success=False 的 history,不更新 Agent。"""
+    engine = _make_engine()
+    agent = Agent(name="coder", role="worker", system_prompt="p", version=1)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.side_effect = RuntimeError("LLM timeout")
+    result = engine._optimize_prompt(agent, trace, "r1")
+    assert result.success is False
+    assert "error" in result.reason.lower() or result.error is not None
+    engine._evolution_repo.add_record.assert_called_once()
+    call_kwargs = engine._evolution_repo.add_record.call_args
+    assert call_kwargs.kwargs["success"] is False
+    assert call_kwargs.kwargs["error"] is not None
+    engine._agent_library.update_prompt.assert_not_called()

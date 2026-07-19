@@ -128,8 +128,51 @@ class EvolutionEngine:
             self._agent_library.update_version(agent_name, new_version)
 
     def _optimize_prompt(self, agent: Agent, trace: list, run_id: str) -> EvolutionResult:
-        """维度 1:分析 trace + LLM 重写 system_prompt。Task 6 实现。"""
-        return EvolutionResult(True, "prompt", "not implemented yet")
+        """维度 1:分析 trace + LLM 重写 system_prompt。
+
+        LLM 返回相同 prompt → 不写 history,不更新 Agent。
+        LLM 返回新 prompt → 写 history + 更新 Agent。
+        LLM 失败 → 写 success=False history,不更新 Agent。
+        """
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from agentteam.runtime.evolution_prompts import PROMPT_OPTIMIZER_INSTRUCTION
+
+        try:
+            old_prompt = agent.system_prompt
+            trace_summary = _summarize_trace(trace)
+
+            llm = self._mp.get_llm(None)
+            response = llm.invoke([
+                SystemMessage(content=PROMPT_OPTIMIZER_INSTRUCTION),
+                HumanMessage(content=(
+                    f"当前 system_prompt:\n{old_prompt}\n\n"
+                    f"本次 run trace:\n{trace_summary}\n\n"
+                    f"请基于 trace 分析 prompt 是否需要优化。"
+                    f"若需优化给出新版本,若已合理则原样返回。"
+                )),
+            ])
+            new_prompt = _parse_prompt(response.content)
+
+            if new_prompt == old_prompt:
+                return EvolutionResult(True, "prompt", "no change needed")
+
+            self._evolution_repo.add_record(
+                agent_name=agent.name, version=agent.version,
+                dimension="prompt",
+                before_value=old_prompt, after_value=new_prompt,
+                diff=_compute_diff(old_prompt, new_prompt),
+                reason=response.content, run_id=run_id, success=True,
+            )
+            self._agent_library.update_prompt(agent.name, new_prompt)
+            return EvolutionResult(True, "prompt", "prompt updated")
+        except Exception as e:
+            self._evolution_repo.add_record(
+                agent_name=agent.name, version=agent.version,
+                dimension="prompt", before_value="", after_value="",
+                diff="", reason=f"error: {e}", run_id=run_id,
+                success=False, error=str(e),
+            )
+            return EvolutionResult(False, "prompt", "error", str(e))
 
     def _tune_params(self, agent: Agent, trace: list, run_id: str) -> EvolutionResult:
         """维度 2:统计历史 + LLM 建议参数调整。Task 7 实现。"""
