@@ -20,7 +20,7 @@ from pathlib import Path
 
 from agentteam.domain.agent import Agent
 from agentteam.domain.library import AgentLibrary
-from agentteam.models.provider import ModelProvider
+from agentteam.models.provider import ModelProvider, ModelRef
 from agentteam.runtime.skills import SkillLoader
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.evolution import EvolutionRepo
@@ -48,6 +48,7 @@ class EvolutionEngine:
         evolution_repo: EvolutionRepo,
         run_repo: RunRepo,
         audit_repo: AuditRepo,
+        default_model: ModelRef,
         skill_loader: SkillLoader | None = None,
         skills_dir: Path | None = None,
     ) -> None:
@@ -56,6 +57,7 @@ class EvolutionEngine:
         self._evolution_repo = evolution_repo
         self._run_repo = run_repo
         self._audit = audit_repo
+        self._default_model = default_model
         self._skill_loader = skill_loader
         self._skills_dir = skills_dir
         self._last_trigger: dict[str, float] = {}
@@ -133,15 +135,20 @@ class EvolutionEngine:
         LLM 返回相同 prompt → 不写 history,不更新 Agent。
         LLM 返回新 prompt → 写 history + 更新 Agent。
         LLM 失败 → 写 success=False history,不更新 Agent。
+
+        LLM 选择:优先 agent.model,否则 fallback 到 engine.default_model。
         """
         from langchain_core.messages import SystemMessage, HumanMessage
         from agentteam.runtime.evolution_prompts import PROMPT_OPTIMIZER_INSTRUCTION
 
+        # old_prompt 在 try 之前赋值,确保 except 分支也能访问到上下文(I1)
+        old_prompt = agent.system_prompt
         try:
-            old_prompt = agent.system_prompt
             trace_summary = _summarize_trace(trace)
 
-            llm = self._mp.get_llm(None)
+            # C1 修复:生产 ModelProvider.get_llm(None) 会抛 AttributeError,
+            # 必须传 ModelRef。优先 agent.model,fallback 到 default_model。
+            llm = self._mp.get_llm(agent.model or self._default_model)
             response = llm.invoke([
                 SystemMessage(content=PROMPT_OPTIMIZER_INSTRUCTION),
                 HumanMessage(content=(
@@ -168,7 +175,8 @@ class EvolutionEngine:
         except Exception as e:
             self._evolution_repo.add_record(
                 agent_name=agent.name, version=agent.version,
-                dimension="prompt", before_value="", after_value="",
+                dimension="prompt",
+                before_value=old_prompt, after_value="",
                 diff="", reason=f"error: {e}", run_id=run_id,
                 success=False, error=str(e),
             )

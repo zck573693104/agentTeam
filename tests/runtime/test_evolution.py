@@ -8,7 +8,12 @@ import pytest
 
 from agentteam.domain.agent import Agent
 from agentteam.domain.library import AgentLibrary
+from agentteam.models.provider import ModelRef
 from agentteam.runtime.evolution import EvolutionEngine, EvolutionResult
+
+
+# 测试用 default_model(C1 修复后 EvolutionEngine 必须传入 ModelRef)
+_DEFAULT_MODEL = ModelRef(provider="qwen", name="qwen-max")
 
 
 def _make_engine(tmp_path=None, skill_loader=None, skills_dir=None):
@@ -19,6 +24,7 @@ def _make_engine(tmp_path=None, skill_loader=None, skills_dir=None):
         evolution_repo=MagicMock(),
         run_repo=MagicMock(),
         audit_repo=MagicMock(),
+        default_model=_DEFAULT_MODEL,
         skill_loader=skill_loader,
         skills_dir=skills_dir,
     )
@@ -435,16 +441,54 @@ def test_optimize_prompt_change_writes_history_and_updates_agent():
 
 
 def test_optimize_prompt_llm_failure_records_error():
-    """LLM 调用失败 → 写 success=False 的 history,不更新 Agent。"""
+    """LLM 调用失败 → 写 success=False 的 history(保留 old_prompt 上下文),不更新 Agent。
+
+    I3 强化:不再用 `or` tautology,改为精确断言 error / reason / before_value。
+    I1 强化:验证 except 分支的 before_value 保留 old_prompt 上下文。
+    """
     engine = _make_engine()
-    agent = Agent(name="coder", role="worker", system_prompt="p", version=1)
+    agent = Agent(name="coder", role="worker", system_prompt="original prompt", version=1)
     trace = [{"event_type": "run_end"}]
     engine._mp.get_llm.return_value.invoke.side_effect = RuntimeError("LLM timeout")
     result = engine._optimize_prompt(agent, trace, "r1")
     assert result.success is False
-    assert "error" in result.reason.lower() or result.error is not None
+    # I3: 精确断言 error 字段,不再用恒真的 or
+    assert result.error == "LLM timeout"
+    assert result.reason == "error"  # EvolutionResult.reason 是简短标签
     engine._evolution_repo.add_record.assert_called_once()
-    call_kwargs = engine._evolution_repo.add_record.call_args
-    assert call_kwargs.kwargs["success"] is False
-    assert call_kwargs.kwargs["error"] is not None
+    call_args = engine._evolution_repo.add_record.call_args.kwargs
+    assert call_args["success"] is False
+    assert call_args["error"] == "LLM timeout"
+    # add_record 的 reason 字段含完整错误信息
+    assert call_args["reason"] == "error: LLM timeout"
+    # I1: before_value 应保留 old_prompt 上下文,不再是空串
+    assert call_args["before_value"] == "original prompt"
+    assert call_args["after_value"] == ""
     engine._agent_library.update_prompt.assert_not_called()
+
+
+def test_optimize_prompt_uses_agent_model_when_present():
+    """agent.model 不为 None → get_llm 用 agent.model(C1 回归测试)。"""
+    engine = _make_engine()
+    agent_model = ModelRef(provider="openai", name="gpt-4")
+    agent = Agent(name="coder", role="worker", system_prompt="p", version=1, model=agent_model)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content="```\nnew\n```"
+    )
+    engine._optimize_prompt(agent, trace, "r1")
+    # 验证 get_llm 用的是 agent.model,而非 default_model
+    engine._mp.get_llm.assert_called_once_with(agent_model)
+
+
+def test_optimize_prompt_falls_back_to_default_model_when_agent_model_is_none():
+    """agent.model 为 None → get_llm fallback 到 default_model(C1 回归测试)。"""
+    engine = _make_engine()
+    agent = Agent(name="coder", role="worker", system_prompt="p", version=1, model=None)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content="```\nnew\n```"
+    )
+    engine._optimize_prompt(agent, trace, "r1")
+    # 验证 get_llm fallback 到 default_model
+    engine._mp.get_llm.assert_called_once_with(_DEFAULT_MODEL)
