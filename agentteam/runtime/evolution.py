@@ -356,8 +356,64 @@ class EvolutionEngine:
             return EvolutionResult(False, "skill_gen", "error", str(e))
 
     def _select_skills(self, agent: Agent, trace: list, run_id: str) -> EvolutionResult:
-        """维度 4:任务匹配 skill 软推荐。Task 9 实现。"""
-        return EvolutionResult(True, "skill_select", "not implemented yet")
+        """维度 4:任务匹配 skill 软推荐。
+
+        不直接改 Agent.skills,仅写 history 供用户 review 后手动 apply。
+        LLM 返回空推荐 → 不写 history。
+        LLM 失败 → 写 success=False history(保留 before/after 为空字符串)。
+
+        LLM 选择:优先 agent.model,否则 fallback 到 engine.default_model
+        (C1 修复:生产 ModelProvider.get_llm(None) 会抛 AttributeError)。
+        """
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from agentteam.runtime.evolution_prompts import SKILL_SELECTOR_INSTRUCTION
+        import json as _json
+
+        # old_skills 在 try 之前赋值,确保 except 分支能访问到上下文(I1)
+        old_skills = _json.dumps(agent.skills) if agent.skills else "[]"
+        try:
+            if self._skill_loader is None:
+                return EvolutionResult(True, "skill_select", "no skill_loader configured")
+
+            available = self._skill_loader.list_available()
+            candidates = [s for s in available if s not in agent.skills]
+            if not candidates:
+                return EvolutionResult(True, "skill_select", "no new skills to recommend")
+
+            task = _extract_task(trace)
+            # C1 修复:必须传 ModelRef,优先 agent.model,fallback default_model
+            llm = self._mp.get_llm(agent.model or self._default_model)
+            response = llm.invoke([
+                SystemMessage(content=SKILL_SELECTOR_INSTRUCTION),
+                HumanMessage(content=(
+                    f"Agent: {agent.name}, role={agent.role}\n"
+                    f"Task: {task}\n"
+                    f"Already equipped skills: {agent.skills}\n"
+                    f"Candidate skills: {candidates}\n\n"
+                    f"推荐本次任务应装备的 skill(可多选,空则不推荐)。"
+                )),
+            ])
+            recommended = _parse_skill_list(response.content)
+            if not recommended:
+                return EvolutionResult(True, "skill_select", "no recommendation")
+
+            self._evolution_repo.add_record(
+                agent_name=agent.name, version=agent.version,
+                dimension="skill_select",
+                before_value=old_skills,
+                after_value=_json.dumps(recommended),
+                diff="", reason=f"Recommended for tasks like: {task[:100]}",
+                run_id=run_id, success=True,
+            )
+            return EvolutionResult(True, "skill_select", f"recommended {recommended}")
+        except Exception as e:
+            self._evolution_repo.add_record(
+                agent_name=agent.name, version=agent.version,
+                dimension="skill_select", before_value=old_skills, after_value="",
+                diff="", reason=f"error: {e}", run_id=run_id,
+                success=False, error=str(e),
+            )
+            return EvolutionResult(False, "skill_select", "error", str(e))
 
 
 def _summarize_trace(trace: list) -> str:

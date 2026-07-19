@@ -856,3 +856,76 @@ def test_generate_skill_final_answer_none_does_not_crash(tmp_path):
     assert "skip" in result.reason.lower() or "no reusable" in result.reason.lower()
     # LLM 被正常调用(说明 None 防御生效)
     engine._mp.get_llm.assert_called_once()
+
+
+def test_select_skills_no_skill_loader_skips():
+    """skill_loader=None → 跳过。"""
+    engine = _make_engine(skill_loader=None)
+    agent = Agent(name="coder", role="worker", skills=[], version=1)
+    trace = [{"event_type": "run_end"}]
+    result = engine._select_skills(agent, trace, "r1")
+    assert result.success is True
+    assert "no" in result.reason.lower() or "skip" in result.reason.lower()
+
+
+def test_select_skills_no_candidates_skips():
+    """候选 skill 为空(已装备全部) → 跳过。"""
+    mock_loader = MagicMock()
+    mock_loader.list_available.return_value = ["code_review"]
+    engine = _make_engine(skill_loader=mock_loader)
+    agent = Agent(name="coder", role="worker", skills=["code_review"], version=1)
+    trace = [{"event_type": "run_end"}]
+    result = engine._select_skills(agent, trace, "r1")
+    assert result.success is True
+    assert "no new" in result.reason.lower() or "skip" in result.reason.lower()
+
+
+def test_select_skills_llm_returns_empty_no_recommendation():
+    """LLM 返回空推荐 → 不写 history。"""
+    mock_loader = MagicMock()
+    mock_loader.list_available.return_value = ["code_review", "testing"]
+    engine = _make_engine(skill_loader=mock_loader)
+    agent = Agent(name="coder", role="worker", skills=[], version=1)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(content="no recommendation")
+    result = engine._select_skills(agent, trace, "r1")
+    assert result.success is True
+    assert "no recommendation" in result.reason.lower()
+    engine._evolution_repo.add_record.assert_not_called()
+
+
+def test_select_skills_recommended_writes_history_does_not_modify_agent():
+    """LLM 推荐成功 → 写 history,但不直接改 Agent.skills(软推荐)。"""
+    mock_loader = MagicMock()
+    mock_loader.list_available.return_value = ["code_review", "testing"]
+    engine = _make_engine(skill_loader=mock_loader)
+    agent = Agent(name="coder", role="worker", skills=[], version=1)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content="推荐: code_review, testing"
+    )
+    result = engine._select_skills(agent, trace, "r1")
+    assert result.success is True
+    engine._evolution_repo.add_record.assert_called_once()
+    call_kwargs = engine._evolution_repo.add_record.call_args
+    assert call_kwargs.kwargs["dimension"] == "skill_select"
+    assert call_kwargs.kwargs["success"] is True
+    # 关键:Agent.skills 未被直接修改
+    assert agent.skills == []
+    # AgentLibrary.update_params 等修改方法未被调用
+    engine._agent_library.update_params.assert_not_called()
+
+
+def test_select_skills_llm_failure_records_error():
+    """LLM 失败 → 写 success=False history。"""
+    mock_loader = MagicMock()
+    mock_loader.list_available.return_value = ["code_review"]
+    engine = _make_engine(skill_loader=mock_loader)
+    agent = Agent(name="coder", role="worker", skills=[], version=1)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.side_effect = RuntimeError("fail")
+    result = engine._select_skills(agent, trace, "r1")
+    assert result.success is False
+    engine._evolution_repo.add_record.assert_called_once()
+    call_kwargs = engine._evolution_repo.add_record.call_args
+    assert call_kwargs.kwargs["success"] is False
