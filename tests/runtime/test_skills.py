@@ -94,3 +94,114 @@ def test_skill_loader_list_available_sorted(tmp_path):
     (tmp_path / "mid.md").write_text("m", encoding="utf-8")
     loader = SkillLoader(tmp_path)
     assert loader.list_available() == ["alpha", "mid", "zeta"]
+
+
+from agentteam.runtime.nodes import make_init_worker
+
+
+def _make_agent_with_skills(skills=None):
+    """构造测试用 worker Agent。"""
+    return Agent(
+        name="coder",
+        role="worker",
+        system_prompt="You are a coder.",
+        skills=skills or [],
+    )
+
+
+def test_make_init_worker_no_skills_unchanged_structure():
+    """无 skills 时:react_messages 结构与改造前一致(2 条)。"""
+    agent = _make_agent_with_skills(skills=[])
+    init = make_init_worker(agent)
+    state = {
+        "plan": [{"worker": "coder", "instruction": "do x"}],
+        "current_step": 0,
+        "run_id": "r1",
+        "execution_mode": "sequential",
+    }
+    result = init(state)
+    msgs = result["react_messages"]
+    # [SystemMessage(system_prompt), HumanMessage(instruction)]
+    assert len(msgs) == 2
+    assert msgs[0].content == "You are a coder."
+    assert msgs[1].content == "do x"
+
+
+def test_make_init_worker_single_skill_inserted_at_index_1():
+    """单个 skill:插入到 react_messages[1](system_prompt 之后、task 之前)。"""
+    agent = _make_agent_with_skills(skills=["code_review"])
+    skills = {"code_review": "先检查安全问题。"}
+    init = make_init_worker(agent, skills=skills)
+    state = {
+        "plan": [{"worker": "coder", "instruction": "写代码"}],
+        "current_step": 0,
+        "run_id": "r1",
+        "execution_mode": "sequential",
+    }
+    result = init(state)
+    msgs = result["react_messages"]
+    # [SystemMessage(system_prompt), SystemMessage(skill), HumanMessage(task)]
+    assert len(msgs) == 3
+    assert msgs[0].content == "You are a coder."
+    assert "code_review" in msgs[1].content
+    assert "先检查安全问题。" in msgs[1].content
+    assert msgs[1].content.startswith('<skill name="code_review">')
+    assert msgs[1].content.endswith("</skill>")
+    assert msgs[2].content == "写代码"
+
+
+def test_make_init_worker_multiple_skills_joined_in_one_system_message():
+    """多个 skill:合并为单个 SystemMessage,用 <skill> 标签包裹,顺序按 dict 顺序。"""
+    agent = _make_agent_with_skills(skills=["code_review", "testing"])
+    skills = {"code_review": "审查代码", "testing": "测试覆盖"}
+    init = make_init_worker(agent, skills=skills)
+    state = {
+        "plan": [{"worker": "coder", "instruction": "do all"}],
+        "current_step": 0,
+        "run_id": "r1",
+        "execution_mode": "sequential",
+    }
+    result = init(state)
+    msgs = result["react_messages"]
+    assert len(msgs) == 3
+    skill_msg = msgs[1].content
+    assert '<skill name="code_review">' in skill_msg
+    assert "审查代码" in skill_msg
+    assert '<skill name="testing">' in skill_msg
+    assert "测试覆盖" in skill_msg
+    # 顺序:code_review 在 testing 之前
+    assert skill_msg.index("code_review") < skill_msg.index("testing")
+
+
+def test_make_init_worker_skills_none_treated_as_empty():
+    """skills=None 等价于空:不注入。"""
+    agent = _make_agent_with_skills(skills=[])
+    init = make_init_worker(agent, skills=None)
+    state = {
+        "plan": [{"worker": "coder", "instruction": "do x"}],
+        "current_step": 0,
+        "run_id": "r1",
+        "execution_mode": "sequential",
+    }
+    result = init(state)
+    assert len(result["react_messages"]) == 2
+
+
+def test_make_init_worker_dag_mode_with_skills():
+    """dag 模式下 skills 同样注入到 react_messages[1]。"""
+    agent = _make_agent_with_skills(skills=["plan_skill"])
+    skills = {"plan_skill": "dag 模式 skill 内容"}
+    init = make_init_worker(agent, skills=skills)
+    state = {
+        "plan": [{"worker": "coder", "instruction": "do dag task", "id": "step1", "depends_on": []}],
+        "current_step": 0,
+        "run_id": "r1",
+        "execution_mode": "dag",
+        "completed_steps": set(),
+        "skipped_steps": set(),
+    }
+    result = init(state)
+    msgs = result["react_messages"]
+    assert len(msgs) == 3
+    assert msgs[1].content.startswith('<skill name="plan_skill">')
+    assert result["current_step_id"] == "step1"
