@@ -48,11 +48,12 @@ def test_get_skill_by_name_returns_content(tmp_path):
 
 
 def test_get_skill_nonexistent_returns_404(tmp_path):
-    """GET /api/skills/nonexistent 返回 404。"""
+    """GET /api/skills/nonexistent 返回 404 + detail 消息。"""
     app = _make_app(tmp_path)
     with TestClient(app) as client:
         resp = client.get("/api/skills/nonexistent")
     assert resp.status_code == 404
+    assert resp.json()["detail"] == "Skill 'nonexistent' not found"
 
 
 def test_get_skill_no_skills_dir_returns_empty(tmp_path):

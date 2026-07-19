@@ -28,11 +28,6 @@ def skills_router(skill_loader: SkillLoader) -> APIRouter:
                 status_code=404,
                 detail=f"Skill '{skill_name}' not found",
             )
-        if skill_name not in contents:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Skill '{skill_name}' not found",
-            )
         return {"name": skill_name, "content": contents[skill_name]}
 
     return router
