@@ -227,14 +227,24 @@ class RunManager:
 
         daemon thread:不阻塞 API 响应,失败不影响 run 结果。
         evolution_engine=None 时静默跳过(向后兼容)。
+
+        异常隔离:trigger 内部各维度已有 try/except,但 trigger() 顶层
+        仍可能抛异常(get_run DB 异常 / update_version / skill_loader.reload),
+        daemon thread 静默死亡会让运维无感知。用 _safe_trigger wrapper 吞掉
+        所有异常,保持与 _run_in_background 的 try/except 风格一致。
         """
         if self._evolution is None:
             return
-        threading.Thread(
-            target=self._evolution.trigger,
-            args=(run_id,),
-            daemon=True,
-        ).start()
+
+        def _safe_trigger() -> None:
+            try:
+                self._evolution.trigger(run_id)
+            except Exception:
+                # 静默吞没:daemon thread 异常不应影响 run 已标记的终态。
+                # 项目暂未引入 logging,异常信息走 Python 默认 daemon thread 死亡路径。
+                pass
+
+        threading.Thread(target=_safe_trigger, daemon=True).start()
 
     def _run_in_background(self, run_id: str, graph, config: dict, task: str) -> None:
         try:
@@ -337,6 +347,8 @@ class RunManager:
                     "payload": {"error": str(error)},
                 },
             )
-            # SP7b: failed 后异步触发进化(失败 run 也是学习素材)
-            self._trigger_evolution_async(run_id)
         self._cleanup_run(run_id)
+        # SP7b: failed 后异步触发进化(cancelled 不触发)。
+        # 触发顺序与 _handle_invoke_result 对称:cleanup 之后,确保内存态已释放。
+        if not isinstance(error, RunCancelledError):
+            self._trigger_evolution_async(run_id)
