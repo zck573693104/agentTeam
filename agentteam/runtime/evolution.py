@@ -272,12 +272,15 @@ def _parse_skill_response(response: str) -> tuple[str, str]:
 
     格式:`# Skill: <name>` 在 markdown 代码块开头或内部。
     返回 (skill_name, skill_md_content)。
+    skill_name 仅允许 ASCII 字母/数字/下划线/连字符:
+    - 避免捕获 .md 后缀(防止后续构造文件路径产生 auto_x.md.md)
+    - 避免捕获 LLM 噪声中文(如 "# Skill: 标注" 应 fallback 到 auto_unknown)
     """
     # 提取 markdown 代码块
     match = re.search(r"```(?:markdown)?\s*\n?(.*?)\n?```", response, re.DOTALL)
     content = match.group(1) if match else response
-    # 提取 skill 名
-    name_match = re.search(r"#\s*Skill:\s*(\S+)", content)
+    # 提取 skill 名(ASCII only,排除 . 与 Unicode 噪声)
+    name_match = re.search(r"#\s*Skill:\s*([A-Za-z0-9_-]+)", content)
     skill_name = name_match.group(1) if name_match else "auto_unknown"
     return skill_name, content.strip()
 
@@ -285,8 +288,15 @@ def _parse_skill_response(response: str) -> tuple[str, str]:
 def _parse_skill_list(response: str) -> list[str]:
     """从 LLM 响应提取 skill 名列表。
 
-    支持格式:逗号分隔、JSON 数组、每行一个。
+    支持格式:
+    - JSON 数组: ["code_review", "testing"]
+    - 逗号分隔(2+ 项): code_review, testing
+    - 单个 skill 名(整个 stripped 响应为一个 ASCII 标识符): code_review
+
+    无推荐(如 "no recommendation" / "无推荐")→ 返回空 list。
     """
+    if not response or not response.strip():
+        return []
     # 尝试 JSON 数组
     match = re.search(r"\[([^\]]+)\]", response)
     if match:
@@ -296,8 +306,12 @@ def _parse_skill_list(response: str) -> list[str]:
                 return [str(s).strip() for s in arr if str(s).strip()]
         except json.JSONDecodeError:
             pass
-    # 尝试逗号分隔
+    # 逗号分隔(要求 2+ 项,避免误匹配句子中的单词)
     comma_match = re.search(r"[\w_]+(?:\s*,\s*[\w_]+)+", response)
     if comma_match:
         return [s.strip() for s in comma_match.group(0).split(",") if s.strip()]
+    # 单个 skill:整个 stripped 响应必须是一个合法 ASCII 标识符(无空格、无其他文本)
+    stripped = response.strip()
+    if re.fullmatch(r"[A-Za-z_][\w-]*", stripped):
+        return [stripped]
     return []

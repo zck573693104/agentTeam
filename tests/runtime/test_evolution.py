@@ -171,6 +171,7 @@ from agentteam.runtime.evolution import (
     _summarize_trace, _is_successful_run, _extract_task,
     _extract_tool_calls, _extract_final_answer, _compute_diff,
     _compute_stats, _parse_prompt, _parse_params, _parse_skill_list,
+    _parse_skill_response,
 )
 
 
@@ -262,15 +263,30 @@ def test_compute_stats_empty_history_returns_empty_dict():
 
 
 def test_compute_stats_with_history():
-    """有历史 → 返回统计字段。"""
-    # 用 mock history 记录(字段按 EvolutionRepo schema)
+    """有历史 → 返回 record_count / success_rate / has_params_dimension 三个字段。"""
     history = [
-        {"dimension": "params", "before_value": "{}", "after_value": '{"max_iterations": 5}', "success": 1},
-        {"dimension": "params", "before_value": "{}", "after_value": '{"max_iterations": 10}', "success": 1},
+        {"dimension": "params", "success": 1},
+        {"dimension": "params", "success": 1},
+        {"dimension": "prompt", "success": 0},
     ]
     stats = _compute_stats(history)
-    # 至少包含某些统计字段(具体字段由实现决定)
-    assert isinstance(stats, dict)
+    assert stats == {
+        "record_count": 3,
+        "success_rate": 2 / 3,
+        "has_params_dimension": True,
+    }
+
+
+def test_compute_stats_no_params_dimension():
+    """history 中无 params 维度 → has_params_dimension=False。"""
+    history = [
+        {"dimension": "prompt", "success": 1},
+        {"dimension": "skill_gen", "success": 1},
+    ]
+    stats = _compute_stats(history)
+    assert stats["has_params_dimension"] is False
+    assert stats["record_count"] == 2
+    assert stats["success_rate"] == 1.0
 
 
 def test_parse_prompt_extracts_from_code_block():
@@ -307,7 +323,73 @@ def test_parse_skill_list_extracts_names():
     assert "testing" in skills
 
 
+def test_parse_skill_list_extracts_single_skill():
+    """单个 skill(整个 stripped 响应为一个 ASCII 标识符)→ 返回单元素 list。"""
+    assert _parse_skill_list("code_review") == ["code_review"]
+
+
+def test_parse_skill_list_extracts_json_array():
+    """JSON 数组格式 → 提取数组元素。"""
+    response = '推荐: ["code_review", "testing", "deploy"]'
+    skills = _parse_skill_list(response)
+    assert skills == ["code_review", "testing", "deploy"]
+
+
 def test_parse_skill_list_empty_returns_empty():
     """无推荐 → 返回空 list。"""
     response = "no recommendation"
     assert _parse_skill_list(response) == []
+
+
+def test_parse_skill_list_whitespace_returns_empty():
+    """纯空白 → 返回空 list。"""
+    assert _parse_skill_list("   ") == []
+    assert _parse_skill_list("") == []
+
+
+def test_parse_skill_response_extracts_name_and_content():
+    """_parse_skill_response 从 markdown 代码块提取 skill 名 + 内容。"""
+    response = """分析:
+```markdown
+# Skill: auto_retry_pattern
+描述:错误重试 3 次
+```
+"""
+    name, content = _parse_skill_response(response)
+    assert name == "auto_retry_pattern"
+    assert "# Skill: auto_retry_pattern" in content
+    assert "错误重试 3 次" in content
+
+
+def test_parse_skill_response_strips_md_suffix_from_name():
+    """skill 名若包含 .md 后缀应被正则排除,避免后续 auto_x.md.md 双扩展。
+
+    回归测试:Issue 5 — 旧正则 \\S+ 会捕获 "auto_pattern.md",
+    导致 SkillGenerator 构造文件路径时产生 auto_pattern.md.md。
+    """
+    response = """```markdown
+# Skill: auto_pattern.md
+内容
+```"""
+    name, _ = _parse_skill_response(response)
+    # [\w-]+ 不匹配 . , 所以 .md 后缀被排除
+    assert name == "auto_pattern"
+    assert ".md" not in name
+
+
+def test_parse_skill_response_no_code_block_returns_original():
+    """无代码块 → 内容为原文 trim,skill 名从 # Skill: 行提取。"""
+    response = "# Skill: auto_simple\n描述"
+    name, content = _parse_skill_response(response)
+    assert name == "auto_simple"
+    assert content == response.strip()
+
+
+def test_parse_skill_response_no_skill_header_returns_default_name():
+    """无 # Skill: 行 → skill_name 为 auto_unknown。"""
+    response = """```
+只有内容,没有 # Skill: 标注
+```"""
+    name, content = _parse_skill_response(response)
+    assert name == "auto_unknown"
+    assert "只有内容" in content
