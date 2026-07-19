@@ -929,3 +929,31 @@ def test_select_skills_llm_failure_records_error():
     engine._evolution_repo.add_record.assert_called_once()
     call_kwargs = engine._evolution_repo.add_record.call_args
     assert call_kwargs.kwargs["success"] is False
+
+
+def test_select_skills_task_none_does_not_crash():
+    """payload.task 显式为 None 时,_extract_task 返回 None,task[:100] 切片会抛 TypeError。
+
+    回归测试:I1 防御 — 与 _generate_skill 的 final_answer=None 防御同模式(Issue 3)。
+    修复前:None [:100] 触发 TypeError,被 except 捕获写入 success=False error history,
+    误导排障(看上去像 LLM/解析失败,实际是 trace 数据问题)。
+    修复后:task = _extract_task(trace) or "",None → "" 切片安全。
+    """
+    mock_loader = MagicMock()
+    mock_loader.list_available.return_value = ["code_review"]
+    engine = _make_engine(skill_loader=mock_loader)
+    agent = Agent(name="coder", role="worker", skills=[], version=1)
+    # payload.task 显式为 None(不是缺失,而是 null)
+    trace = [{"event_type": "run_start", "payload": {"task": None}}]
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content="推荐: code_review, testing"
+    )
+    result = engine._select_skills(agent, trace, "r1")
+    # 修复后应成功(不应被 task=None 触发的 TypeError 误导为失败)
+    assert result.success is True
+    assert "recommended" in result.reason.lower()
+    engine._evolution_repo.add_record.assert_called_once()
+    call_kwargs = engine._evolution_repo.add_record.call_args
+    assert call_kwargs.kwargs["success"] is True
+    # reason 字段不应含 "error:"
+    assert "error:" not in call_kwargs.kwargs["reason"]

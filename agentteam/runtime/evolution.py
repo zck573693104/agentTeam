@@ -360,7 +360,7 @@ class EvolutionEngine:
 
         不直接改 Agent.skills,仅写 history 供用户 review 后手动 apply。
         LLM 返回空推荐 → 不写 history。
-        LLM 失败 → 写 success=False history(保留 before/after 为空字符串)。
+        LLM 失败 → 写 success=False history(before_value=old_skills, after_value="")。
 
         LLM 选择:优先 agent.model,否则 fallback 到 engine.default_model
         (C1 修复:生产 ModelProvider.get_llm(None) 会抛 AttributeError)。
@@ -380,7 +380,10 @@ class EvolutionEngine:
             if not candidates:
                 return EvolutionResult(True, "skill_select", "no new skills to recommend")
 
-            task = _extract_task(trace)
+            # I1 防御:payload.task 显式为 None 时 _extract_task 返回 None,
+            # task[:100] 切片会抛 TypeError 被外层 except 捕获,误导排障。
+            # 与 _generate_skill 的 final_answer 防御同模式(Issue 3)。
+            task = _extract_task(trace) or ""
             # C1 修复:必须传 ModelRef,优先 agent.model,fallback default_model
             llm = self._mp.get_llm(agent.model or self._default_model)
             response = llm.invoke([
