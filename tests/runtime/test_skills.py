@@ -1,5 +1,10 @@
 """SP7a Skill 系统测试。"""
+from pathlib import Path
+
+import pytest
+
 from agentteam.domain.agent import Agent
+from agentteam.runtime.skills import SkillLoader
 
 
 def test_agent_skills_field_defaults_empty():
@@ -12,12 +17,6 @@ def test_agent_skills_field_accepts_list():
     """Agent.skills 可在构造时传入。"""
     agent = Agent(name="w1", role="worker", skills=["code_review", "testing"])
     assert agent.skills == ["code_review", "testing"]
-
-
-import pytest
-from pathlib import Path
-
-from agentteam.runtime.skills import SkillLoader
 
 
 def test_skill_loader_empty_dir_returns_empty_list(tmp_path):
