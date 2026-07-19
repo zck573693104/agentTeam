@@ -12,15 +12,20 @@ from starlette.staticfiles import StaticFiles
 from agentteam.api.events import EventBus
 from agentteam.api.routes.admin import admin_router
 from agentteam.api.routes.dashboard import dashboard_router
+from agentteam.api.routes.evolution import evolution_router
 from agentteam.api.routes.library import library_router
 from agentteam.api.routes.runs import runs_router
+from agentteam.api.routes.skills import skills_router
 from agentteam.api.routes.teams import teams_router
 from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
 from agentteam.domain.library import AgentLibrary
-from agentteam.models.provider import ModelProvider
+from agentteam.models.provider import ModelProvider, ModelRef
+from agentteam.runtime.evolution import EvolutionEngine
+from agentteam.runtime.skills import SkillLoader
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
+from agentteam.storage.evolution import EvolutionRepo
 from agentteam.storage.library import LibraryRepo
 from agentteam.storage.runs import RunRepo
 from agentteam.storage.teams import TeamRepo
@@ -38,6 +43,7 @@ def create_app(
     model_provider: ModelProvider | None = None,
     tool_registry: ToolRegistry | None = None,
     agent_library: AgentLibrary | None = None,
+    skills_dir: Path | None = None,
     web_dist: Path | None | object = _DEFAULT,
 ) -> FastAPI:
     conn = init_db(db_path)
@@ -69,21 +75,40 @@ def create_app(
     assert saver.lock is conn_lock  # 防御：若 langgraph 改名 lock 属性则静默失效
     saver.setup()
 
-    run_manager = RunManager(run_repo, audit_repo, event_bus, checkpointer=saver)
     mp = model_provider or ModelProvider()
     tr = tool_registry or ToolRegistry()
     lib = agent_library or AgentLibrary(repo=library_repo)
+    skill_loader = SkillLoader(skills_dir)
+
+    evolution_repo = EvolutionRepo(conn, lock=conn_lock)
+    evolution_engine = EvolutionEngine(
+        model_provider=mp,
+        agent_library=lib,
+        evolution_repo=evolution_repo,
+        run_repo=run_repo,
+        audit_repo=audit_repo,
+        default_model=ModelRef("qwen", "qwen-max"),
+        skill_loader=skill_loader,
+        skills_dir=skills_dir,
+    )
+
+    run_manager = RunManager(
+        run_repo, audit_repo, event_bus,
+        checkpointer=saver, evolution_engine=evolution_engine,
+    )
 
     app.include_router(teams_router(team_store))
     app.include_router(
         runs_router(
             run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,
-            checkpointer=saver, agent_library=lib,
+            checkpointer=saver, agent_library=lib, skill_loader=skill_loader,
         )
     )
     app.include_router(dashboard_router(run_repo, audit_repo))
     app.include_router(library_router(lib))
     app.include_router(admin_router(team_store, lib))
+    app.include_router(skills_router(skill_loader))
+    app.include_router(evolution_router(evolution_repo, lib))
 
     # 挂载前端静态文件(生产模式)。
     # - web_dist=_DEFAULT(默认): 使用 _DEFAULT_WEB_DIST,目录存在才挂载

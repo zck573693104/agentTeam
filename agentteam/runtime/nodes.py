@@ -128,12 +128,17 @@ def make_leader_plan_node(
 def make_init_worker(
     agent: Agent,
     trace_writer: TraceWriter | None = None,
+    skills: dict[str, str] | None = None,
 ):
     """创建 init_worker 节点：初始化 ReAct 循环的 react_messages 和计数器。
 
     dag 模式:从 plan 中找到本 worker 的 ready step(id 不在 completed/skipped,
     worker 名匹配),设置 current_step_id。
     sequential 模式:沿用 plan[current_step],current_step_id 留空。
+
+    SP7a: 若 skills 非空,把 skills 包装为 <skill> 标签的 SystemMessage,
+    插入到 react_messages[1](system_prompt 之后、task 之前),
+    让 LLM 先建立身份再接收行为指导,再处理任务。
     """
 
     def init_worker(state: TeamState) -> dict:
@@ -170,11 +175,20 @@ def make_init_worker(
         if trace_writer:
             trace_writer.emit(run_id, "worker_start", agent.name)
 
+        # 构造 react_messages:[system_prompt] + (可选 skills) + [task]
+        react_messages: list = [
+            SystemMessage(content=agent.system_prompt),
+        ]
+        if skills:
+            skill_text = "\n\n".join(
+                f'<skill name="{name}">\n{content}\n</skill>'
+                for name, content in skills.items()
+            )
+            react_messages.append(SystemMessage(content=skill_text))
+        react_messages.append(HumanMessage(content=instruction))
+
         return {
-            "react_messages": [
-                SystemMessage(content=agent.system_prompt),
-                HumanMessage(content=instruction),
-            ],
+            "react_messages": react_messages,
             "tool_calls": [],
             "iteration": 0,
             "final_answer": "",
@@ -377,11 +391,13 @@ def make_worker_subgraph(
     trace_writer: TraceWriter | None = None,
     audit_repo=None,
     run_manager=None,
+    skills: dict[str, str] | None = None,
 ):
     """编译 Worker ReAct 子图：init_worker → agent_step → tool_step → 循环 → finalize。
 
     返回 compiled subgraph，可直接作为父图的节点。
     新增 run_manager 参数:透传给 make_agent_step,使 worker 能检查取消信号。
+    新增 skills 参数(SP7a):透传给 make_init_worker,注入到 react_messages。
     """
     from langgraph.graph import END, START, StateGraph
     from agentteam.runtime.state import WorkerState
@@ -389,7 +405,7 @@ def make_worker_subgraph(
     approval_policy = agent.approval_policy
 
     sg = StateGraph(WorkerState)
-    sg.add_node("init_worker", make_init_worker(agent, trace_writer))
+    sg.add_node("init_worker", make_init_worker(agent, trace_writer, skills=skills))
     sg.add_node("agent_step", make_agent_step(agent, llm, tools, run_manager=run_manager))
     sg.add_node(
         "tool_step",
@@ -432,6 +448,7 @@ def make_worker_node(
     trace_writer: TraceWriter | None = None,
     audit_repo=None,
     run_manager=None,
+    skills: dict[str, str] | None = None,
 ):
     """返回可调用节点函数，内部使用子图。
 
@@ -443,9 +460,11 @@ def make_worker_node(
     LastValue 通道会并发写入冲突(InvalidUpdateError)。因此只回传累加器
     (有 reducer) + dag 模式 completed_steps + 审批信号,其余字段由父图自管。
     新增 run_manager 参数:透传给 make_worker_subgraph,使 worker 能检查取消信号。
+    新增 skills 参数(SP7a):透传给 make_worker_subgraph,注入到 react_messages。
     """
     subgraph = make_worker_subgraph(
-        agent, llm, tools, trace_writer, audit_repo, run_manager=run_manager
+        agent, llm, tools, trace_writer, audit_repo,
+        run_manager=run_manager, skills=skills,
     )
 
     # 共享累加器字段：子图不需要读取它们（只用 react_messages 内部通信），

@@ -158,6 +158,38 @@ def list_teams(api: str = "http://localhost:8000") -> int:
         return 1
 
 
+def list_skills(api: str = "http://localhost:8000") -> int:
+    """列出 API 上可用的 skill。"""
+    try:
+        resp = requests.get(f"{api}/api/skills/", timeout=10)
+        if resp.status_code < 400:
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
+            skills = data.get("skills", [])
+            if not skills:
+                print("(暂无 skill)")
+                return 0
+            print("可用 skill:")
+            for s in skills:
+                print(f"  - {s}")
+            return 0
+        try:
+            err = resp.json()
+            detail = err.get("detail", resp.text)
+        except ValueError:
+            detail = resp.text
+        print(f"错误: {detail}")
+        return 1
+    except requests.ConnectionError:
+        print(f"错误: 无法连接到 {api},请确认 API 服务已启动")
+        return 1
+    except Exception as e:
+        print(f"错误: {e}")
+        return 1
+
+
 def register_library(file_path: str, api: str = "http://localhost:8000") -> int:
     try:
         agents = _load_library_module(file_path)
@@ -273,6 +305,9 @@ def main(argv: list[str] | None = None) -> int:
     p_install_p.add_argument("name", help="预置团队名称")
     p_install_p.add_argument("--api", default="http://localhost:8000", help="API 地址")
 
+    p_list_s = sub.add_parser("list-skills", help="列出 API 上可用的 skill")
+    p_list_s.add_argument("--api", default="http://localhost:8000", help="API 地址")
+
     args = parser.parse_args(argv)
 
     if args.command == "register-dev-team":
@@ -289,6 +324,8 @@ def main(argv: list[str] | None = None) -> int:
         return show_preset(args.name)
     elif args.command == "install-preset":
         return install_preset(args.name, args.api)
+    elif args.command == "list-skills":
+        return list_skills(args.api)
     else:
         parser.print_help()
         return 0

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import queue as queue_mod
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -14,10 +15,12 @@ from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
 from agentteam.domain.library import AgentLibrary
 from agentteam.models.provider import ModelProvider
-from agentteam.runtime.graph import TeamCompiler
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.runs import RunRepo
 from agentteam.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from agentteam.runtime.graph import TeamCompiler
 
 
 class CreateRunRequest(BaseModel):
@@ -45,6 +48,7 @@ def _build_compiler(
     tool_registry: ToolRegistry,
     library: AgentLibrary,
     team_store: TeamStore,
+    skill_loader=None,
 ) -> TeamCompiler:
     """构造 TeamCompiler 并注册所有已知 Team(供 TeamRef 解析)。
 
@@ -52,7 +56,10 @@ def _build_compiler(
     与 create_run 中的编译逻辑保持一致,避免循环依赖
     (RunManager 不直接依赖 ModelProvider/ToolRegistry)。
     """
-    compiler = TeamCompiler(model_provider, tool_registry, library=library)
+    import agentteam.runtime.graph as _graph  # 局部导入,避免 api→runtime 顶层循环
+    compiler = _graph.TeamCompiler(
+        model_provider, tool_registry, library=library, skill_loader=skill_loader,
+    )
     for t in team_store.list_all():
         compiler.register_team(t)
     return compiler
@@ -68,6 +75,7 @@ def runs_router(
     event_bus: EventBus,
     checkpointer=None,
     agent_library: AgentLibrary | None = None,
+    skill_loader=None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/runs", tags=["runs"])
     lib = agent_library or AgentLibrary()
@@ -81,7 +89,11 @@ def runs_router(
         run_id = run_repo.create_run(team.name, req.task)
 
         trace_writer = BroadcastTraceWriter(audit_repo, event_bus)
-        compiler = TeamCompiler(model_provider, tool_registry, library=lib, run_manager=run_manager)
+        import agentteam.runtime.graph as _graph  # 局部导入,避免 api→runtime 顶层循环
+        compiler = _graph.TeamCompiler(
+            model_provider, tool_registry, library=lib,
+            run_manager=run_manager, skill_loader=skill_loader,
+        )
         # 注册所有已知 Team 到 compiler._team_registry，使 TeamRef 可解析
         for t in team_store.list_all():
             compiler.register_team(t)
@@ -268,6 +280,7 @@ def runs_router(
                     run_id, team,
                     compiler_factory=lambda: _build_compiler(
                         model_provider, tool_registry, lib, team_store,
+                        skill_loader=skill_loader,
                     ),
                     approved=req.approved, reason=req.reason,
                 )
