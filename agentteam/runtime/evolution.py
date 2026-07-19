@@ -188,19 +188,25 @@ class EvolutionEngine:
         边界保护:max_iterations 限制 [1, 20]。
         LLM 返回与当前相同 → 不写 history。
         LLM 失败 → 写 success=False history(保留 old_params 上下文)。
+        LLM 返回非数字 max_iterations → 跳过本次(no-change),不写 error history。
+
+        简化范围:Task 7 仅处理 max_iterations。approval_policy 涉及
+        frozen dataclass 类型转换,LLM 若返回该字段会被 strip(避免
+        dict 替换 dataclass 导致类型混乱),留给后续 Task 处理。
 
         LLM 选择:优先 agent.model,否则 fallback 到 engine.default_model
         (C1 修复:生产 ModelProvider.get_llm(None) 会抛 AttributeError)。
         """
         from langchain_core.messages import SystemMessage, HumanMessage
         from agentteam.runtime.evolution_prompts import PARAM_TUNER_INSTRUCTION
+        from dataclasses import asdict
         import json as _json
 
         # old_params 在 try 之前计算,确保 except 也能访问到上下文(I1)
         old_params = {
             "max_iterations": agent.max_iterations,
             "approval_policy": (
-                _json.dumps(agent.approval_policy.__dict__, default=str)
+                _json.dumps(asdict(agent.approval_policy), default=str)
                 if agent.approval_policy else None
             ),
         }
@@ -208,33 +214,39 @@ class EvolutionEngine:
             history = self._evolution_repo.list_recent_runs(agent.name, limit=5)
             stats = _compute_stats(history)
 
-            current_params = {
-                "max_iterations": agent.max_iterations,
-                "approval_policy": old_params["approval_policy"],
-            }
-
             # C1 修复:必须传 ModelRef,优先 agent.model,fallback default_model
             llm = self._mp.get_llm(agent.model or self._default_model)
             response = llm.invoke([
                 SystemMessage(content=PARAM_TUNER_INSTRUCTION),
                 HumanMessage(content=(
-                    f"当前参数: {current_params}\n"
+                    f"当前参数: {old_params}\n"
                     f"最近 {len(history)} 次统计: {stats}\n"
                     f"建议调整(只给必要改动,否则返回空 dict)。"
                 )),
             ])
             new_params = _parse_params(response.content)
 
-            # 边界保护:max_iterations 限制 [1, 20]
-            if "max_iterations" in new_params:
-                new_params["max_iterations"] = max(1, min(20, int(new_params["max_iterations"])))
+            # Issue 1 修复:Task 7 仅处理 max_iterations,strip approval_policy
+            # 避免 LLM 返回的 dict 替换 frozen dataclass 导致类型混乱
+            new_params.pop("approval_policy", None)
 
-            # 判断是否有变化(只比对实际会改动的字段)
-            has_change = False
-            if "max_iterations" in new_params and new_params["max_iterations"] != agent.max_iterations:
-                has_change = True
-            if "approval_policy" in new_params:
-                has_change = True
+            # Issue 3 修复:int 转换防御非数字输入
+            # LLM 返回 "abc" / null / true 等非数字 → 跳过(no-change),不写 error history
+            if "max_iterations" in new_params:
+                raw = new_params["max_iterations"]
+                try:
+                    new_params["max_iterations"] = max(1, min(20, int(float(raw))))
+                except (TypeError, ValueError):
+                    return EvolutionResult(
+                        True, "params",
+                        f"skip: max_iterations not numeric: {raw!r}",
+                    )
+
+            # 判断是否有变化(只比对 max_iterations)
+            has_change = (
+                "max_iterations" in new_params
+                and new_params["max_iterations"] != agent.max_iterations
+            )
 
             if not has_change:
                 return EvolutionResult(True, "params", "no change needed")

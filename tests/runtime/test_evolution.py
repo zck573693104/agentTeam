@@ -609,3 +609,81 @@ def test_tune_params_llm_failure_records_error():
     assert call_args["before_value"] != ""
     assert "5" in call_args["before_value"]
     engine._agent_library.update_params.assert_not_called()
+
+
+def test_tune_params_strips_approval_policy_to_avoid_type_confusion():
+    """Issue 1 回归测试:LLM 返回 approval_policy 字段应被 strip,避免 dict 替换 frozen dataclass。
+
+    不带 approval_policy 字段时 → 只应用 max_iterations,类型保持 ApprovalPolicy。
+    """
+    from agentteam.domain.approval import ApprovalPolicy
+    engine = _make_engine()
+    agent = Agent(
+        name="coder", role="worker",
+        max_iterations=5, approval_policy=ApprovalPolicy(level="worker"),
+        version=1,
+    )
+    trace = [{"event_type": "run_end"}]
+    engine._evolution_repo.list_recent_runs.return_value = []
+    # LLM 同时返回 max_iterations 和 approval_policy
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content='```json\n{"max_iterations": 10, "approval_policy": {"level": "tool"}}\n```'
+    )
+    result = engine._tune_params(agent, trace, "r1")
+    assert result.success is True
+    # 验证 update_params 收到的 dict 不含 approval_policy(被 strip)
+    update_args = engine._agent_library.update_params.call_args
+    assert "approval_policy" not in update_args.args[1]
+    assert update_args.args[1]["max_iterations"] == 10
+    # 验证 history 的 after_value 也不含 approval_policy
+    call_kwargs = engine._evolution_repo.add_record.call_args.kwargs
+    assert "approval_policy" not in call_kwargs["after_value"]
+
+
+def test_tune_params_non_numeric_max_iterations_skips_gracefully():
+    """Issue 3 回归测试:LLM 返回非数字 max_iterations → 跳过(no-change),不写 error history。
+
+    非数字不应走 except 分支被记录为 error(那会污染 error 统计),
+    而应走 no-change 路径(reason 含 'skip')。
+    """
+    from agentteam.domain.approval import ApprovalPolicy
+    engine = _make_engine()
+    agent = Agent(
+        name="coder", role="worker",
+        max_iterations=5, approval_policy=ApprovalPolicy(level="worker"),
+        version=1,
+    )
+    trace = [{"event_type": "run_end"}]
+    engine._evolution_repo.list_recent_runs.return_value = []
+    # LLM 返回字符串 "abc" 作为 max_iterations
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content='```json\n{"max_iterations": "abc"}\n```'
+    )
+    result = engine._tune_params(agent, trace, "r1")
+    # 走 no-change 路径,不是 error
+    assert result.success is True
+    assert "skip" in result.reason.lower()
+    # 不写 history(避免污染 error 统计)
+    engine._evolution_repo.add_record.assert_not_called()
+    engine._agent_library.update_params.assert_not_called()
+
+
+def test_tune_params_float_max_iterations_truncates_to_int():
+    """Issue 3 边界:LLM 返回 5.5 → int(float(5.5)) 截断为 5,与当前相同 → no-change。"""
+    from agentteam.domain.approval import ApprovalPolicy
+    engine = _make_engine()
+    agent = Agent(
+        name="coder", role="worker",
+        max_iterations=5, approval_policy=ApprovalPolicy(level="worker"),
+        version=1,
+    )
+    trace = [{"event_type": "run_end"}]
+    engine._evolution_repo.list_recent_runs.return_value = []
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content='```json\n{"max_iterations": 10.7}\n```'
+    )
+    result = engine._tune_params(agent, trace, "r1")
+    # 10.7 截断为 10,与当前 5 不同 → 有变化
+    assert result.success is True
+    update_args = engine._agent_library.update_params.call_args
+    assert update_args.args[1]["max_iterations"] == 10
