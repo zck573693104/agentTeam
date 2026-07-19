@@ -60,7 +60,7 @@ class EvolutionRepo:
                 """
                 SELECT * FROM evolution_history
                 WHERE agent_name = ?
-                ORDER BY id DESC
+                ORDER BY timestamp DESC, id DESC
                 LIMIT ?
                 """,
                 (agent_name, limit),
