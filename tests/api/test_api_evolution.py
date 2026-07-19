@@ -163,4 +163,10 @@ def test_create_app_includes_evolution_routes(tmp_path):
         resp = client.get("/api/agents/nonexistent/history")
         assert resp.status_code == 200
         assert resp.json() == {"history": []}
+        # versions endpoint 可访问(未知 version → 404,证明 router 已注册)
+        resp = client.get("/api/agents/nonexistent/versions/1")
+        assert resp.status_code == 404
+        # rollback endpoint 可访问(未知 agent → 404,证明 router 已注册)
+        resp = client.post("/api/agents/nonexistent/rollback?version=1")
+        assert resp.status_code == 404
 
