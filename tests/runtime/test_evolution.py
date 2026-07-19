@@ -773,3 +773,86 @@ def test_generate_skill_llm_failure_records_error():
     engine._evolution_repo.add_record.assert_called_once()
     call_kwargs = engine._evolution_repo.add_record.call_args
     assert call_kwargs.kwargs["success"] is False
+
+
+def test_generate_skill_skip_matches_case_insensitive(tmp_path):
+    """Issue 1 回归测试:SKIP 大小写不敏感。
+
+    LLM 可能返回 "Skip" / "skip" / "SKIP." 等变体,都应识别为 SKIP 信号,
+    避免把 "Skip" 当作 skill 内容写入 auto_unknown*.md 垃圾文件。
+    """
+    engine = _make_engine(skill_loader=MagicMock(), skills_dir=tmp_path)
+    agent = Agent(name="coder", role="worker", version=1)
+    trace = [{"event_type": "run_end"}]
+    # LLM 返回小写 "skip"
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(content="skip")
+    result = engine._generate_skill(agent, trace, "r1")
+    assert result.success is True
+    assert "no reusable" in result.reason.lower() or "skip" in result.reason.lower()
+    # 不应写任何文件
+    assert list(tmp_path.iterdir()) == []
+    engine._evolution_repo.add_record.assert_not_called()
+
+
+def test_generate_skill_missing_skill_header_skips(tmp_path):
+    """Issue 2 回归测试:LLM 返回非 SKIP 但无 # Skill: header → 跳过,不写垃圾文件。
+
+    _parse_skill_response fallback 到 "auto_unknown",此时不应写文件,
+    避免长期累积 auto_unknown.md / auto_unknown_v2.md / ... 垃圾。
+    """
+    engine = _make_engine(skill_loader=MagicMock(), skills_dir=tmp_path)
+    agent = Agent(name="coder", role="worker", version=1)
+    trace = [{"event_type": "run_end"}]
+    # LLM 返回代码块但无 # Skill: header
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content="```\n只是一段描述,没有 # Skill: 标注\n```"
+    )
+    result = engine._generate_skill(agent, trace, "r1")
+    assert result.success is True
+    assert "skip" in result.reason.lower()
+    # 不应写任何文件
+    assert list(tmp_path.iterdir()) == []
+    engine._evolution_repo.add_record.assert_not_called()
+
+
+def test_generate_skill_no_loader_skips_reload_but_writes_file(tmp_path):
+    """Issue 4 回归测试:skill_loader=None → 写文件但不调用 reload。
+
+    覆盖 `if self._skill_loader is not None:` 的 False 分支,
+    避免未来重构时该分支被破坏而无测试报警。
+    """
+    engine = _make_engine(skill_loader=None, skills_dir=tmp_path)
+    agent = Agent(name="coder", role="worker", version=1)
+    trace = [{"event_type": "run_end"}]
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(
+        content="```markdown\n# Skill: auto_x\ny\n```"
+    )
+    result = engine._generate_skill(agent, trace, "r1")
+    assert result.success is True
+    # 文件正常写入
+    assert (tmp_path / "auto_x.md").exists()
+    # history 正常写入
+    engine._evolution_repo.add_record.assert_called_once()
+
+
+def test_generate_skill_final_answer_none_does_not_crash(tmp_path):
+    """Issue 3 回归测试:trace 中 worker_end.payload.answer=null 不应导致 TypeError。
+
+    _extract_final_answer 返回 None 时,`final_answer[:500]` 会抛 TypeError,
+    被外层 except 捕获并记为 success=False error history,误导排障。
+    修复后应正常调用 LLM,不因 None 崩溃。
+    """
+    engine = _make_engine(skill_loader=MagicMock(), skills_dir=tmp_path)
+    agent = Agent(name="coder", role="worker", version=1)
+    # trace 中 worker_end.payload.answer = None
+    trace = [
+        {"event_type": "run_end"},
+        {"event_type": "worker_end", "payload": {"answer": None}},
+    ]
+    engine._mp.get_llm.return_value.invoke.return_value = AIMessage(content="SKIP")
+    result = engine._generate_skill(agent, trace, "r1")
+    # 应正常返回(L skipped),不是 error
+    assert result.success is True
+    assert "skip" in result.reason.lower() or "no reusable" in result.reason.lower()
+    # LLM 被正常调用(说明 None 防御生效)
+    engine._mp.get_llm.assert_called_once()

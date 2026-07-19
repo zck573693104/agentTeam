@@ -292,7 +292,8 @@ class EvolutionEngine:
 
             task = _extract_task(trace)
             tool_calls = _extract_tool_calls(trace)
-            final_answer = _extract_final_answer(trace)
+            # Issue 3 防御:final_answer 可能为 None(payload.answer=null),切片会抛 TypeError
+            final_answer = _extract_final_answer(trace) or ""
 
             # C1 修复:必须传 ModelRef,优先 agent.model,fallback default_model
             llm = self._mp.get_llm(agent.model or self._default_model)
@@ -309,10 +310,19 @@ class EvolutionEngine:
                 )),
             ])
 
-            if response.content.strip() == "SKIP":
+            # Issue 1 修复:SKIP 大小写不敏感,避免 LLM 返回 "Skip"/"skip" 触发垃圾文件
+            if response.content.strip().upper() == "SKIP":
                 return EvolutionResult(True, "skill_gen", "no reusable pattern")
 
             skill_name, skill_md = _parse_skill_response(response.content)
+
+            # Issue 2 防御:LLM 未按格式返回(无 # Skill: header)→ _parse_skill_response
+            # fallback 到 "auto_unknown"。此时不应写文件,避免长期累积 auto_unknown*.md 垃圾。
+            if skill_name == "auto_unknown":
+                return EvolutionResult(
+                    True, "skill_gen",
+                    "skip: LLM response missing '# Skill: <name>' header",
+                )
 
             # 处理重名:auto_X.md 已存在 → auto_X_v2.md
             skill_path = self._skills_dir / f"{skill_name}.md"
