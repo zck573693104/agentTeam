@@ -55,3 +55,43 @@ def test_update_version_with_repo_persists():
     assert mock_repo.upsert.called
     updated_agent = mock_repo.upsert.call_args[0][0]
     assert updated_agent.version == 3
+
+
+# ---------------------------------------------------------------------------
+# BUG-03: DB 失败时内存保持旧值(与 register/update/delete 一致)
+# ---------------------------------------------------------------------------
+
+
+def test_update_version_db_failure_keeps_old_value():
+    """DB upsert 失败时,内存 Agent.version 保持旧值(BUG-03 update_version)。"""
+    import pytest
+    from tests.domain.test_library_concurrency import _FailingUpsertRepo
+    lib = AgentLibrary(repo=_FailingUpsertRepo())
+    # 绕过失败的 repo 直接放旧值进内存
+    lib.agents["coder"] = Agent(name="coder", role="worker", version=1)
+    with pytest.raises(RuntimeError, match="DB upsert failed"):
+        lib.update_version("coder", 5)
+    # DB 失败 → 内存仍是旧值
+    assert lib.get("coder").version == 1
+
+
+def test_update_prompt_db_failure_keeps_old_value():
+    """DB upsert 失败时,内存 Agent.system_prompt 保持旧值(BUG-03 update_prompt)。"""
+    import pytest
+    from tests.domain.test_library_concurrency import _FailingUpsertRepo
+    lib = AgentLibrary(repo=_FailingUpsertRepo())
+    lib.agents["coder"] = Agent(name="coder", role="worker", system_prompt="old")
+    with pytest.raises(RuntimeError, match="DB upsert failed"):
+        lib.update_prompt("coder", "new")
+    assert lib.get("coder").system_prompt == "old"
+
+
+def test_update_params_db_failure_keeps_old_value():
+    """DB upsert 失败时,内存 Agent.max_iterations 保持旧值(BUG-03 update_params)。"""
+    import pytest
+    from tests.domain.test_library_concurrency import _FailingUpsertRepo
+    lib = AgentLibrary(repo=_FailingUpsertRepo())
+    lib.agents["coder"] = Agent(name="coder", role="worker", max_iterations=5)
+    with pytest.raises(RuntimeError, match="DB upsert failed"):
+        lib.update_params("coder", {"max_iterations": 15})
+    assert lib.get("coder").max_iterations == 5

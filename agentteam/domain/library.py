@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 from copy import deepcopy
+from dataclasses import replace
 
 from agentteam.domain.agent import Agent, TeamRef
 
@@ -111,35 +112,44 @@ class AgentLibrary:
             agent = self.agents.get(name)
             if agent is None:
                 return
-            agent.version = version
+            new_agent = replace(agent, version=version)
             if self._repo is not None:
-                self._repo.upsert(agent)
+                self._repo.upsert(new_agent)
+            self.agents[name] = new_agent
 
     def update_prompt(self, name: str, new_prompt: str) -> None:
-        """更新 Agent.system_prompt(SP7b:PromptOptimizer 调用)。"""
-        with self._lock:
-            agent = self.agents.get(name)
-            if agent is None:
-                return
-            agent.system_prompt = new_prompt
-            if self._repo is not None:
-                self._repo.upsert(agent)
+        """更新 Agent.system_prompt(SP7b:PromptOptimizer 调用)。
 
-    def update_params(self, name: str, params: dict) -> None:
-        """更新 Agent.max_iterations / approval_policy(SP7b:ParamTuner 调用)。
-
-        params 仅包含需更新的字段,其他字段保持不变。
+        DB 先、内存后(BUG-03 规约)。未知 agent 静默忽略(幂等)。
         """
         with self._lock:
             agent = self.agents.get(name)
             if agent is None:
                 return
-            if "max_iterations" in params:
-                agent.max_iterations = params["max_iterations"]
-            if "approval_policy" in params:
-                agent.approval_policy = params["approval_policy"]
+            new_agent = replace(agent, system_prompt=new_prompt)
             if self._repo is not None:
-                self._repo.upsert(agent)
+                self._repo.upsert(new_agent)
+            self.agents[name] = new_agent
+
+    def update_params(self, name: str, params: dict) -> None:
+        """更新 Agent.max_iterations / approval_policy(SP7b:ParamTuner 调用)。
+
+        params 仅包含需更新的字段,其他字段保持不变。
+        DB 先、内存后(BUG-03 规约)。未知 agent 静默忽略(幂等)。
+        """
+        with self._lock:
+            agent = self.agents.get(name)
+            if agent is None:
+                return
+            updates: dict = {}
+            if "max_iterations" in params:
+                updates["max_iterations"] = params["max_iterations"]
+            if "approval_policy" in params:
+                updates["approval_policy"] = params["approval_policy"]
+            new_agent = replace(agent, **updates)
+            if self._repo is not None:
+                self._repo.upsert(new_agent)
+            self.agents[name] = new_agent
 
     def update(self, agent: Agent) -> bool:
         """更新库中 agent(覆盖)。不存在返回 False(不创建)。同步 DB。
