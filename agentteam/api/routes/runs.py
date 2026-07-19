@@ -165,6 +165,7 @@ def runs_router(
             q = event_bus.subscribe(run_id)
             try:
                 # 2. 回放 SQLite 历史事件
+                # 用游标增量读取替代全表 list_events + Python 端去重
                 history = audit_repo.list_events(run_id)
                 last_id = 0
                 for row in history:
@@ -179,18 +180,16 @@ def runs_router(
                 # 3. 检查 run 当前状态
                 run_status = run_repo.get_run(run_id)
                 if run_status and run_status["status"] == "interrupted":
-                    # 重读历史：在初始历史读取（step 2）与状态检查之间，run 可能刚中断
-                    # 并写入了新事件（如 leader_plan、worker_start）。若不重读，客户端
-                    # 会漏掉这些事件。仅补发 id > last_id 的新事件。
-                    updated_history = audit_repo.list_events(run_id)
-                    for row in updated_history:
-                        eid = dict(row).get("id", 0)
+                    # 增量补发:仅读 id > last_id 的事件(走 idx_run_events_run_id_id 索引),
+                    # 替代原全表 list_events 重读 + Python 端过滤
+                    for row in audit_repo.list_events_after(run_id, last_id):
+                        event_data = dict(row)
+                        eid = event_data.get("id", 0)
                         if eid > last_id:
+                            last_id = eid
                             yield {
                                 "event": row["event_type"],
-                                "data": json.dumps(
-                                    dict(row), default=str, ensure_ascii=False
-                                ),
+                                "data": json.dumps(event_data, default=str, ensure_ascii=False),
                             }
                     # run 已中断。run_interrupted 是纯控制信号（只推 EventBus 不写 SQLite），
                     # 若客户端在中断后才连接，需在此补发，否则客户端不知道要弹审批框。
@@ -204,17 +203,15 @@ def runs_router(
                     }
                     return
                 if run_status and run_status["status"] in ("completed", "failed", "cancelled"):
-                    # 重读历史：在初始历史读取（step 2）与状态检查之间，run 可能刚完成并写入
-                    # run_end / run_cancelled 事件。若不重读，客户端会漏掉该事件。仅补发 id > last_id 的新事件。
-                    updated_history = audit_repo.list_events(run_id)
-                    for row in updated_history:
-                        eid = dict(row).get("id", 0)
+                    # 同样增量补发 id > last_id 的新事件
+                    for row in audit_repo.list_events_after(run_id, last_id):
+                        event_data = dict(row)
+                        eid = event_data.get("id", 0)
                         if eid > last_id:
+                            last_id = eid
                             yield {
                                 "event": row["event_type"],
-                                "data": json.dumps(
-                                    dict(row), default=str, ensure_ascii=False
-                                ),
+                                "data": json.dumps(event_data, default=str, ensure_ascii=False),
                             }
                     return
 

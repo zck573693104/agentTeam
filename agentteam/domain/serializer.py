@@ -96,6 +96,7 @@ def _agent_from_dict(d: dict) -> Agent:
         max_iterations=d.get("max_iterations", 10),
         ref=d.get("ref"),
         mcp_servers=[_mcp_server_from_dict(s) for s in d.get("mcp_servers", [])],
+        skills=d.get("skills", []),
         version=d.get("version", 1),
     )
 
@@ -123,6 +124,7 @@ def _agent_to_dict(agent: Agent) -> dict:
         "max_iterations": agent.max_iterations,
         "ref": agent.ref,
         "mcp_servers": [asdict(s) for s in agent.mcp_servers],
+        "skills": list(agent.skills),
         "version": agent.version,
     }
 

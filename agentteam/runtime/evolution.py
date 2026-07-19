@@ -20,11 +20,14 @@ from pathlib import Path
 
 from agentteam.domain.agent import Agent
 from agentteam.domain.library import AgentLibrary
+from agentteam.logging_config import get_logger
 from agentteam.models.provider import ModelProvider, ModelRef
 from agentteam.runtime.skills import SkillLoader
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.evolution import EvolutionRepo
 from agentteam.storage.runs import RunRepo
+
+logger = get_logger("runtime.evolution")
 
 
 @dataclass
@@ -82,6 +85,7 @@ class EvolutionEngine:
         try:
             raw_events = self._audit.list_events(run_id)
         except Exception:
+            logger.exception("failed to load trace for run %s", run_id)
             return []
         return [dict(ev) if not isinstance(ev, dict) else ev for ev in raw_events]
 
@@ -173,6 +177,7 @@ class EvolutionEngine:
             self._agent_library.update_prompt(agent.name, new_prompt)
             return EvolutionResult(True, "prompt", "prompt updated")
         except Exception as e:
+            logger.exception("prompt optimization failed for agent %s", agent.name)
             self._evolution_repo.add_record(
                 agent_name=agent.name, version=agent.version,
                 dimension="prompt",
@@ -261,6 +266,7 @@ class EvolutionEngine:
             self._agent_library.update_params(agent.name, new_params)
             return EvolutionResult(True, "params", "params tuned")
         except Exception as e:
+            logger.exception("param tuning failed for agent %s", agent.name)
             self._evolution_repo.add_record(
                 agent_name=agent.name, version=agent.version,
                 dimension="params",
@@ -347,6 +353,7 @@ class EvolutionEngine:
             )
             return EvolutionResult(True, "skill_gen", f"generated {skill_name}")
         except Exception as e:
+            logger.exception("skill generation failed for agent %s", agent.name)
             self._evolution_repo.add_record(
                 agent_name=agent.name, version=agent.version,
                 dimension="skill_gen", before_value="", after_value="",
@@ -410,6 +417,7 @@ class EvolutionEngine:
             )
             return EvolutionResult(True, "skill_select", f"recommended {recommended}")
         except Exception as e:
+            logger.exception("skill selection failed for agent %s", agent.name)
             self._evolution_repo.add_record(
                 agent_name=agent.name, version=agent.version,
                 dimension="skill_select", before_value=old_skills, after_value="",

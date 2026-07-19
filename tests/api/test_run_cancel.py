@@ -20,8 +20,9 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from agentteam.api.events import EventBus
 from agentteam.api.routes.runs import runs_router
 from agentteam.api.routes.teams import teams_router
-from agentteam.api.run_manager import RunCancelledError, RunManager
+from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
+from agentteam.runtime.errors import RunCancelledError
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
 from agentteam.storage.runs import RunRepo

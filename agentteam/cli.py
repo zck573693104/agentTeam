@@ -12,11 +12,15 @@ import argparse
 import importlib.util
 import sys
 from pathlib import Path
+from typing import Any
 
 import requests
 
 from examples.dev_team import DEV_TEAM
 from agentteam.presets import list_presets, get_preset, install_preset_to_api
+
+DEFAULT_API_URL = "http://localhost:8000"
+DEFAULT_HTTP_TIMEOUT = 10
 
 
 def _load_team_module(path: str) -> dict:
@@ -72,149 +76,102 @@ def _load_library_module(path: str) -> list[dict]:
     return result
 
 
-def register_dev_team(api: str = "http://localhost:8000") -> int:
+def _http_request(method: str, api: str, path: str, *, json_body=None, timeout: int = DEFAULT_HTTP_TIMEOUT) -> tuple[int, Any]:
+    """发送 HTTP 请求,返回 (status_code, parsed_json_or_none)。
+
+    失败时打印错误并返回 (0, None)。
+    """
     try:
-        resp = requests.post(f"{api}/api/teams", json=DEV_TEAM, timeout=10)
-        if resp.status_code < 400:
-            try:
-                data = resp.json()
-            except ValueError:
-                data = {}
-            print(f"已注册团队: {data.get('name', 'dev_team')}")
-            return 0
-        try:
-            err = resp.json()
-            detail = err.get("detail", resp.text)
-        except ValueError:
-            detail = resp.text
-        print(f"错误: {detail}")
-        return 1
+        if method.upper() == "GET":
+            resp = requests.get(f"{api}{path}", timeout=timeout)
+        else:
+            resp = requests.post(f"{api}{path}", json=json_body, timeout=timeout)
     except requests.ConnectionError:
         print(f"错误: 无法连接到 {api},请确认 API 服务已启动")
-        return 1
+        return (0, None)
     except Exception as e:
         print(f"错误: {e}")
-        return 1
+        return (0, None)
+    if resp.status_code < 400:
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        return (resp.status_code, data)
+    try:
+        err = resp.json()
+        detail = err.get("detail", resp.text)
+    except ValueError:
+        detail = resp.text
+    print(f"错误: {detail}")
+    return (resp.status_code, None)
 
 
-def register_team(file_path: str, api: str = "http://localhost:8000") -> int:
+def register_dev_team(api: str = DEFAULT_API_URL) -> int:
+    status, data = _http_request("POST", api, "/api/teams", json_body=DEV_TEAM)
+    if status < 400 and data is not None:
+        print(f"已注册团队: {data.get('name', 'dev_team')}")
+        return 0
+    return 1
+
+
+def register_team(file_path: str, api: str = DEFAULT_API_URL) -> int:
     try:
         team_dict = _load_team_module(file_path)
     except Exception as e:
         print(f"错误: 加载配置文件失败: {e}")
         return 1
-    try:
-        resp = requests.post(f"{api}/api/teams", json=team_dict, timeout=10)
-        if resp.status_code < 400:
-            try:
-                data = resp.json()
-            except ValueError:
-                data = {}
-            print(f"已注册团队: {data.get('name', 'unknown')}")
-            return 0
-        try:
-            err = resp.json()
-            detail = err.get("detail", resp.text)
-        except ValueError:
-            detail = resp.text
-        print(f"错误: {detail}")
-        return 1
-    except requests.ConnectionError:
-        print(f"错误: 无法连接到 {api},请确认 API 服务已启动")
-        return 1
-    except Exception as e:
-        print(f"错误: {e}")
-        return 1
+    status, data = _http_request("POST", api, "/api/teams", json_body=team_dict)
+    if status < 400 and data is not None:
+        print(f"已注册团队: {data.get('name', 'unknown')}")
+        return 0
+    return 1
 
 
-def list_teams(api: str = "http://localhost:8000") -> int:
-    try:
-        resp = requests.get(f"{api}/api/teams", timeout=10)
-        if resp.status_code < 400:
-            try:
-                teams = resp.json()
-            except ValueError:
-                teams = []
-            if not teams:
-                print("(空)")
-                return 0
-            for t in teams:
-                name = t.get("name", "?")
-                desc = t.get("description", "")
-                print(f"  {name}  {desc}")
-            return 0
-        try:
-            err = resp.json()
-            detail = err.get("detail", resp.text)
-        except ValueError:
-            detail = resp.text
-        print(f"错误: {detail}")
+def list_teams(api: str = DEFAULT_API_URL) -> int:
+    status, data = _http_request("GET", api, "/api/teams")
+    if status >= 400 or status == 0:
         return 1
-    except requests.ConnectionError:
-        print(f"错误: 无法连接到 {api},请确认 API 服务已启动")
-        return 1
-    except Exception as e:
-        print(f"错误: {e}")
-        return 1
+    if not data:
+        print("(空)")
+        return 0
+    for t in data:
+        name = t.get("name", "?")
+        desc = t.get("description", "")
+        print(f"  {name}  {desc}")
+    return 0
 
 
-def list_skills(api: str = "http://localhost:8000") -> int:
+def list_skills(api: str = DEFAULT_API_URL) -> int:
     """列出 API 上可用的 skill。"""
-    try:
-        resp = requests.get(f"{api}/api/skills/", timeout=10)
-        if resp.status_code < 400:
-            try:
-                data = resp.json()
-            except ValueError:
-                data = {}
-            skills = data.get("skills", [])
-            if not skills:
-                print("(暂无 skill)")
-                return 0
-            print("可用 skill:")
-            for s in skills:
-                print(f"  - {s}")
-            return 0
-        try:
-            err = resp.json()
-            detail = err.get("detail", resp.text)
-        except ValueError:
-            detail = resp.text
-        print(f"错误: {detail}")
+    status, data = _http_request("GET", api, "/api/skills/")
+    if status >= 400 or status == 0:
         return 1
-    except requests.ConnectionError:
-        print(f"错误: 无法连接到 {api},请确认 API 服务已启动")
-        return 1
-    except Exception as e:
-        print(f"错误: {e}")
-        return 1
+    skills = data.get("skills", []) if data else []
+    if not skills:
+        print("(暂无 skill)")
+        return 0
+    print("可用 skill:")
+    for s in skills:
+        print(f"  - {s}")
+    return 0
 
 
-def register_library(file_path: str, api: str = "http://localhost:8000") -> int:
+def register_library(file_path: str, api: str = DEFAULT_API_URL) -> int:
     try:
         agents = _load_library_module(file_path)
     except Exception as e:
         print(f"错误: 加载库文件失败: {e}")
         return 1
-    try:
-        for agent in agents:
-            resp = requests.post(f"{api}/api/library/agents", json=agent, timeout=10)
-            if resp.status_code >= 400:
-                try:
-                    err = resp.json()
-                    detail = err.get("detail", resp.text)
-                except ValueError:
-                    detail = resp.text
-                print(f"错误: 注册 {agent.get('name')} 失败: {detail}")
-                return 1
-        print(f"已注册 {len(agents)} 个专家 Agent")
-        return 0
-    except requests.ConnectionError:
-        print(f"错误: 无法连接到 {api},请确认 API 服务已启动")
-        return 1
-    except Exception as e:
-        print(f"错误: {e}")
-        return 1
+    for agent in agents:
+        status, _ = _http_request("POST", api, "/api/library/agents", json_body=agent)
+        if status == 0:
+            return 1
+        if status >= 400:
+            print(f"错误: 注册 {agent.get('name')} 失败")
+            return 1
+    print(f"已注册 {len(agents)} 个专家 Agent")
+    return 0
 
 
 def list_presets_cmd() -> int:
@@ -285,28 +242,28 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
 
     p_dev = sub.add_parser("register-dev-team", help="注册研发小队到 API")
-    p_dev.add_argument("--api", default="http://localhost:8000", help="API 地址")
+    p_dev.add_argument("--api", default=DEFAULT_API_URL, help="API 地址")
 
     p_team = sub.add_parser("register-team", help="注册任意 Team 配置文件")
     p_team.add_argument("file", help="Team 配置文件路径（.py）")
-    p_team.add_argument("--api", default="http://localhost:8000", help="API 地址")
+    p_team.add_argument("--api", default=DEFAULT_API_URL, help="API 地址")
 
     p_list = sub.add_parser("list-teams", help="列出已注册团队")
-    p_list.add_argument("--api", default="http://localhost:8000", help="API 地址")
+    p_list.add_argument("--api", default=DEFAULT_API_URL, help="API 地址")
 
     p_lib = sub.add_parser("register-library", help="注册专家库")
     p_lib.add_argument("file", help="库文件路径（.py，需定义 LIB 变量）")
-    p_lib.add_argument("--api", default="http://localhost:8000", help="API 地址")
+    p_lib.add_argument("--api", default=DEFAULT_API_URL, help="API 地址")
 
     p_list_p = sub.add_parser("list-presets", help="列出所有预置团队")
     p_show_p = sub.add_parser("show-preset", help="显示预置团队详情")
     p_show_p.add_argument("name", help="预置团队名称")
     p_install_p = sub.add_parser("install-preset", help="安装预置团队到 API")
     p_install_p.add_argument("name", help="预置团队名称")
-    p_install_p.add_argument("--api", default="http://localhost:8000", help="API 地址")
+    p_install_p.add_argument("--api", default=DEFAULT_API_URL, help="API 地址")
 
     p_list_s = sub.add_parser("list-skills", help="列出 API 上可用的 skill")
-    p_list_s.add_argument("--api", default="http://localhost:8000", help="API 地址")
+    p_list_s.add_argument("--api", default=DEFAULT_API_URL, help="API 地址")
 
     args = parser.parse_args(argv)
 

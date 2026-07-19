@@ -7,9 +7,9 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
-from agentteam.api.run_manager import RunCancelledError
 from agentteam.domain.agent import Agent
 from agentteam.domain.approval import ApprovalPolicy
+from agentteam.runtime.errors import RunCancelledError
 from agentteam.runtime.state import TeamState
 from agentteam.runtime.trace import TraceWriter
 
@@ -88,8 +88,10 @@ def make_leader_plan_node(
 
         # dag 模式:校验 step id 唯一性(避免 LLM 对同一 worker 产多步导致 id 冲突)
         if execution_mode == "dag":
-            ids = [s["id"] for s in plan]
-            duplicates = {sid for sid in ids if ids.count(sid) > 1}
+            # 用 Counter 替代 ids.count(sid) 双层循环,O(n²) → O(n)
+            from collections import Counter
+            id_counts = Counter(s["id"] for s in plan)
+            duplicates = {sid for sid, n in id_counts.items() if n > 1}
             if duplicates:
                 raise ValueError(
                     f"Plan has duplicate step ids in dag mode: {sorted(duplicates)}. "

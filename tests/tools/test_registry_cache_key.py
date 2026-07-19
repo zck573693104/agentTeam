@@ -21,9 +21,10 @@ def _make_tool(name: str) -> StructuredTool:
 
 
 def test_server_cache_key_returns_tuple():
-    """_server_cache_key 返回 (name, command, args tuple, transport, url) tuple。
+    """_server_cache_key 返回 (name, command, args tuple, transport, url, namespace) tuple。
 
     P2 核心:用配置 tuple 唯一标识 MCP server,而非 server.name。
+    P3-4: namespace 加入 key,允许同名不同 namespace 的 server 各自独立缓存。
     """
     from agentteam.tools.registry import _server_cache_key
 
@@ -42,6 +43,7 @@ def test_server_cache_key_returns_tuple():
         ("-y", "@modelcontextprotocol/server-git", "--repository", "."),
         "stdio",
         None,
+        None,  # namespace 默认 None
     )
 
 
@@ -57,7 +59,7 @@ def test_server_cache_key_http_server_with_url():
         url="http://localhost:8080/mcp",
     )
     key = _server_cache_key(server)
-    assert key == ("remote", "", (), "http", "http://localhost:8080/mcp")
+    assert key == ("remote", "", (), "http", "http://localhost:8080/mcp", None)
 
 
 def test_server_cache_key_default_args_empty_tuple():
@@ -67,7 +69,28 @@ def test_server_cache_key_default_args_empty_tuple():
     server = MCPServer(name="srv", command="python")
     key = _server_cache_key(server)
     # 默认 args=[],转 tuple 后是 ()
-    assert key == ("srv", "python", (), "stdio", None)
+    assert key == ("srv", "python", (), "stdio", None, None)
+
+
+def test_server_cache_key_includes_namespace():
+    """P3-4: namespace 进入 cache key,允许同名不同 namespace 独立缓存。"""
+    from agentteam.tools.registry import _server_cache_key
+
+    server_no_ns = MCPServer(name="fs", command="npx", args=["fs-server"])
+    server_ns_a = MCPServer(name="fs", command="npx", args=["fs-server"], namespace="fs_a")
+    server_ns_b = MCPServer(name="fs", command="npx", args=["fs-server"], namespace="fs_b")
+    # 三者配置 tuple 各异(namespace 字段不同)
+    assert _server_cache_key(server_no_ns) != _server_cache_key(server_ns_a)
+    assert _server_cache_key(server_ns_a) != _server_cache_key(server_ns_b)
+
+
+def test_mcp_server_tool_prefix_uses_namespace_or_name():
+    """P3-4: MCPServer.tool_prefix 优先用 namespace,无则回退 name。"""
+    server_no_ns = MCPServer(name="fs", command="npx")
+    assert server_no_ns.tool_prefix == "mcp:fs:"
+
+    server_with_ns = MCPServer(name="fs", command="npx", namespace="fs_project_a")
+    assert server_with_ns.tool_prefix == "mcp:fs_project_a:"
 
 
 def test_server_cache_key_same_config_returns_equal_tuple():
@@ -129,10 +152,11 @@ def test_same_name_different_command_both_loaded():
 
 
 def test_same_name_different_command_same_tool_name_second_skipped():
-    """同名不同配置的 server 注册同名工具时,第二个工具被跳过(已知限制)。
+    """同名不同配置的 server 注册同名工具时,第二个工具被跳过(已有限制)。
 
-    工具名前缀仍是 mcp:{server.name}:,因此同名不同配置的 server 注册
-    的同名工具会冲突。这是预期行为 — 用户若需多实例应改 server.name。
+    工具名前缀仍是 mcp:{server.name}:(namespace=None 时回退 name),
+    因此同名不同配置的 server 注册的同名工具会冲突。这是预期行为 —
+    用户若需多实例应设 MCPServer.namespace(P3-4)或改 server.name。
     本测试显式记录此契约,避免后续修改时意外破坏。
     """
     from agentteam.tools.registry import ToolRegistry
@@ -164,6 +188,38 @@ def test_same_name_different_command_same_tool_name_second_skipped():
     assert registered_b == ["mcp:git:git_status"]  # 命中已注册,跳过覆盖
     # registry 中只有 1 个 tool(同名冲突)
     assert reg.list_names() == ["mcp:git:git_status"]
+
+
+def test_namespace_disambiguates_same_name_servers():
+    """P3-4: 同名 server 设置不同 namespace 后,工具名各自独立无冲突。
+
+    场景:两个 filesystem MCP server,挂载不同目录,工具集相同(read_file/
+    write_file/...)。无 namespace 时第二个被静默跳过;设 namespace 后
+    两个 server 的同名工具各自独立注册,可被 agent.tools 同时引用。
+    """
+    from agentteam.tools.registry import ToolRegistry
+
+    def fake_loader(server):
+        # 两个 server 都暴露同名工具 read_file
+        return [_make_tool("read_file")]
+
+    reg = ToolRegistry(mcp_loader=fake_loader)
+    server_a = MCPServer(
+        name="fs", command="npx", args=["fs-server", "/project_a"],
+        namespace="fs_a",
+    )
+    server_b = MCPServer(
+        name="fs", command="npx", args=["fs-server", "/project_b"],
+        namespace="fs_b",
+    )
+
+    reg.register_mcp_tools(server_a)
+    reg.register_mcp_tools(server_b)
+
+    # 两个 namespace 各自的工具名都注册了,无冲突
+    assert "mcp:fs_a:read_file" in reg.list_names()
+    assert "mcp:fs_b:read_file" in reg.list_names()
+    assert len(reg.list_names()) == 2
 
 
 def test_same_config_second_call_uses_cache():

@@ -4,12 +4,9 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
 from typing import Any
 
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from agentteam.storage.utils import utcnow_iso as _now
 
 
 class AuditRepo:
@@ -56,6 +53,31 @@ class AuditRepo:
                 "SELECT * FROM run_events WHERE run_id = ? ORDER BY id ASC", (run_id,)
             )
             return cur.fetchall()
+
+    def list_events_after(self, run_id: str, after_id: int) -> list[sqlite3.Row]:
+        """游标增量读取:返回 id > after_id 的事件,按 id ASC 排序。
+
+        用于 SSE 重连只补发新增事件,避免每次重连全表扫描。
+        走 (run_id, id) 联合索引 idx_run_events_run_id_id。
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM run_events WHERE run_id = ? AND id > ? ORDER BY id ASC",
+                (run_id, after_id),
+            )
+            return cur.fetchall()
+
+    def latest_event_id(self, run_id: str) -> int:
+        """返回 run 当前最大 event id(无事件返回 0)。
+
+        用于 SSE 初始订阅时获取 last_id 游标,跳过历史已发事件。
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT MAX(id) AS m FROM run_events WHERE run_id = ?", (run_id,)
+            )
+            row = cur.fetchone()
+            return (row["m"] if row and row["m"] is not None else 0)
 
     def add_approval(self, run_id: str) -> str:
         approval_id = uuid.uuid4().hex
