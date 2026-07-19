@@ -26,6 +26,9 @@ class AgentDict(BaseModel):
     children: list[dict] = []
     ref: str | None = None
     mcp_servers: list[dict] = []
+    # SP7:skills + version 字段
+    skills: list[str] = []
+    version: int = 1
 
 
 def _build_agent_from_dict(agent: AgentDict) -> Agent:

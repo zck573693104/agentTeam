@@ -81,6 +81,8 @@ export interface AgentNode {
   tools?: string[];
   max_iterations?: number;
   ref?: string | null;
+  skills?: string[];
+  version?: number;
 }
 
 export interface TeamRefNode {
