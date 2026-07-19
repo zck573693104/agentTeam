@@ -10,6 +10,9 @@
 """
 from __future__ import annotations
 
+import difflib
+import json
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -139,3 +142,162 @@ class EvolutionEngine:
     def _select_skills(self, agent: Agent, trace: list, run_id: str) -> EvolutionResult:
         """维度 4:任务匹配 skill 软推荐。Task 9 实现。"""
         return EvolutionResult(True, "skill_select", "not implemented yet")
+
+
+def _summarize_trace(trace: list) -> str:
+    """把 trace 压缩为 LLM 可读的文本摘要(关键事件 + actor + payload 摘要)。"""
+    if not trace:
+        return "(empty trace)"
+    lines = []
+    for ev in trace:
+        if not isinstance(ev, dict):
+            continue
+        ev_type = ev.get("event_type", "unknown")
+        actor = ev.get("actor", "")
+        payload = ev.get("payload", {})
+        # payload 摘要:取前 100 字符
+        payload_str = json.dumps(payload, ensure_ascii=False)[:100] if payload else ""
+        lines.append(f"[{ev_type}] {actor}: {payload_str}")
+    return "\n".join(lines)
+
+
+def _is_successful_run(trace: list) -> bool:
+    """run 成功 = 有 run_end 事件且无 error 事件。"""
+    has_run_end = any(
+        isinstance(ev, dict) and ev.get("event_type") == "run_end"
+        for ev in trace
+    )
+    has_error = any(
+        isinstance(ev, dict) and ev.get("event_type") == "error"
+        for ev in trace
+    )
+    return has_run_end and not has_error
+
+
+def _extract_task(trace: list) -> str:
+    """从 run_start 事件的 payload.task 提取任务描述。"""
+    for ev in trace:
+        if isinstance(ev, dict) and ev.get("event_type") == "run_start":
+            payload = ev.get("payload", {})
+            return payload.get("task", "") if isinstance(payload, dict) else ""
+    return ""
+
+
+def _extract_tool_calls(trace: list) -> list[str]:
+    """从所有 tool_call 事件提取 tool 名列表(按出现顺序)。"""
+    tools = []
+    for ev in trace:
+        if isinstance(ev, dict) and ev.get("event_type") == "tool_call":
+            payload = ev.get("payload", {})
+            if isinstance(payload, dict):
+                tool = payload.get("tool", "")
+                if tool:
+                    tools.append(tool)
+    return tools
+
+
+def _extract_final_answer(trace: list) -> str:
+    """从 worker_end 事件的 payload.answer 提取最终答案。"""
+    for ev in reversed(trace):
+        if isinstance(ev, dict) and ev.get("event_type") == "worker_end":
+            payload = ev.get("payload", {})
+            return payload.get("answer", "") if isinstance(payload, dict) else ""
+    return ""
+
+
+def _compute_diff(old: str, new: str) -> str:
+    """计算两段文本的 unified diff。"""
+    diff = difflib.unified_diff(
+        old.splitlines(keepends=True),
+        new.splitlines(keepends=True),
+        fromfile="before",
+        tofile="after",
+        n=3,
+    )
+    return "".join(diff)
+
+
+def _compute_stats(history: list) -> dict:
+    """从历史 evolution 记录计算统计指标(ParamTuner 用)。
+
+    history 元素为 EvolutionRepo 返回的 dict。
+    返回字段:
+    - record_count: 记录数
+    - success_rate: 成功率
+    - has_params_dimension: 是否有 params 维度的记录
+    """
+    if not history:
+        return {}
+    total = len(history)
+    success_count = sum(1 for h in history if h.get("success"))
+    has_params = any(h.get("dimension") == "params" for h in history)
+    return {
+        "record_count": total,
+        "success_rate": success_count / total if total > 0 else 0,
+        "has_params_dimension": has_params,
+    }
+
+
+def _parse_prompt(response: str) -> str:
+    """从 LLM 响应提取 prompt 文本。
+
+    优先从 ``` 代码块提取;无代码块则返回 trim 后的原文。
+    """
+    match = re.search(r"```\s*\n?(.*?)\n?```", response, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return response.strip()
+
+
+def _parse_params(response: str) -> dict:
+    """从 LLM 响应提取参数 dict。
+
+    优先从 ```json 代码块提取;失败返回空 dict。
+    """
+    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", response, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return {}
+    # 尝试直接 parse 整个响应
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _parse_skill_response(response: str) -> tuple[str, str]:
+    """从 LLM 响应提取 skill 名 + 内容。
+
+    格式:`# Skill: <name>` 在 markdown 代码块开头或内部。
+    返回 (skill_name, skill_md_content)。
+    """
+    # 提取 markdown 代码块
+    match = re.search(r"```(?:markdown)?\s*\n?(.*?)\n?```", response, re.DOTALL)
+    content = match.group(1) if match else response
+    # 提取 skill 名
+    name_match = re.search(r"#\s*Skill:\s*(\S+)", content)
+    skill_name = name_match.group(1) if name_match else "auto_unknown"
+    return skill_name, content.strip()
+
+
+def _parse_skill_list(response: str) -> list[str]:
+    """从 LLM 响应提取 skill 名列表。
+
+    支持格式:逗号分隔、JSON 数组、每行一个。
+    """
+    # 尝试 JSON 数组
+    match = re.search(r"\[([^\]]+)\]", response)
+    if match:
+        try:
+            arr = json.loads(f"[{match.group(1)}]")
+            if isinstance(arr, list):
+                return [str(s).strip() for s in arr if str(s).strip()]
+        except json.JSONDecodeError:
+            pass
+    # 尝试逗号分隔
+    comma_match = re.search(r"[\w_]+(?:\s*,\s*[\w_]+)+", response)
+    if comma_match:
+        return [s.strip() for s in comma_match.group(0).split(",") if s.strip()]
+    return []

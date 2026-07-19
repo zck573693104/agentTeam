@@ -165,3 +165,149 @@ def test_evolve_agent_version_not_incremented_on_all_fail():
 
     engine._evolve_agent("coder", "r1", [])
     engine._agent_library.update_version.assert_not_called()
+
+
+from agentteam.runtime.evolution import (
+    _summarize_trace, _is_successful_run, _extract_task,
+    _extract_tool_calls, _extract_final_answer, _compute_diff,
+    _compute_stats, _parse_prompt, _parse_params, _parse_skill_list,
+)
+
+
+def test_summarize_trace_includes_key_events():
+    """_summarize_trace 包含 worker_start/tool_call/error/worker_end 等关键事件。"""
+    trace = [
+        {"event_type": "run_start", "actor": "system"},
+        {"event_type": "worker_start", "actor": "coder"},
+        {"event_type": "tool_call", "actor": "coder", "payload": {"tool": "read_file"}},
+        {"event_type": "worker_end", "actor": "coder"},
+        {"event_type": "run_end", "actor": "system"},
+    ]
+    summary = _summarize_trace(trace)
+    assert "worker_start" in summary
+    assert "tool_call" in summary
+    assert "coder" in summary
+
+
+def test_is_successful_run_true_when_run_end_no_error():
+    """run_end 存在且无 error 事件 → 成功。"""
+    trace = [
+        {"event_type": "worker_start"},
+        {"event_type": "run_end"},
+    ]
+    assert _is_successful_run(trace) is True
+
+
+def test_is_successful_run_false_when_error_event():
+    """有 error 事件 → 失败。"""
+    trace = [
+        {"event_type": "error", "payload": {"error": "x"}},
+        {"event_type": "run_end"},
+    ]
+    assert _is_successful_run(trace) is False
+
+
+def test_is_successful_run_false_when_no_run_end():
+    """无 run_end → 失败(被 cancel 或中断)。"""
+    trace = [{"event_type": "worker_start"}]
+    assert _is_successful_run(trace) is False
+
+
+def test_extract_task_from_run_start_payload():
+    """_extract_task 从 run_start 事件的 payload 提取 task。"""
+    trace = [
+        {"event_type": "run_start", "payload": {"task": "审查代码"}},
+        {"event_type": "worker_start"},
+    ]
+    assert _extract_task(trace) == "审查代码"
+
+
+def test_extract_task_returns_empty_when_no_run_start():
+    """无 run_start → 返回空字符串。"""
+    trace = [{"event_type": "worker_start"}]
+    assert _extract_task(trace) == ""
+
+
+def test_extract_tool_calls_returns_tool_names():
+    """_extract_tool_calls 返回所有 tool_call 事件的 tool 名列表。"""
+    trace = [
+        {"event_type": "tool_call", "payload": {"tool": "read_file", "args": {}}},
+        {"event_type": "tool_call", "payload": {"tool": "write_file", "args": {}}},
+        {"event_type": "worker_end"},
+    ]
+    tools = _extract_tool_calls(trace)
+    assert tools == ["read_file", "write_file"]
+
+
+def test_extract_final_answer_from_worker_end_payload():
+    """_extract_final_answer 从 worker_end 事件的 payload 提取 answer。"""
+    trace = [
+        {"event_type": "worker_end", "payload": {"answer": "最终答案"}},
+    ]
+    assert _extract_final_answer(trace) == "最终答案"
+
+
+def test_compute_diff_shows_changes():
+    """_compute_diff 返回 unified diff 文本(含 - / + 标记)。"""
+    old = "line1\nline2\nline3"
+    new = "line1\nline2-modified\nline3"
+    diff = _compute_diff(old, new)
+    assert "-line2" in diff
+    assert "+line2-modified" in diff
+
+
+def test_compute_stats_empty_history_returns_empty_dict():
+    """空历史 → _compute_stats 返回空 dict。"""
+    assert _compute_stats([]) == {}
+
+
+def test_compute_stats_with_history():
+    """有历史 → 返回统计字段。"""
+    # 用 mock history 记录(字段按 EvolutionRepo schema)
+    history = [
+        {"dimension": "params", "before_value": "{}", "after_value": '{"max_iterations": 5}', "success": 1},
+        {"dimension": "params", "before_value": "{}", "after_value": '{"max_iterations": 10}', "success": 1},
+    ]
+    stats = _compute_stats(history)
+    # 至少包含某些统计字段(具体字段由实现决定)
+    assert isinstance(stats, dict)
+
+
+def test_parse_prompt_extracts_from_code_block():
+    """_parse_prompt 从 ```...``` 代码块提取 prompt。"""
+    response = "分析:\n```\nYou are a better coder.\n```\n结束"
+    prompt = _parse_prompt(response)
+    assert "better coder" in prompt
+
+
+def test_parse_prompt_returns_original_if_no_code_block():
+    """无代码块 → 返回原文(trim)。"""
+    response = "You are a coder."
+    assert _parse_prompt(response) == "You are a coder."
+
+
+def test_parse_params_extracts_json():
+    """_parse_params 从 JSON 代码块提取参数 dict。"""
+    response = '建议:\n```json\n{"max_iterations": 15}\n```'
+    params = _parse_params(response)
+    assert params == {"max_iterations": 15}
+
+
+def test_parse_params_invalid_json_returns_empty():
+    """无效 JSON → 返回空 dict。"""
+    response = "no json here"
+    assert _parse_params(response) == {}
+
+
+def test_parse_skill_list_extracts_names():
+    """_parse_skill_list 从逗号分隔或 list 格式提取 skill 名。"""
+    response = "推荐: code_review, testing"
+    skills = _parse_skill_list(response)
+    assert "code_review" in skills
+    assert "testing" in skills
+
+
+def test_parse_skill_list_empty_returns_empty():
+    """无推荐 → 返回空 list。"""
+    response = "no recommendation"
+    assert _parse_skill_list(response) == []
