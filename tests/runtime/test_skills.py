@@ -310,3 +310,21 @@ def test_team_compiler_compile_worker_missing_skill_raises_keyerror(tmp_path):
                   skills=["nonexistent_skill"])
     with pytest.raises(KeyError):
         compiler._compile_worker(agent, default_model=None, trace_writer=None, audit_repo=None)
+
+
+def test_preset_skills_loadable_from_project_root():
+    """预置 skill 文件存在于项目根 skills/ 目录,可被 SkillLoader 加载。"""
+    project_root = Path(__file__).resolve().parent.parent.parent
+    skills_dir = project_root / "skills"
+    if not skills_dir.is_dir():
+        pytest.skip("skills/ 目录尚未创建(本测试应在 Task 7 后运行)")
+    loader = SkillLoader(skills_dir)
+    available = loader.list_available()
+    # 3 个预置 skill 必须存在
+    assert "code_review" in available
+    assert "error_handling" in available
+    assert "testing_strategy" in available
+    # 内容非空
+    contents = loader.load(["code_review", "error_handling", "testing_strategy"])
+    for name, content in contents.items():
+        assert len(content) > 100, f"skill {name} 内容过短(可能为占位)"
