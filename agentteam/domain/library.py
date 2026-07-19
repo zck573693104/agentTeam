@@ -101,6 +101,46 @@ class AgentLibrary:
             del self.agents[name]
             return True
 
+    def update_version(self, name: str, version: int) -> None:
+        """更新 Agent.version(SP7b:EvolutionEngine 触发后递增)。
+
+        持锁保证并发安全;DB 先、内存后(BUG-03 规约)。
+        未知 agent 静默忽略(幂等)。
+        """
+        with self._lock:
+            agent = self.agents.get(name)
+            if agent is None:
+                return
+            agent.version = version
+            if self._repo is not None:
+                self._repo.upsert(agent)
+
+    def update_prompt(self, name: str, new_prompt: str) -> None:
+        """更新 Agent.system_prompt(SP7b:PromptOptimizer 调用)。"""
+        with self._lock:
+            agent = self.agents.get(name)
+            if agent is None:
+                return
+            agent.system_prompt = new_prompt
+            if self._repo is not None:
+                self._repo.upsert(agent)
+
+    def update_params(self, name: str, params: dict) -> None:
+        """更新 Agent.max_iterations / approval_policy(SP7b:ParamTuner 调用)。
+
+        params 仅包含需更新的字段,其他字段保持不变。
+        """
+        with self._lock:
+            agent = self.agents.get(name)
+            if agent is None:
+                return
+            if "max_iterations" in params:
+                agent.max_iterations = params["max_iterations"]
+            if "approval_policy" in params:
+                agent.approval_policy = params["approval_policy"]
+            if self._repo is not None:
+                self._repo.upsert(agent)
+
     def update(self, agent: Agent) -> bool:
         """更新库中 agent(覆盖)。不存在返回 False(不创建)。同步 DB。
 
