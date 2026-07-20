@@ -470,8 +470,86 @@ RoleRegistry.register("supervisor", RoleSpec(
 ))
 
 
+class TeamRegistry:
+    """Team 注册表(P1-3 拆分:从 TeamCompiler 抽出)。
+
+    维护 name → Team 映射,支持 register/get/list/remove。
+    独立成类便于:
+    - 单独测试注册逻辑(无需 mock ModelProvider/ToolRegistry)
+    - 未来支持持久化或分布式注册(如 etcd-backed)而不影响编译器
+    - 注册逻辑变化(如校验/版本管理)时只改这一个类
+    """
+
+    def __init__(self) -> None:
+        self._teams: dict[str, Team] = {}
+
+    def register(self, team: Team) -> None:
+        """注册/覆盖同名 team。"""
+        self._teams[team.name] = team
+
+    def get(self, name: str) -> Team | None:
+        return self._teams.get(name)
+
+    def list_names(self) -> list[str]:
+        return list(self._teams.keys())
+
+    def remove(self, name: str) -> bool:
+        return self._teams.pop(name, None) is not None
+
+    def clear(self) -> None:
+        self._teams.clear()
+
+
+class CompileCache:
+    """编译图缓存(P1-3 拆分:从 TeamCompiler 抽出)。
+
+    缓存 key = (team_name, version_signature, checkpointer_id)。
+    相同 key 的 compile 返回同一编译图,避免每次 create_run 重编译。
+
+    缓存失效策略:
+    - invalidate(team_name):该 team 的所有版本缓存失效(register_team 重注册时调用)
+    - clear():清空全部(register_library 注入新库时调用,因 library.resolve 影响树解析)
+    - get/put:线程安全(_lock 保护 dict 读写)
+
+    独立成类便于:
+    - 单独测试缓存命中/失效逻辑
+    - 未来换 LRU/TTL 策略(当前无界增长,P2-5 风险)只改这一个类
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[tuple, Any] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: tuple) -> Any | None:
+        with self._lock:
+            return self._cache.get(key)
+
+    def put(self, key: tuple, value: Any) -> None:
+        with self._lock:
+            self._cache[key] = value
+
+    def invalidate(self, team_name: str) -> None:
+        """失效指定 team 的所有缓存条目(按 key[0] == team_name 匹配)。"""
+        with self._lock:
+            keys_to_remove = [k for k in self._cache if k[0] == team_name]
+            for k in keys_to_remove:
+                self._cache.pop(k, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+
+
 class TeamCompiler:
     """把 Team 配置（Agent 树）递归编译成可执行的 LangGraph StateGraph。
+
+    职责拆分(P1-3:从上帝对象拆出 TeamRegistry + CompileCache):
+    - TeamRegistry:管理 team 注册表(name → Team 映射)
+    - CompileCache:管理编译图缓存(key → compiled graph)
+    - TeamCompiler:只负责递归编译逻辑(_compile_agent/_compile_supervisor/_compile_worker)
+
+    外部 API 保持不变(register_team/invalidate/clear_cache 等仍由 TeamCompiler
+    暴露,内部委托给对应组件),保证向后兼容。
 
     编译缓存:相同 (team identity, team version, checkpointer id) 的 compile
     调用返回同一编译图实例,避免每次 create_run 都重新走完整 Agent 树。
@@ -498,21 +576,18 @@ class TeamCompiler:
         self._mp = model_provider
         self._tr = tool_registry
         self._lib = library or AgentLibrary()
-        self._team_registry: dict[str, Team] = {}
         self._run_manager = run_manager
         self._skill_loader = skill_loader or SkillLoader()
-        # 编译缓存:key = (team_name, root_version_signature, checkpointer_id)
-        # root_version_signature 用 root agent 的 version + 递归 children 的 (name, version) 串,
-        # 兼顾深度变化与版本演进。同一 team 不同版本(进化后)强制重编译。
-        self._compile_cache: dict[tuple, Any] = {}
-        self._cache_lock = threading.Lock()
+        # P1-3 拆分:Team 注册表与编译缓存独立成类
+        self._team_registry = TeamRegistry()
+        self._compile_cache = CompileCache()
 
     def register_team(self, team: Team) -> None:
         """注册可被 TeamRef 引用的 Team。
 
         重名注册自动失效该 team 的缓存条目(配置已变,旧编译图无效)。
         """
-        self._team_registry[team.name] = team
+        self._team_registry.register(team)
         self.invalidate(team.name)
 
     def register_library(self, library: AgentLibrary) -> None:
@@ -522,15 +597,11 @@ class TeamCompiler:
 
     def invalidate(self, team_name: str) -> None:
         """失效指定 team 的缓存条目。"""
-        with self._cache_lock:
-            keys_to_remove = [k for k in self._compile_cache if k[0] == team_name]
-            for k in keys_to_remove:
-                self._compile_cache.pop(k, None)
+        self._compile_cache.invalidate(team_name)
 
     def clear_cache(self) -> None:
         """清空所有编译缓存。"""
-        with self._cache_lock:
-            self._compile_cache.clear()
+        self._compile_cache.clear()
 
     @staticmethod
     def _version_signature(agent) -> tuple:
@@ -559,8 +630,7 @@ class TeamCompiler:
         checkpointer_id = id(checkpointer) if checkpointer is not None else None
         sig = self._version_signature(team.root)
         cache_key = (team.name, sig, checkpointer_id)
-        with self._cache_lock:
-            cached = self._compile_cache.get(cache_key)
+        cached = self._compile_cache.get(cache_key)
         if cached is not None:
             return cached
 
@@ -579,8 +649,7 @@ class TeamCompiler:
             depth=0, path=f"team:{team.name}",
             visited_team_names={team.name},
         )
-        with self._cache_lock:
-            self._compile_cache[cache_key] = compiled
+        self._compile_cache.put(cache_key, compiled)
         return compiled
 
     def _compile_agent(
