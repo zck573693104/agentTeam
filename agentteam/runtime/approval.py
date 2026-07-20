@@ -25,6 +25,8 @@ def _make_approval_gate(
     policy: ApprovalPolicy | None,
     trace_writer: TraceWriter | None = None,
     audit_repo=None,
+    team_name: str | None = None,
+    webhook_url: str | None = None,
 ):
     """审批门节点的共享工厂。
 
@@ -34,6 +36,7 @@ def _make_approval_gate(
     gate_type: "step" 或 "worker"，用于 interrupt payload、trace 事件与返回值。
     target_field: interrupt payload 与 trace 事件中的目标字段名（"step"/"worker"）。
     resolve_target: 从 state 中解析目标值；返回 None 表示 no-op（不进入 interrupt）。
+    team_name/webhook_url: P-A5 审批 webhook 通知用,在 interrupt() 前 fire。
     """
     gate_label = gate_type.capitalize()
 
@@ -46,13 +49,22 @@ def _make_approval_gate(
             return {}
 
         run_id = state.get("run_id", "")
+        message = f"{gate_label} {target_value} 需要审批"
+
+        # P-A5 审批 webhook 通知(interrupt 前 fire,IM 端可立即看到审批请求):
+        # 失败不阻塞主流程(webhook 内部用 daemon 线程 + try/except 兜底)。
+        if webhook_url:
+            from agentteam.api.webhook import fire_approval_webhook
+            fire_approval_webhook(
+                webhook_url, run_id, team_name or "", gate_type, target_value, message,
+            )
 
         # interrupt() 在首次执行时暂停图；resume 时返回决策值
         decision = interrupt(
             {
                 "gate": gate_type,
                 target_field: target_value,
-                "message": f"{gate_label} {target_value} 需要审批",
+                "message": message,
             }
         )
 
@@ -91,6 +103,8 @@ def make_step_gate(
     policy: ApprovalPolicy | None,
     trace_writer: TraceWriter | None = None,
     audit_repo=None,
+    team_name: str | None = None,
+    webhook_url: str | None = None,
 ):
     """创建 step 级审批门。
 
@@ -111,6 +125,8 @@ def make_step_gate(
         policy=policy,
         trace_writer=trace_writer,
         audit_repo=audit_repo,
+        team_name=team_name,
+        webhook_url=webhook_url,
     )
 
 
@@ -119,6 +135,8 @@ def make_worker_gate(
     policy: ApprovalPolicy | None,
     trace_writer: TraceWriter | None = None,
     audit_repo=None,
+    team_name: str | None = None,
+    webhook_url: str | None = None,
 ):
     """创建 worker 级审批门。
 
@@ -137,4 +155,6 @@ def make_worker_gate(
         policy=policy,
         trace_writer=trace_writer,
         audit_repo=audit_repo,
+        team_name=team_name,
+        webhook_url=webhook_url,
     )

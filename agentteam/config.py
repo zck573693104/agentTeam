@@ -92,6 +92,20 @@ class Settings(BaseSettings):
         description="interrupted run 清理任务执行间隔(秒);0 禁用后台定时清理(仅在 shutdown 时清理)",
     )
 
+    # 安全与鉴权(P-A2 对标阿里云 AgentTeams "访问控制")
+    auth_enabled: bool = Field(
+        default=False,
+        description="启用 API Key 鉴权(开发态默认关闭,生产部署建议开启)",
+    )
+    auth_api_keys: str = Field(
+        default="",
+        description="合法 API Key 列表,逗号分隔;auth_enabled=true 时请求需带 X-API-Key header 匹配其中之一",
+    )
+    secret_key: str = Field(
+        default="",
+        description="凭证加密主密钥(32 字节 hex/base64);空则退化为明文模式(开发态兼容)",
+    )
+
 
 _settings_instance: Settings | None = None
 

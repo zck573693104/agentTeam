@@ -43,6 +43,9 @@ class Team:
     2. 旧方式：Team(leader=..., workers=...)  —— 兼容，__init__ 内转 root
 
     property leader/workers 从 root 反推。
+
+    webhook_url(P-A5 对标阿里云 AgentTeams "IM 原生"):
+    审批请求触发时 POST 通知该 URL,支持接入钉钉/飞书/企业微信等 IM bot。
     """
 
     name: str
@@ -51,6 +54,7 @@ class Team:
     root: Agent | None
     skills: list[str]
     mcp_servers: list[MCPServer]
+    webhook_url: str | None
 
     def __init__(
         self,
@@ -63,12 +67,14 @@ class Team:
         workers: list[Worker] | None = None,
         skills: list[str] | None = None,
         mcp_servers: list[MCPServer] | None = None,
+        webhook_url: str | None = None,
     ):
         self.name = name
         self.description = description
         self.default_model = default_model
         self.skills = list(skills) if skills else []
         self.mcp_servers = list(mcp_servers) if mcp_servers else []
+        self.webhook_url = webhook_url
         if root is not None:
             self.root = root
         elif leader is not None:
@@ -122,7 +128,7 @@ class Team:
     @classmethod
     def from_legacy(
         cls, *, name, description, leader, workers, default_model,
-        skills=None, mcp_servers=None,
+        skills=None, mcp_servers=None, webhook_url=None,
     ) -> "Team":
         root = leader.to_agent(children=[w.to_agent() for w in workers])
         return cls(
@@ -130,4 +136,5 @@ class Team:
             default_model=default_model,
             skills=list(skills) if skills else [],
             mcp_servers=list(mcp_servers) if mcp_servers else [],
+            webhook_url=webhook_url,
         )

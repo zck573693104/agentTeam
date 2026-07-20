@@ -15,7 +15,9 @@ from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
 from agentteam.domain.library import AgentLibrary
 from agentteam.models.provider import ModelProvider
+from agentteam.storage.admin_audit import AdminAuditRepo
 from agentteam.storage.audit import AuditRepo
+from agentteam.storage.quotas import QuotaRepo
 from agentteam.storage.runs import RunRepo
 from agentteam.tools.registry import ToolRegistry
 
@@ -76,6 +78,8 @@ def runs_router(
     checkpointer=None,
     agent_library: AgentLibrary | None = None,
     skill_loader=None,
+    quota_repo: QuotaRepo | None = None,
+    admin_audit_repo: AdminAuditRepo | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/runs", tags=["runs"])
     lib = agent_library or AgentLibrary()
@@ -85,6 +89,31 @@ def runs_router(
         team = team_store.get(req.team_name)
         if team is None:
             raise HTTPException(status_code=404, detail=f"Team '{req.team_name}' not found")
+
+        # P-A4 Token 配额校验(对标阿里云 AgentTeams "成本可控"):
+        # 启动 run 前检查当前周期已用 token,超额返回 429。
+        # 无配额配置或 token_limit=0 视为不限,放行。
+        if quota_repo is not None:
+            check = quota_repo.check_quota(team.name)
+            if not check["allowed"]:
+                if admin_audit_repo is not None:
+                    admin_audit_repo.add_event(
+                        "run_rejected_by_quota", "team", team.name,
+                        payload={
+                            "used": check["used"],
+                            "limit": check["limit"],
+                            "period": check["period"],
+                            "task": req.task[:200],
+                        },
+                    )
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"Token quota exceeded for team '{team.name}': "
+                        f"used {check['used']} / limit {check['limit']} "
+                        f"(period {check['period']}s)"
+                    ),
+                )
 
         run_id = run_repo.create_run(team.name, req.task)
 

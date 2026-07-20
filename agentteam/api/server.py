@@ -19,16 +19,19 @@ from agentteam.api.routes.skills import skills_router
 from agentteam.api.routes.teams import teams_router
 from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
+from agentteam.api.auth import setup_auth
 from agentteam.config import get_settings
 from agentteam.domain.library import AgentLibrary
 from agentteam.logging_config import get_logger, init_logging
 from agentteam.models.provider import ModelProvider, ModelRef
 from agentteam.runtime.evolution import EvolutionEngine
 from agentteam.runtime.skills import SkillLoader
+from agentteam.storage.admin_audit import AdminAuditRepo
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
 from agentteam.storage.evolution import EvolutionRepo
 from agentteam.storage.library import LibraryRepo
+from agentteam.storage.quotas import QuotaRepo
 from agentteam.storage.runs import RunRepo
 from agentteam.storage.teams import TeamRepo
 from agentteam.tools.registry import ToolRegistry
@@ -77,6 +80,12 @@ def create_app(
 
     app = FastAPI(title="AgentTeam", lifespan=lifespan)
 
+    # API Key 鉴权中间件(P-A2 对标阿里云 AgentTeams "访问控制"):
+    # auth_enabled=true 时所有 /api/* 请求必须带 X-API-Key header 匹配合法 key。
+    # 默认关闭(开发态零配置),生产部署通过 AGENTTEAM_AUTH_ENABLED=true 启用。
+    if setup_auth(app):
+        logger.info("API Key auth enabled (auth_enabled=true)")
+
     # 共享锁：SqliteSaver / RunRepo / AuditRepo 共用同一 sqlite3.Connection，
     # 必须用同一把锁串行化所有连接访问，否则多线程下会触发
     # sqlite3.InterfaceError: bad parameter or other API misuse。
@@ -85,6 +94,8 @@ def create_app(
     audit_repo = AuditRepo(conn, lock=conn_lock)
     team_repo = TeamRepo(conn, lock=conn_lock)
     library_repo = LibraryRepo(conn, lock=conn_lock)
+    admin_audit_repo = AdminAuditRepo(conn, lock=conn_lock)
+    quota_repo = QuotaRepo(conn, lock=conn_lock)
     team_store = TeamStore(repo=team_repo)
     event_bus = EventBus()
 
@@ -131,18 +142,19 @@ def create_app(
         checkpointer=saver, evolution_engine=evolution_engine,
     )
 
-    app.include_router(teams_router(team_store))
+    app.include_router(teams_router(team_store, admin_audit_repo))
     app.include_router(
         runs_router(
             run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,
             checkpointer=saver, agent_library=lib, skill_loader=skill_loader,
+            quota_repo=quota_repo, admin_audit_repo=admin_audit_repo,
         )
     )
     app.include_router(dashboard_router(run_repo, audit_repo))
-    app.include_router(library_router(lib))
-    app.include_router(admin_router(team_store, lib))
+    app.include_router(library_router(lib, admin_audit_repo))
+    app.include_router(admin_router(team_store, lib, admin_audit_repo, quota_repo))
     app.include_router(skills_router(skill_loader))
-    app.include_router(evolution_router(evolution_repo, lib))
+    app.include_router(evolution_router(evolution_repo, lib, admin_audit_repo))
 
     # 挂载前端静态文件(生产模式)。
     # - web_dist=_DEFAULT(默认): 使用 _DEFAULT_WEB_DIST,目录存在才挂载

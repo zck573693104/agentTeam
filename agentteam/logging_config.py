@@ -22,9 +22,34 @@ import sys
 from typing import Any
 
 from agentteam.config import get_settings
+from agentteam.security.crypto import mask_secrets_in_text
 
 _CONFIGURED = False
 _DEFAULT_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+class _SecretFilter(logging.Filter):
+    """Anti-Log 过滤器:扫描日志 message 中的敏感模式并脱敏。
+
+    对标阿里云 AgentTeams 的"Anti-Log"特性:防止 API key/token/credential
+    意外写入日志(如 logger.info("using token=%s", token))。
+
+    覆盖 key=value 形式与已知厂商 key 前缀(ghp_ / github_pat_ / sk- / sk-ant-)。
+    详见 agentteam.security.crypto.mask_secrets_in_text。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # 改写 record.getMessage() 的结果难以回填到 record,故直接改 msg/args。
+        # 简化策略:对 record.msg(模板字符串)与 record.args 都做脱敏;
+        # 若 args 非空,getMessage 会用 args % msg 拼接,这里在拼接后再过滤。
+        # 最稳妥的方式:在 emit 前替换 record.message(由 Formatter.format 设置)。
+        # 但 Filter 在 format 之前运行,无 message 字段。
+        # 此处采用:重写 record.getMessage 临时包装,使 format 阶段拿到脱敏后的字符串。
+        original_get = record.getMessage
+        def _masked_get() -> str:
+            return mask_secrets_in_text(original_get())
+        record.getMessage = _masked_get  # type: ignore[method-assign]
+        return True
 
 
 class _JsonFormatter(logging.Formatter):
@@ -49,8 +74,13 @@ class _JsonFormatter(logging.Formatter):
                 "thread", "threadName",
             ):
                 try:
-                    json.dumps(value)  # 检查可序列化
-                    log_entry[key] = value
+                    sval = json.dumps(value)  # 检查可序列化
+                    # 字符串值再过一次脱敏(覆盖 logger.info("token=%s", token) 场景)
+                    if isinstance(value, str):
+                        from agentteam.security.crypto import mask_secrets_in_text
+                        log_entry[key] = mask_secrets_in_text(value)
+                    else:
+                        log_entry[key] = json.loads(sval)
                 except (TypeError, ValueError):
                     log_entry[key] = repr(value)
         return json.dumps(log_entry, ensure_ascii=False)
@@ -91,6 +121,8 @@ def init_logging(
         handler.setFormatter(_JsonFormatter())
     else:
         handler.setFormatter(logging.Formatter(_DEFAULT_FORMAT))
+    # Anti-Log 过滤器:任何格式下都启用,防止 token/secret 写入日志
+    handler.addFilter(_SecretFilter())
     root.addHandler(handler)
     root.setLevel(level)
     # 防止传播到 root logger 造成重复输出

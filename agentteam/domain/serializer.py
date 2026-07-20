@@ -138,6 +138,7 @@ def team_to_dict(team: Team) -> dict[str, Any]:
         "default_model": asdict(team.default_model),
         "skills": list(team.skills),
         "mcp_servers": [asdict(s) for s in team.mcp_servers],
+        "webhook_url": team.webhook_url,
     }
 
 
@@ -155,6 +156,7 @@ def team_from_dict(data: dict[str, Any]) -> Team:
             default_model=_model_ref_from_dict(data["default_model"]),  # type: ignore[arg-type]
             skills=data.get("skills", []),
             mcp_servers=[_mcp_server_from_dict(s) for s in data.get("mcp_servers", [])],
+            webhook_url=data.get("webhook_url"),
         )
     # 旧 schema
     leader = _leader_from_dict(data["leader"])
@@ -167,4 +169,5 @@ def team_from_dict(data: dict[str, Any]) -> Team:
         default_model=_model_ref_from_dict(data["default_model"]),  # type: ignore[arg-type]
         skills=data.get("skills", []),
         mcp_servers=[_mcp_server_from_dict(s) for s in data.get("mcp_servers", [])],
+        webhook_url=data.get("webhook_url"),
     )

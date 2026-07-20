@@ -8,10 +8,15 @@ from fastapi import APIRouter, HTTPException
 
 from agentteam.domain.approval import ApprovalPolicy
 from agentteam.domain.library import AgentLibrary
+from agentteam.storage.admin_audit import AdminAuditRepo
 from agentteam.storage.evolution import EvolutionRepo
 
 
-def evolution_router(evolution_repo: EvolutionRepo, agent_library: AgentLibrary) -> APIRouter:
+def evolution_router(
+    evolution_repo: EvolutionRepo,
+    agent_library: AgentLibrary,
+    admin_audit: AdminAuditRepo | None = None,
+) -> APIRouter:
     """构造 /api/agents evolution 相关路由。
 
     endpoints:
@@ -88,6 +93,12 @@ def evolution_router(evolution_repo: EvolutionRepo, agent_library: AgentLibrary)
             diff="", reason=f"User rolled back to v{version}",
             run_id=None, success=True,
         )
+        # P-A3 管理操作审计:记录 rollback 操作
+        if admin_audit is not None:
+            admin_audit.add_event(
+                "evolution_rolled_back", "agent", agent_name,
+                payload={"from_version": agent.version, "to_version": version, "new_version": new_version},
+            )
         return {"ok": True, "new_version": new_version}
 
     return router

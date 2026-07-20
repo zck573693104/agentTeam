@@ -116,6 +116,33 @@ CREATE INDEX IF NOT EXISTS idx_evo_agent_success_ts ON evolution_history(agent_n
 CREATE INDEX IF NOT EXISTS idx_approvals_run_id_status_2 ON approvals(run_id, status);
 """
 
+# v5: 管理操作审计表(P-A3 对标阿里云 AgentTeams "安全审计"):
+# 记录 Team/Library/Evolution/Quota 等管理面 CRUD 操作,与 run_events(执行面)分离。
+# run_events 记 run 执行轨迹(actor 是 agent);admin_events 记管理操作(actor 是 operator)。
+_MIGRATION_V5 = """
+CREATE TABLE IF NOT EXISTS admin_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type   TEXT NOT NULL,
+    resource     TEXT NOT NULL,
+    resource_id  TEXT,
+    actor        TEXT NOT NULL DEFAULT 'api-user',
+    timestamp    TEXT NOT NULL,
+    payload      TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_admin_events_ts ON admin_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_admin_events_resource ON admin_events(resource, resource_id);
+CREATE INDEX IF NOT EXISTS idx_admin_events_actor ON admin_events(actor);
+
+CREATE TABLE IF NOT EXISTS quotas (
+    team_name       TEXT PRIMARY KEY,
+    token_limit     INTEGER NOT NULL DEFAULT 0,
+    period_seconds  INTEGER NOT NULL DEFAULT 86400,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT ''
+);
+"""
+
 # 迁移列表:(version, description, sql_or_callable)
 # - sql 为 str:直接 executescript
 # - sql 为 callable:调用以 conn 为参数,自行处理(用于 ALTER 等 idempotent 不可表达的场景)
@@ -133,6 +160,7 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (2, "evolution_history table (SP7b)", _MIGRATION_V2),
     (3, "library_agents.version column", _migration_v3),
     (4, "performance indexes (WAL/aggregate)", _MIGRATION_V4),
+    (5, "admin_events + quotas tables (P-A3/A4 governance)", _MIGRATION_V5),
 ]
 
 

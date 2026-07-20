@@ -438,22 +438,27 @@ def _validate_supervisor(agent: Agent, depth: int, path: str) -> None:
 
 def _compile_worker_via_spec(compiler, agent, default_model, checkpointer,
                              trace_writer, audit_repo, depth, path,
-                             visited_team_names):
+                             visited_team_names, **kwargs):
     """worker 编译入口(适配 RoleSpec.compile_fn 签名)。
 
     忽略 checkpointer/depth/path/visited_team_names(worker 是叶子节点,
-    不递归,不需要这些参数)。
+    不递归,不需要这些参数)。kwargs 兼容 P-A5 新增的 team_name/webhook_url。
     """
     return compiler._compile_worker(agent, default_model, trace_writer, audit_repo)
 
 
 def _compile_supervisor_via_spec(compiler, agent, default_model, checkpointer,
                                   trace_writer, audit_repo, depth, path,
-                                  visited_team_names):
-    """supervisor 编译入口(适配 RoleSpec.compile_fn 签名)。"""
+                                  visited_team_names, **kwargs):
+    """supervisor 编译入口(适配 RoleSpec.compile_fn 签名)。
+
+    kwargs 透传 team_name/webhook_url 等 P-A5 新增参数,保持向前兼容。
+    """
     return compiler._compile_supervisor(
         agent, default_model, checkpointer, trace_writer, audit_repo,
         depth, path, visited_team_names,
+        team_name=kwargs.get("team_name"),
+        webhook_url=kwargs.get("webhook_url"),
     )
 
 
@@ -643,11 +648,13 @@ class TeamCompiler:
         # 递归编译 root
         # visited_team_names 跟踪已被引用的 Team.name（唯一标识），
         # 用于检测循环引用。root Team 自身先入集合，确保自引用 A→A 被识别。
+        # P-A5: 透传 team.webhook_url 给 approval gate 用于 webhook 通知
         compiled = self._compile_agent(
             team.root, team.default_model, checkpointer,
             trace_writer, audit_repo,
             depth=0, path=f"team:{team.name}",
             visited_team_names={team.name},
+            team_name=team.name, webhook_url=team.webhook_url,
         )
         self._compile_cache.put(cache_key, compiled)
         return compiled
@@ -656,6 +663,8 @@ class TeamCompiler:
         self, agent: Agent, default_model, checkpointer,
         trace_writer, audit_repo, depth, path,
         visited_team_names: set[str] | None = None,
+        team_name: str | None = None,
+        webhook_url: str | None = None,
     ):
         # 1. 解析 ref（深拷贝库定义，保留覆盖）
         agent = self._lib.resolve(agent)
@@ -671,6 +680,7 @@ class TeamCompiler:
         return spec.compile_fn(
             self, agent, default_model, checkpointer, trace_writer, audit_repo,
             depth, path, visited_team_names or set(),
+            team_name=team_name, webhook_url=webhook_url,
         )
 
     def _validate(self, agent: Agent, depth: int, path: str) -> None:
@@ -686,6 +696,8 @@ class TeamCompiler:
     def _compile_supervisor(
         self, agent: Agent, default_model, checkpointer,
         trace_writer, audit_repo, depth, path, visited_team_names,
+        team_name: str | None = None,
+        webhook_url: str | None = None,
     ):
         graph = StateGraph(TeamState)
         llm = self._mp.get_llm(agent.model or default_model)
@@ -699,7 +711,10 @@ class TeamCompiler:
         has_step_gate = step_policy is not None and step_policy.level == "step"
         if has_step_gate:
             graph.add_node("step_gate",
-                make_step_gate(step_policy, trace_writer, audit_repo))
+                make_step_gate(
+                    step_policy, trace_writer, audit_repo,
+                    team_name=team_name, webhook_url=webhook_url,
+                ))
 
         # 递归编译 children
         child_targets: dict[str, str] = {}  # logical name → physical node name
@@ -724,11 +739,13 @@ class TeamCompiler:
                     self._tr.register_mcp_tools(server)
                 # 递归编译时把 sub_team.name 加入已访问集合，子层级的非 TeamRef
                 # children 会原样透传该集合（不增不减），保证跨层级循环检测正确。
+                # P-A5: 透传 sub_team.webhook_url(子 team 自身的 webhook 配置优先)
                 sub_graph = self._compile_agent(
                     sub_team.root, sub_team.default_model, checkpointer,
                     trace_writer, audit_repo,
                     depth=depth + 1, path=f"{path}.{alias}",
                     visited_team_names=visited_team_names | {sub_team.name},
+                    team_name=sub_team.name, webhook_url=sub_team.webhook_url,
                 )
                 node_name = f"subteam_{alias}"
                 graph.add_node(node_name, make_supervisor_node(sub_graph, alias))
@@ -739,6 +756,7 @@ class TeamCompiler:
                     child, default_model, checkpointer, trace_writer, audit_repo,
                     depth=depth + 1, path=f"{path}.{child.name}",
                     visited_team_names=visited_team_names,
+                    team_name=team_name, webhook_url=webhook_url,
                 )
                 # 按 spec.is_subgraph 分派(替代硬编码 child.role == "worker")
                 # 子图型 role(worker 等)直接 add_node;非子图型(supervisor 等)用
@@ -762,7 +780,10 @@ class TeamCompiler:
                     gate_name = f"worker_gate_{child.name}"
                     graph.add_node(
                         gate_name,
-                        make_worker_gate(child.name, wp, trace_writer, audit_repo),
+                        make_worker_gate(
+                            child.name, wp, trace_writer, audit_repo,
+                            team_name=team_name, webhook_url=webhook_url,
+                        ),
                     )
                 worker_gates[child.name] = has_gate
 
