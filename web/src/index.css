@@ -1,3 +1,553 @@
-body {
-  margin: 0;
+/* ============================================================================
+ * AgentTeam 控制台主题 — "Mission Control"
+ * 灵感来源:NASA 任务监控台 / Bloomberg Terminal / Cyberpunk Dashboard
+ * 色板:深炭灰底 + 琥珀主调 + 磷光绿运行态 + 朱红失败 + 蓝绿审批
+ * 字体:JetBrains Mono(终端感)/ IBM Plex Sans(工程感)
+ * ========================================================================== */
+
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap");
+
+:root {
+  /* 表面色(由浅到深) */
+  --at-bg-deep: #0a0d12;
+  --at-bg-base: #0f141b;
+  --at-bg-panel: #161c26;
+  --at-bg-elev: #1d2530;
+  --at-bg-hover: #232c38;
+
+  /* 描边/分隔线 */
+  --at-border: #2a3441;
+  --at-border-soft: #1f2731;
+  --at-border-strong: #3a4736;
+
+  /* 主色:琥珀(警示感、人机监控感) */
+  --at-amber: #ffb547;
+  --at-amber-soft: #ffcf7a;
+  --at-amber-dim: #8a6128;
+
+  /* 状态色 */
+  --at-green: #5dff9e;        /* 运行中,磷光绿 */
+  --at-green-dim: #2a8a52;
+  --at-red: #ff5a5f;          /* 失败,警示红 */
+  --at-red-dim: #8a2c30;
+  --at-blue: #4ad8e8;         /* 审批/信息,蓝绿 */
+  --at-blue-dim: #2a7a85;
+  --at-gray: #6b7785;         /* 等待/中性 */
+  --at-gold: #ffd24a;         /* 已完成 */
+
+  /* 文本色 */
+  --at-text: #e6ecf2;
+  --at-text-dim: #8a96a8;
+  --at-text-faint: #5a6678;
+  --at-text-mono: #c5d1e0;
+
+  /* 阴影/光晕 */
+  --at-glow-amber: 0 0 24px rgba(255, 181, 71, 0.15);
+  --at-glow-green: 0 0 16px rgba(93, 255, 158, 0.25);
+  --at-glow-red: 0 0 16px rgba(255, 90, 95, 0.3);
+
+  /* 字体 */
+  --at-font-mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --at-font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, sans-serif;
 }
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--at-font-sans);
+  color: var(--at-text);
+  background: var(--at-bg-deep);
+  /* 径向暗角 + 极细 grid 纹理:营造控制台氛围 */
+  background-image:
+    radial-gradient(ellipse at top, rgba(255, 181, 71, 0.04), transparent 60%),
+    radial-gradient(ellipse at bottom right, rgba(74, 216, 232, 0.03), transparent 50%),
+    linear-gradient(rgba(42, 52, 65, 0.18) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(42, 52, 65, 0.18) 1px, transparent 1px),
+    var(--at-bg-deep);
+  background-size: 100% 100%, 100% 100%, 32px 32px, 32px 32px, 100% 100%;
+  background-attachment: fixed;
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 噪点 overlay:增加质感,避免纯色平面 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' /%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' /%3E%3C/svg%3E");
+}
+
+/* ---- 滚动条:细窄、深色 ---- */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--at-border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--at-text-faint); }
+
+/* ============================================================================
+ * 控制台基础组件样式
+ * ========================================================================== */
+
+/* 等宽字体辅助类 */
+.at-mono { font-family: var(--at-font-mono); font-feature-settings: "tnum"; }
+
+/* 大数字统计 */
+.at-stat-value {
+  font-family: var(--at-font-mono);
+  font-weight: 700;
+  font-size: 36px;
+  line-height: 1;
+  color: var(--at-text);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.at-stat-label {
+  font-family: var(--at-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--at-text-faint);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+/* 面板:替代 antd Card 的默认白底 */
+.at-panel {
+  background: var(--at-bg-panel);
+  border: 1px solid var(--at-border);
+  border-radius: 2px;
+  position: relative;
+}
+
+/* 切角装饰:右上角缺口,呼应"工程仪表"感 */
+.at-panel-corners::before,
+.at-panel-corners::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--at-amber);
+  pointer-events: none;
+}
+.at-panel-corners::before {
+  top: -1px; right: -1px;
+  border-bottom: none; border-left: none;
+}
+.at-panel-corners::after {
+  bottom: -1px; left: -1px;
+  border-top: none; border-right: none;
+}
+
+/* 状态点:呼吸动画 */
+.at-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  position: relative;
+  vertical-align: middle;
+}
+.at-dot::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  opacity: 0;
+  animation: at-pulse 2s ease-out infinite;
+}
+@keyframes at-pulse {
+  0%   { opacity: 0.6; transform: scale(0.8); }
+  100% { opacity: 0; transform: scale(1.8); }
+}
+.at-dot-running  { background: var(--at-green); color: var(--at-green); box-shadow: var(--at-glow-green); }
+.at-dot-pending  { background: var(--at-gray); color: var(--at-gray); }
+.at-dot-completed{ background: var(--at-gold); color: var(--at-gold); }
+.at-dot-failed   { background: var(--at-red); color: var(--at-red); box-shadow: var(--at-glow-red); }
+.at-dot-interrupted { background: var(--at-amber); color: var(--at-amber); box-shadow: var(--at-glow-amber); }
+.at-dot-cancelling  { background: var(--at-amber); color: var(--at-amber); }
+.at-dot-cancelled   { background: var(--at-gray); color: var(--at-gray); opacity: 0.5; }
+.at-dot-dot-pending { background: transparent; border: 1px solid var(--at-gray); color: var(--at-gray); }
+/* 静态点(无动画) */
+.at-dot-static::after { display: none; }
+
+/* 扫描线:运行中卡片用 */
+.at-scanline {
+  position: relative;
+  overflow: hidden;
+}
+.at-scanline::before {
+  content: "";
+  position: absolute;
+  left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--at-green), transparent);
+  opacity: 0.5;
+  animation: at-scan 3s linear infinite;
+  pointer-events: none;
+}
+@keyframes at-scan {
+  0%   { top: 0%; }
+  100% { top: 100%; }
+}
+
+/* 章节标题:左侧 amber 短竖线 */
+.at-section-title {
+  font-family: var(--at-font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--at-text-dim);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.at-section-title::before {
+  content: "";
+  width: 3px;
+  height: 14px;
+  background: var(--at-amber);
+  display: inline-block;
+}
+
+/* 标签/Tag 样式(替代 antd 默认) */
+.at-tag {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--at-font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  padding: 2px 8px;
+  border-radius: 1px;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  background: transparent;
+}
+
+/* 按钮:轮廓 + amber 强调 */
+.at-btn-amber {
+  background: transparent;
+  border: 1px solid var(--at-amber);
+  color: var(--at-amber);
+  font-family: var(--at-font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border-radius: 1px;
+}
+.at-btn-amber:hover {
+  background: var(--at-amber);
+  color: var(--at-bg-deep);
+  box-shadow: var(--at-glow-amber);
+}
+
+/* 链接式按钮 */
+.at-link {
+  font-family: var(--at-font-mono);
+  font-size: 11px;
+  color: var(--at-amber);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-bottom: 1px dashed transparent;
+  transition: border-color 0.15s ease;
+}
+.at-link:hover { border-bottom-color: var(--at-amber); }
+
+/* ---- 进入动画:staggered reveal ---- */
+@keyframes at-fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.at-fade-in {
+  animation: at-fade-up 0.4s ease-out both;
+}
+.at-fade-in-1 { animation-delay: 0.05s; }
+.at-fade-in-2 { animation-delay: 0.12s; }
+.at-fade-in-3 { animation-delay: 0.19s; }
+.at-fade-in-4 { animation-delay: 0.26s; }
+
+/* ---- antd 组件深度覆盖 ---- */
+
+/* Card 改深色 */
+.ant-card,
+.ant-card-bordered {
+  background: var(--at-bg-panel) !important;
+  border-color: var(--at-border) !important;
+  color: var(--at-text) !important;
+  border-radius: 2px !important;
+}
+.ant-card-head {
+  background: transparent !important;
+  border-bottom-color: var(--at-border) !important;
+  color: var(--at-text) !important;
+  min-height: 44px !important;
+  padding: 0 16px !important;
+}
+.ant-card-head-title {
+  font-family: var(--at-font-mono) !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.14em !important;
+  text-transform: uppercase !important;
+  color: var(--at-text-dim) !important;
+  padding: 12px 0 !important;
+}
+.ant-card-body { padding: 16px !important; }
+
+/* Table 改深色 */
+.ant-table {
+  background: transparent !important;
+  color: var(--at-text) !important;
+}
+.ant-table-thead > tr > th {
+  background: var(--at-bg-elev) !important;
+  color: var(--at-text-faint) !important;
+  font-family: var(--at-font-mono) !important;
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.12em !important;
+  text-transform: uppercase !important;
+  border-bottom: 1px solid var(--at-border) !important;
+  padding: 10px 12px !important;
+}
+.ant-table-tbody > tr > td {
+  background: transparent !important;
+  color: var(--at-text) !important;
+  border-bottom: 1px solid var(--at-border-soft) !important;
+  padding: 10px 12px !important;
+  font-size: 13px !important;
+  transition: background 0.12s ease;
+}
+.ant-table-tbody > tr:hover > td {
+  background: var(--at-bg-hover) !important;
+}
+.ant-table-tbody > tr:hover > td:first-child {
+  box-shadow: inset 2px 0 0 var(--at-amber);
+}
+
+/* Modal 深色 */
+.ant-modal-content,
+.ant-modal-header {
+  background: var(--at-bg-panel) !important;
+  border: 1px solid var(--at-border) !important;
+}
+.ant-modal-title {
+  font-family: var(--at-font-mono) !important;
+  color: var(--at-text) !important;
+  letter-spacing: 0.08em !important;
+}
+.ant-modal-close-icon { color: var(--at-text-dim) !important; }
+
+/* Input 深色 */
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-input-number,
+.ant-picker,
+.ant-select-selector {
+  background: var(--at-bg-elev) !important;
+  border-color: var(--at-border) !important;
+  color: var(--at-text) !important;
+  font-family: var(--at-font-mono) !important;
+  font-size: 13px !important;
+}
+.ant-input:focus,
+.ant-input-affix-wrapper:focus,
+.ant-input-affix-wrapper-focused,
+.ant-select-focused .ant-select-selector {
+  border-color: var(--at-amber) !important;
+  box-shadow: 0 0 0 2px rgba(255, 181, 71, 0.15) !important;
+}
+.ant-select-arrow, .ant-select-clear { color: var(--at-text-faint) !important; }
+.ant-input::placeholder, .ant-select-selection-placeholder {
+  color: var(--at-text-faint) !important;
+}
+
+/* 按钮:覆盖 antd primary 为 amber */
+.ant-btn-primary {
+  background: var(--at-amber) !important;
+  border-color: var(--at-amber) !important;
+  color: var(--at-bg-deep) !important;
+  font-family: var(--at-font-mono) !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+  font-size: 11px !important;
+  box-shadow: none !important;
+}
+.ant-btn-primary:hover:not(:disabled) {
+  background: var(--at-amber-soft) !important;
+  border-color: var(--at-amber-soft) !important;
+  box-shadow: var(--at-glow-amber) !important;
+}
+.ant-btn-default {
+  background: transparent !important;
+  border-color: var(--at-border) !important;
+  color: var(--at-text-dim) !important;
+  font-family: var(--at-font-mono) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+}
+.ant-btn-default:hover:not(:disabled) {
+  border-color: var(--at-amber) !important;
+  color: var(--at-amber) !important;
+}
+.ant-btn-dangerous {
+  border-color: var(--at-red-dim) !important;
+  color: var(--at-red) !important;
+}
+.ant-btn-dangerous:hover {
+  background: var(--at-red-dim) !important;
+  color: var(--at-text) !important;
+}
+
+/* Descriptions 深色 */
+.ant-descriptions-bordered .ant-descriptions-view {
+  border-color: var(--at-border) !important;
+}
+.ant-descriptions-bordered .ant-descriptions-item-label,
+.ant-descriptions-bordered .ant-descriptions-item-content {
+  background: var(--at-bg-elev) !important;
+  border-color: var(--at-border) !important;
+  color: var(--at-text) !important;
+  padding: 10px 14px !important;
+}
+.ant-descriptions-bordered .ant-descriptions-item-label {
+  color: var(--at-text-faint) !important;
+  font-family: var(--at-font-mono) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+}
+
+/* Tabs 深色 */
+.ant-tabs-tab {
+  color: var(--at-text-dim) !important;
+  font-family: var(--at-font-mono) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.1em !important;
+  text-transform: uppercase !important;
+}
+.ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: var(--at-amber) !important;
+}
+.ant-tabs-ink-bar { background: var(--at-amber) !important; }
+.ant-tabs-top > .ant-tabs-nav::before { border-bottom-color: var(--at-border) !important; }
+
+/* Timeline */
+.ant-timeline-item-content {
+  color: var(--at-text) !important;
+}
+.ant-timeline-item-head { background: transparent !important; }
+
+/* Message 深色提示 */
+.ant-message-notice-content {
+  background: var(--at-bg-elev) !important;
+  border: 1px solid var(--at-amber) !important;
+  color: var(--at-text) !important;
+  font-family: var(--at-font-mono) !important;
+  box-shadow: var(--at-glow-amber) !important;
+}
+
+/* Statistic */
+.ant-statistic-title {
+  font-family: var(--at-font-mono) !important;
+  font-size: 10px !important;
+  font-weight: 500 !important;
+  color: var(--at-text-faint) !important;
+  letter-spacing: 0.14em !important;
+  text-transform: uppercase !important;
+  margin-bottom: 6px !important;
+}
+.ant-statistic-content-value {
+  font-family: var(--at-font-mono) !important;
+  color: var(--at-text) !important;
+  font-weight: 700 !important;
+  font-size: 28px !important;
+}
+
+/* Badge 文本 */
+.ant-badge-status-text { color: var(--at-text-dim) !important; font-family: var(--at-font-mono) !important; font-size: 12px !important; }
+
+/* Pre 代码块 */
+pre, code {
+  font-family: var(--at-font-mono) !important;
+  color: var(--at-text-mono) !important;
+}
+pre {
+  background: var(--at-bg-deep) !important;
+  border: 1px solid var(--at-border) !important;
+  padding: 12px !important;
+  border-radius: 2px !important;
+  font-size: 12px !important;
+  line-height: 1.6 !important;
+}
+
+/* Popover / Tooltip 深色 */
+.ant-tooltip-inner,
+.ant-popover-inner {
+  background: var(--at-bg-elev) !important;
+  color: var(--at-text) !important;
+  border: 1px solid var(--at-border) !important;
+  font-family: var(--at-font-mono) !important;
+  font-size: 11px !important;
+}
+.ant-tooltip-arrow::before,
+.ant-popover-arrow::before { background: var(--at-bg-elev) !important; }
+
+/* Form label */
+.ant-form-item-label > label {
+  color: var(--at-text-dim) !important;
+  font-family: var(--at-font-mono) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+}
+
+/* Loading spinner 颜色 */
+.ant-spin-dot-item { background-color: var(--at-amber) !important; }
+
+/* Pagination 深色 */
+.ant-pagination-item, .ant-pagination-prev, .ant-pagination-next {
+  background: transparent !important;
+  border-color: var(--at-border) !important;
+}
+.ant-pagination-item a, .ant-pagination-jump-prev, .ant-pagination-jump-next {
+  color: var(--at-text-dim) !important;
+  font-family: var(--at-font-mono) !important;
+}
+.ant-pagination-item-active {
+  border-color: var(--at-amber) !important;
+}
+.ant-pagination-item-active a { color: var(--at-amber) !important; }
+
+/* Empty 状态文本 */
+.ant-empty-description { color: var(--at-text-faint) !important; }
+
+/* 简易过渡:让所有 antd 组件颜色变化更柔滑 */
+.ant-card, .ant-table-tbody > tr > td, .ant-btn { transition: all 0.15s ease; }

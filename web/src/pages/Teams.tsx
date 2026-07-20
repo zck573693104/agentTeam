@@ -1,26 +1,15 @@
 import { useState } from "react";
 import {
-  Button,
-  Card,
-  Descriptions,
   Input,
   Modal,
   Popconfirm,
-  Table,
   Tabs,
-  Tag,
   message,
 } from "antd";
 import { useFetch } from "../hooks/useFetch";
 import { api, type AgentNode, type Team, type TeamRefNode } from "../api/client";
 import EvolutionHistory from "../components/EvolutionHistory";
-
-/** 统计 Agent 树中 worker 节点数量。 */
-function countWorkers(node: AgentNode | TeamRefNode): number {
-  if ("_type" in node) return 0; // TeamRef 不计入 worker
-  if (node.role === "worker") return 1;
-  return (node.children || []).reduce((sum, c) => sum + countWorkers(c), 0);
-}
+import { PageHeader } from "./Runs";
 
 /** 收集 Agent 树中所有 worker 节点（叶子）。 */
 function collectWorkers(node: AgentNode | TeamRefNode): { name: string; role?: string }[] {
@@ -80,112 +69,226 @@ export default function Teams() {
     }
   };
 
-  const columns = [
-    { title: "名称", dataIndex: "name" },
-    { title: "描述", dataIndex: "description" },
-    {
-      title: "Worker 数",
-      render: (_: unknown, r: Team) => countWorkers(r.root),
-    },
-    {
-      title: "操作",
-      render: (_: unknown, r: Team) => (
-        <Popconfirm title="确定删除?" onConfirm={() => handleDelete(r.name)}>
-          <Button danger size="small">
-            删除
-          </Button>
-        </Popconfirm>
-      ),
-    },
-  ];
-
   return (
     <div>
-      <Card
-        title="团队管理"
-        extra={
-          <Button type="primary" onClick={() => setModalOpen(true)}>
-            注册团队
-          </Button>
-        }
-      >
-        <Table
-          dataSource={data || []}
-          columns={columns}
-          rowKey="name"
-          loading={loading}
-          expandable={{
-            expandedRowRender: (r: Team) => {
-              /** 收集所有 worker 名称用于 evolution。 */
-              const workers = collectWorkers(r.root).filter(
-                (w) => w.role !== "subteam"
-              );
-              return (
-                <Tabs
-                  items={[
-                    {
-                      key: "info",
-                      label: "团队信息",
-                      children: (
-                        <Descriptions column={1} bordered size="small">
-                          <Descriptions.Item label="Root">
-                            {r.root.name} ({r.root.role})
-                          </Descriptions.Item>
-                          <Descriptions.Item label="Workers">
-                            {collectWorkers(r.root)
-                              .map((w) => `${w.name}(${w.role})`)
-                              .join(", ")}
-                          </Descriptions.Item>
-                          <Descriptions.Item label="Agent 树">
-                            <pre style={{ margin: 0, fontSize: 12 }}>
-                              {renderAgentTree(r.root)}
-                            </pre>
-                          </Descriptions.Item>
-                          {r.skills?.length > 0 && (
-                            <Descriptions.Item label="Skills">
-                              {r.skills.map((s) => (
-                                <Tag key={s} color="blue">
-                                  {s}
-                                </Tag>
-                              ))}
-                            </Descriptions.Item>
-                          )}
-                        </Descriptions>
-                      ),
-                    },
-                    {
-                      key: "evolution",
-                      label: "进化历史",
-                      children: (
-                        <div>
-                          {workers.length === 0 ? (
-                            <div style={{ color: "#999" }}>
-                              该团队无 worker agent
-                            </div>
-                          ) : (
-                            <Tabs
-                              items={workers.map((w) => ({
-                                key: w.name,
-                                label: w.name,
-                                children: (
-                                  <EvolutionHistory
-                                    agentName={w.name}
-                                    onRollback={refetch}
-                                  />
-                                ),
-                              }))}
-                            />
-                          )}
-                        </div>
-                      ),
-                    },
-                  ]}
-                />
-              );
-            },
-          }}
-        />
-      </Card>
+      <PageHeader
+        index="02 · TEAMS"
+        title="团队配置"
+        subtitle="Agent Squads"
+        action={<button className="at-btn-amber" onClick={() => setModalOpen(true)}>+ 注册团队</button>}
+      />
+
+      {error && (
+        <div style={{ padding: 24, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+          ✕ SIGNAL ERROR: {error}
+        </div>
+      )}
+
+      {loading && !data && (
+        <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 12, textAlign: "center" }}>
+          <span style={{ color: "var(--at-amber)" }}>●</span> LOADING TEAMS...
+        </div>
+      )}
+
+      {data && data.length === 0 && (
+        <div className="at-panel at-fade-in" style={{
+          padding: 56,
+          textAlign: "center",
+          color: "var(--at-text-faint)",
+          fontFamily: "var(--at-font-mono)",
+          fontSize: 12,
+        }}>
+          ◌ NO TEAMS · 暂无团队配置
+        </div>
+      )}
+
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))",
+        gap: 14,
+      }}>
+        {(data || []).map((team, idx) => {
+          const workers = collectWorkers(team.root);
+          const workerCount = workers.filter((w) => w.role !== "subteam").length;
+          const hasSubteam = workers.some((w) => w.role === "subteam");
+          return (
+            <div
+              key={team.name}
+              className={`at-panel at-panel-corners at-fade-in at-fade-in-${Math.min(idx + 1, 4)}`}
+              style={{ padding: 18 }}
+            >
+              {/* 卡片头:名称 + 删除 */}
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "flex-start",
+                marginBottom: 14,
+              }}>
+                <div>
+                  <div style={{
+                    fontFamily: "var(--at-font-mono)",
+                    fontSize: 9,
+                    color: "var(--at-text-faint)",
+                    letterSpacing: "0.2em",
+                    marginBottom: 4,
+                  }}>
+                    TEAM · {String(idx + 1).padStart(2, "0")}
+                  </div>
+                  <div style={{
+                    fontFamily: "var(--at-font-sans)",
+                    fontSize: 18,
+                    fontWeight: 500,
+                    color: "var(--at-amber)",
+                    letterSpacing: "-0.01em",
+                  }}>
+                    {team.name}
+                  </div>
+                </div>
+                <Popconfirm title="确定删除?" onConfirm={() => handleDelete(team.name)}>
+                  <button className="at-link" style={{ color: "var(--at-red)" }}>✕ DEL</button>
+                </Popconfirm>
+              </div>
+
+              {/* 描述 */}
+              <div style={{
+                fontFamily: "var(--at-font-sans)",
+                fontSize: 13,
+                color: "var(--at-text-dim)",
+                marginBottom: 14,
+                minHeight: 20,
+                lineHeight: 1.5,
+              }}>
+                {team.description || <span style={{ color: "var(--at-text-faint)", fontStyle: "italic" }}>无描述</span>}
+              </div>
+
+              {/* 指标 */}
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 10,
+                padding: "12px 0",
+                borderTop: "1px solid var(--at-border-soft)",
+                borderBottom: "1px solid var(--at-border-soft)",
+                marginBottom: 14,
+              }}>
+                <div>
+                  <div className="at-stat-label" style={{ marginBottom: 4 }}>Root</div>
+                  <div style={{ fontFamily: "var(--at-font-mono)", fontSize: 12, color: "var(--at-text)" }}>
+                    {team.root.role}
+                  </div>
+                </div>
+                <div>
+                  <div className="at-stat-label" style={{ marginBottom: 4 }}>Workers</div>
+                  <div style={{ fontFamily: "var(--at-font-mono)", fontSize: 16, color: "var(--at-green)", fontWeight: 700 }}>
+                    {workerCount}
+                    {hasSubteam && <span style={{ color: "var(--at-text-faint)", fontSize: 10 }}> +sub</span>}
+                  </div>
+                </div>
+              </div>
+
+              {/* skills */}
+              {team.skills?.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div className="at-stat-label" style={{ marginBottom: 6 }}>Skills</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {team.skills.map((s) => (
+                      <span key={s} className="at-tag" style={{ color: "var(--at-blue)" }}>{s}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* worker 列表 */}
+              <div style={{ marginBottom: 14 }}>
+                <div className="at-stat-label" style={{ marginBottom: 6 }}>Members</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {workers.slice(0, 5).map((w, i) => (
+                    <div key={i} style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      fontFamily: "var(--at-font-mono)",
+                      fontSize: 11,
+                    }}>
+                      <span style={{ color: "var(--at-text-faint)", width: 18 }}>
+                        {String(i + 1).padStart(2, "0")}
+                      </span>
+                      <span style={{ color: "var(--at-text)" }}>{w.name}</span>
+                      <span style={{
+                        color: w.role === "subteam" ? "var(--at-blue)" : "var(--at-green)",
+                        fontSize: 9,
+                        letterSpacing: "0.1em",
+                        textTransform: "uppercase",
+                      }}>
+                        {w.role}
+                      </span>
+                    </div>
+                  ))}
+                  {workers.length > 5 && (
+                    <div style={{ color: "var(--at-text-faint)", fontSize: 10, fontFamily: "var(--at-font-mono)", marginTop: 2 }}>
+                      + {workers.length - 5} more
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* agent 树折叠 */}
+              <details style={{ borderTop: "1px solid var(--at-border-soft)", paddingTop: 10 }}>
+                <summary style={{
+                  cursor: "pointer",
+                  fontFamily: "var(--at-font-mono)",
+                  fontSize: 10,
+                  color: "var(--at-text-faint)",
+                  letterSpacing: "0.12em",
+                  textTransform: "uppercase",
+                }}>
+                  ▾ Agent Tree
+                </summary>
+                <pre style={{
+                  fontSize: 11,
+                  marginTop: 8,
+                  padding: 10,
+                  background: "var(--at-bg-deep)",
+                  border: "1px solid var(--at-border)",
+                  color: "var(--at-text-mono)",
+                  whiteSpace: "pre-wrap",
+                  lineHeight: 1.5,
+                }}>
+                  {renderAgentTree(team.root)}
+                </pre>
+              </details>
+
+              {/* Evolution */}
+              {workerCount > 0 && (
+                <details style={{ marginTop: 10 }}>
+                  <summary style={{
+                    cursor: "pointer",
+                    fontFamily: "var(--at-font-mono)",
+                    fontSize: 10,
+                    color: "var(--at-amber)",
+                    letterSpacing: "0.12em",
+                    textTransform: "uppercase",
+                  }}>
+                    ▾ Evolution History
+                  </summary>
+                  <div style={{ marginTop: 10 }}>
+                    <Tabs
+                      size="small"
+                      items={workers
+                        .filter((w) => w.role !== "subteam")
+                        .map((w) => ({
+                          key: w.name,
+                          label: w.name,
+                          children: <EvolutionHistory agentName={w.name} onRollback={refetch} />,
+                        }))}
+                    />
+                  </div>
+                </details>
+              )}
+            </div>
+          );
+        })}
+      </div>
 
       <Modal
         title="注册团队"

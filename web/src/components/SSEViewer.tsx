@@ -1,19 +1,18 @@
 import { useEffect, useState } from "react";
-import { Badge, Button, Card, Timeline } from "antd";
 
-/** 事件类型 → Timeline 颜色映射。 */
+/** 事件类型 → 颜色映射(用 CSS 变量值)。 */
 const EVENT_COLORS: Record<string, string> = {
-  run_start: "blue",
-  run_end: "green",
-  error: "red",
-  run_interrupted: "orange",
-  leader_plan: "cyan",
-  leader_review: "geekblue",
-  worker_start: "cyan",
-  worker_end: "green",
-  tool_call: "purple",
-  approval_requested: "orange",
-  approval_decided: "gold",
+  run_start: "#4ad8e8",
+  run_end: "#ffd24a",
+  error: "#ff5a5f",
+  run_interrupted: "#ffb547",
+  leader_plan: "#4ad8e8",
+  leader_review: "#4ad8e8",
+  worker_start: "#4ad8e8",
+  worker_end: "#5dff9e",
+  tool_call: "#ffb547",
+  approval_requested: "#ffb547",
+  approval_decided: "#ffd24a",
 };
 
 /** 已知事件类型列表,用于注册 EventSource 监听器。 */
@@ -79,9 +78,7 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
       }
     };
 
-    // 注册所有已知事件类型的监听器
     EVENT_TYPES.forEach((type) => es.addEventListener(type, handler));
-    // 兜底:未命名事件走 onmessage
     es.onmessage = handler;
 
     es.onopen = () => setConnected(true);
@@ -95,65 +92,136 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
     };
   }, [runId, refreshKey]);
 
-  const badgeConfig = connected
-    ? { status: "processing" as const, text: "已连接" }
+  // 状态指示:运行中绿点 / 中断 amber / 失败 red / 结束 gold
+  const statusConfig = connected
+    ? { color: "#5dff9e", text: "CONNECTED", dotClass: "at-dot-running" }
     : endedWithError
-    ? { status: "error" as const, text: "已失败" }
+    ? { color: "#ff5a5f", text: "FAILED", dotClass: "at-dot-failed" }
     : ended
-    ? { status: "success" as const, text: "已结束" }
+    ? { color: "#ffd24a", text: "ENDED", dotClass: "at-dot-completed" }
     : interrupted
-    ? { status: "warning" as const, text: "等待审批" }
-    : { status: "error" as const, text: "已断开" };
+    ? { color: "#ffb547", text: "AWAITING APPROVAL", dotClass: "at-dot-interrupted" }
+    : { color: "#ff5a5f", text: "DISCONNECTED", dotClass: "at-dot-failed" };
 
   const showReconnect = !connected && !ended && !interrupted;
 
   return (
-    <Card
-      title="实时轨迹"
-      extra={
-        <span>
-          <Badge status={badgeConfig.status} text={badgeConfig.text} />
+    <div className="at-panel" style={{ padding: 0 }}>
+      <header style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        padding: "12px 16px",
+        borderBottom: "1px solid var(--at-border)",
+      }}>
+        <div className="at-section-title" style={{ margin: 0 }}>Live Trace · 实时轨迹</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            fontFamily: "var(--at-font-mono)",
+            fontSize: 10,
+            color: statusConfig.color,
+            letterSpacing: "0.1em",
+          }}>
+            <span className={`at-dot ${statusConfig.dotClass}`} />
+            {statusConfig.text}
+          </span>
           {showReconnect && (
-            <Button size="small" style={{ marginLeft: 8 }} onClick={onReconnect}>
-              重连
-            </Button>
+            <button className="at-link" onClick={onReconnect}>↻ RECONNECT</button>
           )}
-        </span>
-      }
-    >
+        </div>
+      </header>
+
       {events.length === 0 ? (
-        <div style={{ textAlign: "center", color: "#999", padding: 24 }}>等待事件...</div>
+        <div style={{
+          padding: 48,
+          textAlign: "center",
+          color: "var(--at-text-faint)",
+          fontFamily: "var(--at-font-mono)",
+          fontSize: 12,
+        }}>
+          ◌ WAITING FOR EVENTS · 等待事件...
+        </div>
       ) : (
-        <Timeline
-          items={events.map((e, i) => ({
-            color: EVENT_COLORS[e.event_type] || "gray",
-            children: (
-              <div key={e.id ?? i}>
-                <Badge
-                  color={EVENT_COLORS[e.event_type] || "gray"}
-                  text={e.event_type}
-                />
-                {e.timestamp && (
-                  <span style={{ marginLeft: 8, color: "#999", fontSize: 12 }}>
-                    {new Date(e.timestamp).toLocaleString()}
+        <div style={{ maxHeight: 560, overflowY: "auto", padding: "8px 0" }}>
+          {events.map((e, i) => {
+            const color = EVENT_COLORS[e.event_type] || "#6b7785";
+            return (
+              <div
+                key={e.id ?? i}
+                style={{
+                  padding: "10px 16px",
+                  borderLeft: `2px solid ${color}`,
+                  marginBottom: 2,
+                  marginLeft: 8,
+                  background: "transparent",
+                  transition: "background 0.12s ease",
+                }}
+                onMouseEnter={(ev) => { ev.currentTarget.style.background = "var(--at-bg-hover)"; }}
+                onMouseLeave={(ev) => { ev.currentTarget.style.background = "transparent"; }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                  <span style={{
+                    fontFamily: "var(--at-font-mono)",
+                    fontSize: 10,
+                    color: color,
+                    fontWeight: 600,
+                    letterSpacing: "0.1em",
+                    textTransform: "uppercase",
+                  }}>
+                    {e.event_type}
                   </span>
-                )}
+                  {e.timestamp && (
+                    <span style={{
+                      fontFamily: "var(--at-font-mono)",
+                      fontSize: 9,
+                      color: "var(--at-text-faint)",
+                      letterSpacing: "0.08em",
+                    }}>
+                      {new Date(e.timestamp).toLocaleString("zh-CN", { hour12: false })}
+                    </span>
+                  )}
+                </div>
                 {e.event_type === "run_interrupted" && (
-                  <div style={{ color: "#fa8c16", marginTop: 4 }}>等待审批...</div>
+                  <div style={{
+                    color: "var(--at-amber)",
+                    fontFamily: "var(--at-font-mono)",
+                    fontSize: 11,
+                    marginTop: 4,
+                  }}>
+                    ⚠ 等待审批决策...
+                  </div>
                 )}
-                <details style={{ marginTop: 4 }}>
-                  <summary style={{ cursor: "pointer", color: "#999", fontSize: 12 }}>
-                    payload
+                <details style={{ marginTop: 6 }}>
+                  <summary style={{
+                    cursor: "pointer",
+                    color: "var(--at-text-faint)",
+                    fontFamily: "var(--at-font-mono)",
+                    fontSize: 10,
+                    letterSpacing: "0.1em",
+                    textTransform: "uppercase",
+                  }}>
+                    ▸ payload
                   </summary>
-                  <pre style={{ fontSize: 12, overflowX: "auto" }}>
+                  <pre style={{
+                    marginTop: 6,
+                    fontSize: 11,
+                    padding: 10,
+                    background: "var(--at-bg-deep)",
+                    border: "1px solid var(--at-border)",
+                    color: "var(--at-text-mono)",
+                    overflowX: "auto",
+                  }}>
                     {JSON.stringify(e, null, 2)}
                   </pre>
                 </details>
               </div>
-            ),
-          }))}
-        />
+            );
+          })}
+        </div>
       )}
-    </Card>
+    </div>
   );
 }
