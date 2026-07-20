@@ -112,6 +112,7 @@ class RunManager:
         compiler_factory: "Callable[[], TeamCompiler]",
         approved: bool,
         reason: str | None = None,
+        decider: str = "api-user",
     ) -> None:
         """lazy recompile: 用 compiler_factory 构造 graph,注入内存,再 resume。
 
@@ -124,7 +125,7 @@ class RunManager:
             team: 要重新编译的 Team(从 team_store.get(run["team_name"]) 取得)
             compiler_factory: 无参闭包,返回注册好所有 team 的 TeamCompiler。
                               抽成闭包避免 RunManager 直接依赖 ModelProvider/ToolRegistry 等。
-            approved / reason: 透传给 resume_run
+            approved / reason / decider: 透传给 resume_run
 
         异常契约:
             compiler_factory() / compiler.compile() / resume_run() 抛出的异常
@@ -144,7 +145,7 @@ class RunManager:
         with self._lock:
             self._graphs[run_id] = graph
             self._configs[run_id] = config
-        self.resume_run(run_id, approved, reason)
+        self.resume_run(run_id, approved, reason, decider=decider)
 
     def start_run(self, run_id: str, graph, config: dict, task: str) -> None:
         """在后台线程中跑 graph.invoke()，立即返回。
@@ -165,8 +166,15 @@ class RunManager:
         with self._lock:
             self._threads[run_id] = future
 
-    def resume_run(self, run_id: str, approved: bool, reason: str | None = None) -> None:
-        """用 Command(resume=...) 启新线程续跑。"""
+    def resume_run(
+        self, run_id: str, approved: bool, reason: str | None = None,
+        decider: str = "api-user",
+    ) -> None:
+        """用 Command(resume=...) 启新线程续跑。
+
+        decider(P-B2 WAT 双身份):审批决策者用户名,写入 Command(resume=...)
+        的 payload,供节点读取并记入 audit_events。
+        """
         with self._lock:
             graph = self._graphs.get(run_id)
             config = self._configs.get(run_id)
@@ -175,7 +183,7 @@ class RunManager:
 
         from langgraph.types import Command
 
-        resume_value: dict[str, Any] = {"approved": approved, "decider": "api-user"}
+        resume_value: dict[str, Any] = {"approved": approved, "decider": decider}
         if reason:
             resume_value["reason"] = reason
 
@@ -362,10 +370,16 @@ class RunManager:
 
     def _run_in_background(self, run_id: str, graph, config: dict, task: str) -> None:
         try:
-            eid = self._audit_repo.add_event(run_id, "run_start", "system", {"task": task})
+            # P-B2 WAT 双身份:run_start 事件记录触发用户(若已注入 runs.triggered_by_user)
+            run = self._run_repo.get_run(run_id)
+            triggered_by = dict(run).get("triggered_by_user") if run else None
+            start_payload: dict[str, Any] = {"task": task}
+            if triggered_by:
+                start_payload["triggered_by_user"] = triggered_by
+            eid = self._audit_repo.add_event(run_id, "run_start", "system", start_payload)
             self._bus.publish(
                 run_id,
-                {"id": eid, "event_type": "run_start", "run_id": run_id, "payload": {"task": task}},
+                {"id": eid, "event_type": "run_start", "run_id": run_id, "payload": start_payload},
             )
             initial = {
                 "messages": [],

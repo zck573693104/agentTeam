@@ -14,13 +14,21 @@ class RunRepo(BaseSqliteRepo):
     lock 以串行化所有连接访问。
     """
 
-    def create_run(self, team_name: str, task: str) -> str:
+    def create_run(
+        self, team_name: str, task: str, triggered_by_user: str | None = None
+    ) -> str:
+        """创建 run 记录,返回 run_id。
+
+        triggered_by_user(P-B2 WAT 双身份):触发该 run 的用户 username,
+        用于审计归属:run 执行时 actor 是 agent,但触发者是人类用户。
+        None 表示未启用鉴权或未注入 user(向后兼容)。
+        """
         run_id = uuid.uuid4().hex
         now = _now()
         self._execute(
-            "INSERT INTO runs (id, team_name, task, status, created_at, updated_at) "
-            "VALUES (?, ?, ?, 'pending', ?, ?)",
-            (run_id, team_name, task, now, now),
+            "INSERT INTO runs (id, team_name, task, status, created_at, updated_at, triggered_by_user) "
+            "VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+            (run_id, team_name, task, now, now, triggered_by_user),
         )
         return run_id
 
@@ -99,6 +107,16 @@ class RunRepo(BaseSqliteRepo):
         """SELECT SUM(total_tokens) — 用于 dashboard。"""
         row = self._fetchone("SELECT COALESCE(SUM(total_tokens), 0) AS s FROM runs")
         return row["s"] if row else 0
+
+    def sum_tokens_by_team(self) -> dict[str, int]:
+        """P-B8: SELECT team_name, SUM(total_tokens) GROUP BY team_name —
+        用于 dashboard 多维统计(识别 top 消费团队)。
+        """
+        rows = self._fetchall(
+            "SELECT team_name, COALESCE(SUM(total_tokens), 0) AS tokens "
+            "FROM runs GROUP BY team_name ORDER BY tokens DESC"
+        )
+        return {row["team_name"]: row["tokens"] for row in rows}
 
     def try_claim(
         self, run_id: str, expected_status: str, new_status: str

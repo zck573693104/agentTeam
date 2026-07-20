@@ -134,7 +134,8 @@ def test_recompile_and_resume_constructs_graph_and_resumes(tmp_path):
     assert run_manager._graphs[run_id] is fake_graph
     assert run_manager._configs[run_id] == {"configurable": {"thread_id": run_id}}
     # resume_run 被调用,参数透传
-    mock_resume.assert_called_once_with(run_id, True, "ok")
+    # P-B2 WAT 双身份:recompile_and_resume 默认 decider='api-user' 透传给 resume_run
+    mock_resume.assert_called_once_with(run_id, True, "ok", decider="api-user")
     conn.close()
 
 

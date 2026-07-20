@@ -71,6 +71,11 @@ def _mcp_server_from_dict(d: dict) -> MCPServer:
         env=d.get("env", {}),
         transport=d.get("transport", "stdio"),
         url=d.get("url"),
+        namespace=d.get("namespace"),
+        # P-B6: MCP 鉴权字段(向后兼容:旧 schema 无这些字段时取默认值)
+        auth_type=d.get("auth_type", "none"),
+        auth_credential=d.get("auth_credential"),
+        auth_header_name=d.get("auth_header_name", "Authorization"),
     )
 
 

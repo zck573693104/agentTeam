@@ -34,4 +34,41 @@ def dashboard_router(run_repo: RunRepo, audit_repo: AuditRepo) -> APIRouter:
             "recent_runs": recent,
         }
 
+    @router.get("/dashboard/multi_dim")
+    def get_dashboard_multi_dim():
+        """P-B8 多维统计端点(对标阿里云 AgentTeams "运维仪表盘多维分析")。
+
+        返回:
+        - by_status: 按 run status 分组计数
+        - by_team: 按 team_name 分组计数
+        - tokens_by_team: 按 team_name 汇总 token 用量(识别 top 消费团队)
+        - by_chain: 按 run_events.chain 分组计数(call/tool/decision 三链分布)
+        - top_tools: 工具调用频次 top 10(从 run_events.payload 提取)
+        - total_tokens: 全局 token 总用量
+        - total_runs: 全局 run 总数
+        """
+        by_status = run_repo.aggregate_by_status()
+        by_team = run_repo.aggregate_by_team()
+        total_tokens = run_repo.sum_total_tokens()
+        total_runs = sum(by_status.values())
+
+        # P-B8: 按 team 汇总 token 用量(识别 top 消费团队)
+        tokens_by_team = run_repo.sum_tokens_by_team()
+
+        # P-B8: 按 chain 分组计数(三链分布,识别工具密集/决策密集型 run)
+        by_chain = audit_repo.aggregate_by_chain()
+
+        # P-B8: 工具调用频次 top 10(从 tool_call 事件的 payload.tools 提取)
+        top_tools = audit_repo.aggregate_top_tools(limit=10)
+
+        return {
+            "total_runs": total_runs,
+            "total_tokens": total_tokens,
+            "by_status": by_status,
+            "by_team": by_team,
+            "tokens_by_team": tokens_by_team,
+            "by_chain": by_chain,
+            "top_tools": top_tools,
+        }
+
     return router

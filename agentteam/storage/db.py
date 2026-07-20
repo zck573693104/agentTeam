@@ -143,6 +143,138 @@ CREATE TABLE IF NOT EXISTS quotas (
 );
 """
 
+# v6: 用户/角色/权限(P-B1 对标阿里云 AgentTeams "访问控制:L1/L2/L3 + TeamAdmin"):
+# - users: 人类用户,API Key 与 user 绑定,实现 WAT 双身份
+# - roles: 角色定义(admin/manager/team_admin/user)
+# - user_roles: 用户-角色多对多(+ team_name 上下文,team_admin 仅对指定 team 生效)
+# - permissions: 角色权限矩阵(action 如 team:create/run:approve/quota:set)
+# 同时为 runs 加 triggered_by_user 列(P-B2 WAT 双身份)
+_MIGRATION_V6 = """
+CREATE TABLE IF NOT EXISTS users (
+    id           TEXT PRIMARY KEY,
+    username     TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL DEFAULT '',
+    email        TEXT,
+    api_key_hash TEXT NOT NULL UNIQUE,
+    status       TEXT NOT NULL DEFAULT 'active',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE INDEX IF NOT EXISTS idx_users_api_key_hash ON users(api_key_hash);
+CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+
+CREATE TABLE IF NOT EXISTS roles (
+    name        TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS user_roles (
+    user_id    TEXT NOT NULL,
+    role_name  TEXT NOT NULL,
+    team_name  TEXT,
+    PRIMARY KEY (user_id, role_name, team_name),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_roles_team ON user_roles(team_name);
+
+CREATE TABLE IF NOT EXISTS permissions (
+    role_name TEXT NOT NULL,
+    action    TEXT NOT NULL,
+    PRIMARY KEY (role_name, action),
+    FOREIGN KEY (role_name) REFERENCES roles(name)
+);
+"""
+
+# v6 ALTER: runs 加 triggered_by_user 列(P-B2 WAT 双身份)
+# SQLite 不支持 ADD COLUMN IF NOT EXISTS,需 try/except
+_MIGRATION_V6_ALTER_RUNS = (
+    "ALTER TABLE runs ADD COLUMN triggered_by_user TEXT"
+)
+_MIGRATION_V6_ALTER_RUN_EVENTS = (
+    "ALTER TABLE run_events ADD COLUMN trace_id TEXT"
+)
+_MIGRATION_V6_ALTER_RUN_EVENTS_SPAN = (
+    "ALTER TABLE run_events ADD COLUMN parent_span_id TEXT"
+)
+_MIGRATION_V6_ALTER_RUN_EVENTS_CHAIN = (
+    "ALTER TABLE run_events ADD COLUMN chain TEXT"
+)
+
+
+def _migration_v6_alters(conn: sqlite3.Connection) -> None:
+    """v6 ALTER 兼容旧库:列已存在时静默跳过。"""
+    for alter_sql in (
+        _MIGRATION_V6_ALTER_RUNS,
+        _MIGRATION_V6_ALTER_RUN_EVENTS,
+        _MIGRATION_V6_ALTER_RUN_EVENTS_SPAN,
+        _MIGRATION_V6_ALTER_RUN_EVENTS_CHAIN,
+    ):
+        try:
+            conn.execute(alter_sql)
+        except sqlite3.OperationalError:
+            pass
+
+
+# v7: Skill 供应链(P-B5):版本/可见性/per-consumer ACL
+# - skills 表:skill 元数据(可见性/版本/状态/所有者)
+# - skill_acls:per-consumer 调用授权(team_name → skill_name)
+# - mcp_servers 加 auth_type/auth_credential 列(P-B6 MCP 鉴权)
+_MIGRATION_V7 = """
+CREATE TABLE IF NOT EXISTS skills (
+    name        TEXT PRIMARY KEY,
+    version     INTEGER NOT NULL DEFAULT 1,
+    status      TEXT NOT NULL DEFAULT 'published',
+    visibility  TEXT NOT NULL DEFAULT 'public',
+    owner_team  TEXT,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status);
+CREATE INDEX IF NOT EXISTS idx_skills_visibility ON skills(visibility);
+CREATE INDEX IF NOT EXISTS idx_skills_owner ON skills(owner_team);
+
+CREATE TABLE IF NOT EXISTS skill_acls (
+    skill_name TEXT NOT NULL,
+    team_name  TEXT NOT NULL,
+    granted_at TEXT NOT NULL,
+    PRIMARY KEY (skill_name, team_name)
+);
+CREATE INDEX IF NOT EXISTS idx_skill_acls_skill ON skill_acls(skill_name);
+CREATE INDEX IF NOT EXISTS idx_skill_acls_team ON skill_acls(team_name);
+
+CREATE TABLE IF NOT EXISTS pep_policies (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    effect      TEXT NOT NULL DEFAULT 'deny',
+    principal   TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    resource    TEXT NOT NULL,
+    condition   TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pep_principal ON pep_policies(principal);
+CREATE INDEX IF NOT EXISTS idx_pep_action ON pep_policies(action);
+"""
+
+# v7 ALTER: quotas 加 warn_threshold 列(P-B7 配额告警阈值)
+_MIGRATION_V7_ALTER_QUOTA = (
+    "ALTER TABLE quotas ADD COLUMN warn_threshold INTEGER NOT NULL DEFAULT 0"
+)
+
+
+def _migration_v7_alters(conn: sqlite3.Connection) -> None:
+    """v7 ALTER 兼容旧库:列已存在时静默跳过。"""
+    try:
+        conn.execute(_MIGRATION_V7_ALTER_QUOTA)
+    except sqlite3.OperationalError:
+        pass
+
+
 # 迁移列表:(version, description, sql_or_callable)
 # - sql 为 str:直接 executescript
 # - sql 为 callable:调用以 conn 为参数,自行处理(用于 ALTER 等 idempotent 不可表达的场景)
@@ -161,6 +293,10 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (3, "library_agents.version column", _migration_v3),
     (4, "performance indexes (WAL/aggregate)", _MIGRATION_V4),
     (5, "admin_events + quotas tables (P-A3/A4 governance)", _MIGRATION_V5),
+    (6, "users/roles/permissions + runs.triggered_by_user + run_events.trace_id (P-B1/B2/B3)", _MIGRATION_V6),
+    (7, "skill_acls + pep_policies + quotas.warn_threshold (P-B4/B5/B7)", _MIGRATION_V7),
+    (8, "ALTER runs/run_events/quotas for v6/v7 columns", _migration_v6_alters),
+    (9, "ALTER quotas.warn_threshold for v7", _migration_v7_alters),
 ]
 
 

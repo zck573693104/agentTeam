@@ -255,7 +255,7 @@ def test_team_compiler_compile_worker_loads_agent_skills(tmp_path):
     captured_skills = {}
 
     def fake_make_worker_node(agent, llm, tools, trace_writer, audit_repo,
-                              run_manager=None, skills=None):
+                              run_manager=None, skills=None, pep_repo=None):
         captured_skills["skills"] = skills
         return lambda state, config=None: {"messages": []}
 
@@ -283,7 +283,7 @@ def test_team_compiler_compile_worker_no_skills_passes_empty_dict(tmp_path):
     captured_skills = {}
 
     def fake_make_worker_node(agent, llm, tools, trace_writer, audit_repo,
-                              run_manager=None, skills=None):
+                              run_manager=None, skills=None, pep_repo=None):
         captured_skills["skills"] = skills
         return lambda state, config=None: {"messages": []}
 

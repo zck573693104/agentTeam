@@ -298,14 +298,20 @@ def make_tool_step(
     approval_policy: ApprovalPolicy | None = None,
     trace_writer: TraceWriter | None = None,
     audit_repo=None,
+    pep_repo=None,
 ):
     """创建 tool_step 节点：检查工具级审批 → interrupt → 执行工具 → 回灌结果。
 
     审批按批次：批次中任一工具匹配 targets 则触发一次 interrupt。
     所有副作用（DB 写、trace、工具执行）放在 interrupt() 之后。
+
+    P-B4 PEP 指令级拦截:工具调用前先评估策略,
+    deny 的工具直接返回拒绝消息(不进入审批流程,不执行)。
+    pep_repo=None 时跳过 PEP(向后兼容)。
     """
     from langgraph.types import interrupt
     from agentteam.runtime.approval import _should_approve
+    from agentteam.runtime.pep import check_pep, PEPDeniedError
 
     tool_map = {t.name: t for t in tools}
 
@@ -314,6 +320,44 @@ def make_tool_step(
         tool_calls = state.get("tool_calls", [])
         iteration = state.get("iteration", 0)
         new_messages = []
+
+        # P-B4 PEP 指令级拦截:策略 deny 的工具直接拒绝,不进入审批/执行
+        # 逐个评估,deny 的工具回灌拒绝消息;allow 的工具继续走原流程
+        if pep_repo is not None and tool_calls:
+            allowed_calls: list[dict] = []
+            for tc in tool_calls:
+                try:
+                    check_pep(
+                        pep_repo,
+                        principal=agent.name,
+                        action="tool:invoke",
+                        resource=tc["name"],
+                    )
+                    allowed_calls.append(tc)
+                except PEPDeniedError as e:
+                    if trace_writer is not None:
+                        trace_writer.emit(
+                            run_id, "tool_call", agent.name,
+                            {
+                                "tools": [tc["name"]],
+                                "pep": "denied",
+                                "reason": e.reason,
+                            },
+                        )
+                    new_messages.append(
+                        ToolMessage(
+                            content=f"工具 {tc['name']} 被 PEP 策略拒绝: {e.reason}",
+                            tool_call_id=tc["id"],
+                        )
+                    )
+            tool_calls = allowed_calls
+            if not tool_calls:
+                # 全部被 PEP 拒绝,直接返回
+                return {
+                    "react_messages": new_messages,
+                    "tool_calls": [],
+                    "iteration": iteration + 1,
+                }
 
         # 检查是否需要工具级审批
         needs_approval = (
@@ -399,12 +443,14 @@ def make_worker_subgraph(
     audit_repo=None,
     run_manager=None,
     skills: dict[str, str] | None = None,
+    pep_repo=None,
 ):
     """编译 Worker ReAct 子图：init_worker → agent_step → tool_step → 循环 → finalize。
 
     返回 compiled subgraph，可直接作为父图的节点。
     新增 run_manager 参数:透传给 make_agent_step,使 worker 能检查取消信号。
     新增 skills 参数(SP7a):透传给 make_init_worker,注入到 react_messages。
+    新增 pep_repo 参数(P-B4):透传给 make_tool_step,实现指令级 PEP 拦截。
     """
     from langgraph.graph import END, START, StateGraph
     from agentteam.runtime.state import WorkerState
@@ -416,7 +462,7 @@ def make_worker_subgraph(
     sg.add_node("agent_step", make_agent_step(agent, llm, tools, run_manager=run_manager))
     sg.add_node(
         "tool_step",
-        make_tool_step(agent, tools, approval_policy, trace_writer, audit_repo),
+        make_tool_step(agent, tools, approval_policy, trace_writer, audit_repo, pep_repo=pep_repo),
     )
     sg.add_node("finalize", make_finalize(agent, trace_writer))
 
@@ -456,6 +502,7 @@ def make_worker_node(
     audit_repo=None,
     run_manager=None,
     skills: dict[str, str] | None = None,
+    pep_repo=None,
 ):
     """返回可调用节点函数，内部使用子图。
 
@@ -468,10 +515,11 @@ def make_worker_node(
     (有 reducer) + dag 模式 completed_steps + 审批信号,其余字段由父图自管。
     新增 run_manager 参数:透传给 make_worker_subgraph,使 worker 能检查取消信号。
     新增 skills 参数(SP7a):透传给 make_worker_subgraph,注入到 react_messages。
+    新增 pep_repo 参数(P-B4):透传给 make_worker_subgraph,实现指令级 PEP 拦截。
     """
     subgraph = make_worker_subgraph(
         agent, llm, tools, trace_writer, audit_repo,
-        run_manager=run_manager, skills=skills,
+        run_manager=run_manager, skills=skills, pep_repo=pep_repo,
     )
 
     # 共享累加器字段：子图不需要读取它们（只用 react_messages 内部通信），

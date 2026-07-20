@@ -6,6 +6,11 @@
   统计当前 period 窗口内已完成 run 的 total_tokens 总和,与 limit 比较
 - 超额时 RunManager.start_run 前拒绝,返回 429
 - 未配置 quota 的 team 默认放行(token_limit=0 视为不限)
+
+P-B7 多级限流(对标阿里云 AgentTeams "配额告警阈值"):
+- warn_threshold: 告警阈值(0=不告警),当 used >= warn_threshold 时返回 status='warned'
+- 三级状态:ok(正常) / warned(已告警但可继续) / blocked(已超额,拒绝)
+- 前端可基于 status 显示黄/红警示条,运维可基于 warned 提前介入
 """
 from __future__ import annotations
 
@@ -30,16 +35,23 @@ class QuotaRepo(BaseSqliteRepo):
         token_limit: int,
         period_seconds: int = 86400,
         description: str = "",
+        warn_threshold: int = 0,
     ) -> None:
-        """INSERT OR UPDATE 配额配置。"""
+        """INSERT OR UPDATE 配额配置。
+
+        P-B7: warn_threshold 告警阈值(0=不告警)。
+        当 used >= warn_threshold 但 < token_limit 时返回 status='warned'。
+        通常 warn_threshold < token_limit,若设为 0 则不告警。
+        """
         now = _now()
         self._execute(
-            "INSERT INTO quotas (team_name, token_limit, period_seconds, created_at, updated_at, description) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO quotas (team_name, token_limit, period_seconds, created_at, updated_at, description, warn_threshold) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(team_name) DO UPDATE SET "
             "token_limit=excluded.token_limit, period_seconds=excluded.period_seconds, "
-            "updated_at=excluded.updated_at, description=excluded.description",
-            (team_name, token_limit, period_seconds, now, now, description),
+            "updated_at=excluded.updated_at, description=excluded.description, "
+            "warn_threshold=excluded.warn_threshold",
+            (team_name, token_limit, period_seconds, now, now, description, warn_threshold),
         )
 
     def get(self, team_name: str) -> dict | None:
@@ -61,17 +73,20 @@ class QuotaRepo(BaseSqliteRepo):
         """校验 team 当前是否可启动新 run。
 
         返回 dict:
-        - allowed: bool 是否允许
+        - allowed: bool 是否允许(used < token_limit)
         - used: int 当前周期已用 token
         - limit: int 配额上限(0=不限)
         - period: int 周期秒数
         - team_name: str
+        - warn_threshold: int 告警阈值(0=不告警)
+        - status: str 'ok'(正常) / 'warned'(已告警) / 'blocked'(已超额)
 
         逻辑:
-        - team 无配额配置 → allowed=True, limit=0(视为不限)
-        - token_limit=0 → allowed=True(显式不限)
-        - used >= limit → allowed=False
-        - 否则 allowed=True
+        - team 无配额配置 → allowed=True, status='ok', limit=0(视为不限)
+        - token_limit=0 → allowed=True, status='ok'(显式不限)
+        - used >= limit → allowed=False, status='blocked'
+        - warn_threshold > 0 且 used >= warn_threshold → allowed=True, status='warned'
+        - 否则 allowed=True, status='ok'
         """
         quota = self.get(team_name)
         if quota is None:
@@ -81,9 +96,13 @@ class QuotaRepo(BaseSqliteRepo):
                 "limit": 0,
                 "period": 0,
                 "team_name": team_name,
+                "warn_threshold": 0,
+                "status": "ok",
             }
         token_limit = int(quota["token_limit"])
         period = int(quota["period_seconds"])
+        # P-B7: warn_threshold 兼容旧库(列可能不存在 → KeyError → 默认 0)
+        warn_threshold = int(quota.get("warn_threshold", 0)) if "warn_threshold" in quota.keys() else 0
         if token_limit <= 0:
             return {
                 "allowed": True,
@@ -91,6 +110,8 @@ class QuotaRepo(BaseSqliteRepo):
                 "limit": 0,
                 "period": period,
                 "team_name": team_name,
+                "warn_threshold": warn_threshold,
+                "status": "ok",
             }
         # 计算 period 窗口内已用 token:ended_at 在窗口内的 run 求和
         # 用 ISO8601 字符串比较(SQLite TEXT 列),需保证 runs.created_at/ended_at 都是 ISO8601
@@ -104,12 +125,21 @@ class QuotaRepo(BaseSqliteRepo):
         )
         used = int(row["used"]) if row else 0
         allowed = used < token_limit
+        # P-B7: 三级状态判定
+        if not allowed:
+            status = "blocked"
+        elif warn_threshold > 0 and used >= warn_threshold:
+            status = "warned"
+        else:
+            status = "ok"
         return {
             "allowed": allowed,
             "used": used,
             "limit": token_limit,
             "period": period,
             "team_name": team_name,
+            "warn_threshold": warn_threshold,
+            "status": status,
         }
 
 
@@ -121,3 +151,4 @@ def _iso_offset_seconds(offset_seconds: int) -> str:
     from datetime import datetime, timedelta, timezone
     dt = datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
     return dt.isoformat()
+

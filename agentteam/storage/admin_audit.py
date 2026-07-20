@@ -49,8 +49,16 @@ class AdminAuditRepo(BaseSqliteRepo):
         offset: int = 0,
         resource: str | None = None,
         actor: str | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        event_type: str | None = None,
     ) -> list:
-        """按时间倒序查询管理事件,支持 resource/actor 过滤。"""
+        """按时间倒序查询管理事件,支持 resource/actor/time_range/event_type 过滤。
+
+        P-B8: 新增 start_time/end_time(ISO8601 字符串)实现时间范围检索,
+        对标阿里云 AgentTeams "审计日志时间范围查询"。
+        新增 event_type 过滤,支持按事件类型(如 team_created/quota_set)精确查询。
+        """
         sql = "SELECT * FROM admin_events"
         conditions: list[str] = []
         params: list[Any] = []
@@ -60,6 +68,15 @@ class AdminAuditRepo(BaseSqliteRepo):
         if actor is not None:
             conditions.append("actor = ?")
             params.append(actor)
+        if event_type is not None:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+        if start_time is not None:
+            conditions.append("timestamp >= ?")
+            params.append(start_time)
+        if end_time is not None:
+            conditions.append("timestamp <= ?")
+            params.append(end_time)
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
@@ -70,8 +87,11 @@ class AdminAuditRepo(BaseSqliteRepo):
         self,
         resource: str | None = None,
         actor: str | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        event_type: str | None = None,
     ) -> int:
-        """统计管理事件总数(分页用)。"""
+        """统计管理事件总数(分页用),支持与 list_events 相同的过滤条件。"""
         sql = "SELECT COUNT(*) AS n FROM admin_events"
         conditions: list[str] = []
         params: list[Any] = []
@@ -81,6 +101,15 @@ class AdminAuditRepo(BaseSqliteRepo):
         if actor is not None:
             conditions.append("actor = ?")
             params.append(actor)
+        if event_type is not None:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+        if start_time is not None:
+            conditions.append("timestamp >= ?")
+            params.append(start_time)
+        if end_time is not None:
+            conditions.append("timestamp <= ?")
+            params.append(end_time)
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         row = self._fetchone(sql, tuple(params))

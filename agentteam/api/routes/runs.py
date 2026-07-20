@@ -80,15 +80,21 @@ def runs_router(
     skill_loader=None,
     quota_repo: QuotaRepo | None = None,
     admin_audit_repo: AdminAuditRepo | None = None,
+    pep_repo=None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/runs", tags=["runs"])
     lib = agent_library or AgentLibrary()
 
     @router.post("")
-    def create_run(req: CreateRunRequest):
+    def create_run(req: CreateRunRequest, request: Request):
         team = team_store.get(req.team_name)
         if team is None:
             raise HTTPException(status_code=404, detail=f"Team '{req.team_name}' not found")
+
+        # P-B2 WAT 双身份:从 request.state.user 提取触发用户(对标阿里云 AgentTeams
+        # "WAT 双身份机制确保操作可追溯")。未启用鉴权时 user 为 None,向后兼容。
+        user = getattr(request.state, "user", None)
+        triggered_by_user = user["username"] if user else None
 
         # P-A4 Token 配额校验(对标阿里云 AgentTeams "成本可控"):
         # 启动 run 前检查当前周期已用 token,超额返回 429。
@@ -99,6 +105,7 @@ def runs_router(
                 if admin_audit_repo is not None:
                     admin_audit_repo.add_event(
                         "run_rejected_by_quota", "team", team.name,
+                        actor=triggered_by_user or "api-user",
                         payload={
                             "used": check["used"],
                             "limit": check["limit"],
@@ -115,7 +122,15 @@ def runs_router(
                     ),
                 )
 
-        run_id = run_repo.create_run(team.name, req.task)
+        run_id = run_repo.create_run(team.name, req.task, triggered_by_user=triggered_by_user)
+
+        # P-B2 审计:记录"用户 X 触发了 run Y on team Z"
+        if admin_audit_repo is not None and triggered_by_user:
+            admin_audit_repo.add_event(
+                "run_triggered", "run", run_id,
+                actor=triggered_by_user,
+                payload={"team_name": team.name, "task": req.task[:200]},
+            )
 
         trace_writer = BroadcastTraceWriter(audit_repo, event_bus)
         import agentteam.runtime.graph as _graph  # 局部导入,避免 api→runtime 顶层循环
@@ -132,6 +147,8 @@ def runs_router(
                 checkpointer=checkpointer,
                 trace_writer=trace_writer,
                 audit_repo=audit_repo,
+                triggered_by_user=triggered_by_user,
+                pep_repo=pep_repo,
             )
         except Exception as e:
             run_repo.end_run(run_id, "failed")
@@ -173,11 +190,24 @@ def runs_router(
         run_id: str,
         limit: int | None = Query(default=None, ge=1, le=5000, description="事件数量上限"),
         offset: int = Query(default=0, ge=0, description="偏移量"),
+        chain: str | None = Query(
+            default=None,
+            description="按链类型过滤:call(调用链)/tool(工具链)/decision(决策链)",
+        ),
     ):
         run = run_repo.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
-        rows = audit_repo.list_events(run_id, limit=limit, offset=offset)
+        # P-B3:支持按 chain 过滤(对标阿里云 AgentTeams 三链检索)
+        if chain is not None:
+            if chain not in ("call", "tool", "decision"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid chain '{chain}', must be one of: call/tool/decision",
+                )
+            rows = audit_repo.list_events_by_chain(run_id, chain)
+        else:
+            rows = audit_repo.list_events(run_id, limit=limit, offset=offset)
         return [dict(r) for r in rows]
 
     @router.get("/{run_id}/approvals")
@@ -285,10 +315,14 @@ def runs_router(
         return EventSourceResponse(event_generator())
 
     @router.post("/{run_id}/approve")
-    def approve_run(run_id: str, req: ApproveRequest):
+    def approve_run(run_id: str, req: ApproveRequest, request: Request):
         run = run_repo.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+        # P-B2 WAT 双身份:审批决策者也记入 audit
+        user = getattr(request.state, "user", None)
+        decider = user["username"] if user else "api-user"
 
         # 原子地 claim：仅当状态仍为 interrupted 时才置为 running，
         # 避免两个并发 approve 请求都通过 check-then-act 竞态。
@@ -302,7 +336,7 @@ def runs_router(
         try:
             if run_manager.has_graph(run_id):
                 # fast path: graph 仍在内存(正常流程),直接 resume
-                run_manager.resume_run(run_id, req.approved, req.reason)
+                run_manager.resume_run(run_id, req.approved, req.reason, decider=decider)
             else:
                 # lazy recompile (P0): 服务重启后 _graphs/_configs 丢失,
                 # 从 team_store 取 Team 重新 compile,再 resume。
@@ -319,7 +353,7 @@ def runs_router(
                         model_provider, tool_registry, lib, team_store,
                         skill_loader=skill_loader,
                     ),
-                    approved=req.approved, reason=req.reason,
+                    approved=req.approved, reason=req.reason, decider=decider,
                 )
         except Exception as e:
             # BUG-10 修复(沿用):catch Exception 确保任何 resume/recompile 异常

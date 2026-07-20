@@ -20,11 +20,13 @@ from agentteam.api.routes.teams import teams_router
 from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
 from agentteam.api.auth import setup_auth
+from agentteam.api.deps import set_admin_audit_repo, set_quota_repo, set_user_repo
 from agentteam.config import get_settings
 from agentteam.domain.library import AgentLibrary
 from agentteam.logging_config import get_logger, init_logging
 from agentteam.models.provider import ModelProvider, ModelRef
 from agentteam.runtime.evolution import EvolutionEngine
+from agentteam.runtime.pep import PEPRepo
 from agentteam.runtime.skills import SkillLoader
 from agentteam.storage.admin_audit import AdminAuditRepo
 from agentteam.storage.audit import AuditRepo
@@ -33,7 +35,9 @@ from agentteam.storage.evolution import EvolutionRepo
 from agentteam.storage.library import LibraryRepo
 from agentteam.storage.quotas import QuotaRepo
 from agentteam.storage.runs import RunRepo
+from agentteam.storage.skills_meta import SkillMetaRepo
 from agentteam.storage.teams import TeamRepo
+from agentteam.storage.users import UserRepo
 from agentteam.tools.registry import ToolRegistry
 
 logger = get_logger("api.server")
@@ -80,12 +84,6 @@ def create_app(
 
     app = FastAPI(title="AgentTeam", lifespan=lifespan)
 
-    # API Key 鉴权中间件(P-A2 对标阿里云 AgentTeams "访问控制"):
-    # auth_enabled=true 时所有 /api/* 请求必须带 X-API-Key header 匹配合法 key。
-    # 默认关闭(开发态零配置),生产部署通过 AGENTTEAM_AUTH_ENABLED=true 启用。
-    if setup_auth(app):
-        logger.info("API Key auth enabled (auth_enabled=true)")
-
     # 共享锁：SqliteSaver / RunRepo / AuditRepo 共用同一 sqlite3.Connection，
     # 必须用同一把锁串行化所有连接访问，否则多线程下会触发
     # sqlite3.InterfaceError: bad parameter or other API misuse。
@@ -96,8 +94,27 @@ def create_app(
     library_repo = LibraryRepo(conn, lock=conn_lock)
     admin_audit_repo = AdminAuditRepo(conn, lock=conn_lock)
     quota_repo = QuotaRepo(conn, lock=conn_lock)
+    user_repo = UserRepo(conn, lock=conn_lock)
+    pep_repo = PEPRepo(conn, lock=conn_lock)
+    skill_meta_repo = SkillMetaRepo(conn, lock=conn_lock)
     team_store = TeamStore(repo=team_repo)
     event_bus = EventBus()
+
+    # P-B1: 初始化默认角色与权限矩阵(admin/manager/team_admin/user)
+    # 幂等:重复启动无副作用
+    user_repo.ensure_default_roles()
+
+    # P-B1: 把共享 repo 注入全局 deps 容器,供 require_permission 装饰器访问
+    # (装饰器无法通过 FastAPI Depends 获取 repo,只能通过模块级 holder)
+    set_user_repo(user_repo)
+    set_quota_repo(quota_repo)
+    set_admin_audit_repo(admin_audit_repo)
+
+    # API Key 鉴权中间件(P-A2 对标阿里云 AgentTeams "访问控制"):
+    # 优先走 RBAC(users 表 + 角色权限矩阵),无 user_repo 时回退 legacy 单一 key 列表。
+    # auth_enabled=false 时完全不安装中间件(开发态零配置)。
+    if setup_auth(app, user_repo=user_repo):
+        logger.info("RBAC auth enabled (auth_enabled=true, user_repo=active)")
 
     saver = SqliteSaver(conn)
     saver.lock = conn_lock  # 让 SqliteSaver 也用同一把锁
@@ -148,11 +165,15 @@ def create_app(
             run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,
             checkpointer=saver, agent_library=lib, skill_loader=skill_loader,
             quota_repo=quota_repo, admin_audit_repo=admin_audit_repo,
+            pep_repo=pep_repo,
         )
     )
     app.include_router(dashboard_router(run_repo, audit_repo))
     app.include_router(library_router(lib, admin_audit_repo))
-    app.include_router(admin_router(team_store, lib, admin_audit_repo, quota_repo))
+    app.include_router(admin_router(
+        team_store, lib, admin_audit_repo, quota_repo,
+        pep_repo=pep_repo, skill_meta_repo=skill_meta_repo,
+    ))
     app.include_router(skills_router(skill_loader))
     app.include_router(evolution_router(evolution_repo, lib, admin_audit_repo))
 

@@ -442,9 +442,13 @@ def _compile_worker_via_spec(compiler, agent, default_model, checkpointer,
     """worker 编译入口(适配 RoleSpec.compile_fn 签名)。
 
     忽略 checkpointer/depth/path/visited_team_names(worker 是叶子节点,
-    不递归,不需要这些参数)。kwargs 兼容 P-A5 新增的 team_name/webhook_url。
+    不递归,不需要这些参数)。kwargs 兼容 P-A5 新增的 team_name/webhook_url,
+    以及 P-B4 新增的 pep_repo(透传给 tool_step 实现指令级拦截)。
     """
-    return compiler._compile_worker(agent, default_model, trace_writer, audit_repo)
+    return compiler._compile_worker(
+        agent, default_model, trace_writer, audit_repo,
+        pep_repo=kwargs.get("pep_repo"),
+    )
 
 
 def _compile_supervisor_via_spec(compiler, agent, default_model, checkpointer,
@@ -630,6 +634,8 @@ class TeamCompiler:
         checkpointer=None,
         trace_writer: TraceWriter | None = None,
         audit_repo=None,
+        triggered_by_user: str | None = None,
+        pep_repo=None,
     ):
         # 计算缓存键
         checkpointer_id = id(checkpointer) if checkpointer is not None else None
@@ -649,12 +655,16 @@ class TeamCompiler:
         # visited_team_names 跟踪已被引用的 Team.name（唯一标识），
         # 用于检测循环引用。root Team 自身先入集合，确保自引用 A→A 被识别。
         # P-A5: 透传 team.webhook_url 给 approval gate 用于 webhook 通知
+        # P-B2: triggered_by_user 透传给 trace,用于 WAT 双身份审计
+        # P-B4: pep_repo 透传给 worker tool_step,实现指令级拦截
         compiled = self._compile_agent(
             team.root, team.default_model, checkpointer,
             trace_writer, audit_repo,
             depth=0, path=f"team:{team.name}",
             visited_team_names={team.name},
             team_name=team.name, webhook_url=team.webhook_url,
+            triggered_by_user=triggered_by_user,
+            pep_repo=pep_repo,
         )
         self._compile_cache.put(cache_key, compiled)
         return compiled
@@ -665,6 +675,8 @@ class TeamCompiler:
         visited_team_names: set[str] | None = None,
         team_name: str | None = None,
         webhook_url: str | None = None,
+        triggered_by_user: str | None = None,
+        pep_repo=None,
     ):
         # 1. 解析 ref（深拷贝库定义，保留覆盖）
         agent = self._lib.resolve(agent)
@@ -681,6 +693,8 @@ class TeamCompiler:
             self, agent, default_model, checkpointer, trace_writer, audit_repo,
             depth, path, visited_team_names or set(),
             team_name=team_name, webhook_url=webhook_url,
+            triggered_by_user=triggered_by_user,
+            pep_repo=pep_repo,
         )
 
     def _validate(self, agent: Agent, depth: int, path: str) -> None:
@@ -851,12 +865,14 @@ class TeamCompiler:
 
     def _compile_worker(
         self, agent: Agent, default_model, trace_writer, audit_repo,
+        pep_repo=None,
     ):
         """worker 沿用 make_worker_node（内部封装子图并剥离共享累加器字段，
         避免子图 reducer 与父图 reducer 双重累积）。
 
         SP7a:加载 agent.skills(缺失抛 KeyError,编译期 fail-fast)并透传给
         make_worker_node → make_init_worker,注入到 react_messages。
+        P-B4:pep_repo 透传给 make_worker_node → make_tool_step,实现指令级拦截。
         """
         llm = self._mp.get_llm(agent.model or default_model)
         tools = self._tr.get_tools(agent.tools) if agent.tools else []
@@ -865,4 +881,5 @@ class TeamCompiler:
             agent, llm, tools, trace_writer, audit_repo,
             run_manager=self._run_manager,
             skills=skills,
+            pep_repo=pep_repo,
         )
