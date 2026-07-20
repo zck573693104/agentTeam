@@ -28,6 +28,7 @@ _settings = get_settings()
 _MAX_RUN_WORKERS = _settings.max_run_workers
 _MAX_EVOLUTION_WORKERS = _settings.max_evolution_workers
 _INTERRUPTED_TTL_SECONDS = _settings.interrupted_ttl_seconds
+_SWEEP_INTERVAL_SECONDS = _settings.interrupted_sweep_interval_seconds
 
 
 class RunManager:
@@ -72,6 +73,28 @@ class RunManager:
         self._evolution_executor = ThreadPoolExecutor(
             max_workers=max_evolution_workers, thread_name_prefix="agentteam-evo",
         )
+        # 后台定时清理 interrupted run 内存态(P1 资源泄漏修复)。
+        # _sweep_interrupted_runs 原本仅在 shutdown 时调用,正常运行期间
+        # abandoned interrupted run 的 graph/config 永久驻留内存。此处启动
+        # daemon 线程定期清理,interval=0 时禁用(仅 shutdown 清理)。
+        self._sweep_stop = threading.Event()
+        self._sweep_thread: threading.Thread | None = None
+        if _SWEEP_INTERVAL_SECONDS > 0:
+            self._sweep_thread = threading.Thread(
+                target=self._sweep_loop,
+                name="agentteam-sweep",
+                daemon=True,
+            )
+            self._sweep_thread.start()
+
+    def _sweep_loop(self) -> None:
+        """后台定期清理超过 TTL 的 interrupted run 内存态。"""
+        while not self._sweep_stop.wait(_SWEEP_INTERVAL_SECONDS):
+            try:
+                self._sweep_interrupted_runs()
+            except Exception:
+                # 清理失败不应影响主流程,记录日志即可
+                logger.exception("sweep_interrupted_runs failed")
 
     def has_graph(self, run_id: str) -> bool:
         """返回 run_id 是否有内存态 graph。
@@ -227,13 +250,18 @@ class RunManager:
             # try_claim 原子转换:防止 worker 自然完成时 update_status("interrupted"/"completed")被覆盖
             if not self._run_repo.try_claim(run_id, "running", "cancelling"):
                 return False  # 状态已变(worker 已结束或被其他请求取消)
-            event = self._cancel_events.get(run_id)
+            with self._lock:
+                event = self._cancel_events.get(run_id)
             if event is None:
-                # 异常:claim 成功但 event 缺失,回滚状态避免卡在 cancelling
-                self._run_repo.update_status(run_id, "running")
+                # 异常:claim 成功但 event 缺失,回滚状态避免卡在 cancelling。
+                # 用 try_claim 条件回滚:若 worker 已在此期间把 cancelling 推进到终态
+                # (completed/cancelled),则不覆盖(避免 P0-2 竞态重现)。
+                self._run_repo.try_claim(run_id, "cancelling", "running")
                 return False
             event.set()
-            # worker 检测到 event 后抛 RunCancelledError,由 _handle_error 标 cancelled
+            # worker 检测到 event 后抛 RunCancelledError,由 _handle_error 标 cancelled。
+            # 竞态窗口:若 worker 在 set() 前已自然完成(未抛异常),
+            # _handle_invoke_result 的条件更新会失败(非 running),走 _finalize_cancellation 推进到 cancelled。
             return True
 
         # completed / failed / cancelled / pending 等终态或不可取消状态
@@ -299,7 +327,11 @@ class RunManager:
             wait: True=等待正在执行的任务完成(优雅停机);
                   False=立即取消排队中的任务(快速停机)。
         """
-        # 先驱逐 interrupted run 的内存态,避免 shutdown 期间状态不一致
+        # 先停止后台 sweep 线程,避免 shutdown 期间状态不一致
+        self._sweep_stop.set()
+        if self._sweep_thread is not None:
+            self._sweep_thread.join(timeout=5)
+        # 驱逐 interrupted run 的内存态
         self._sweep_interrupted_runs()
         self._run_executor.shutdown(wait=wait, cancel_futures=not wait)
         self._evolution_executor.shutdown(wait=wait, cancel_futures=not wait)
@@ -372,28 +404,65 @@ class RunManager:
             state = graph.get_state(config)
         except Exception:
             logger.exception("get_state failed for run %s, marking interrupted", run_id)
-            self._run_repo.update_status(run_id, "interrupted")
-            self._mark_interrupted(run_id)
-            self._bus.publish(
-                run_id, {"event_type": "run_interrupted", "run_id": run_id}
-            )
+            # 条件更新:仅当仍是 running 时才标 interrupted(避免覆盖 cancel_run 的 cancelling)
+            if self._run_repo.try_claim(run_id, "running", "interrupted"):
+                self._mark_interrupted(run_id)
+                self._bus.publish(
+                    run_id, {"event_type": "run_interrupted", "run_id": run_id}
+                )
+            else:
+                # status 非 running(被 cancel 为 cancelling),worker 已结束不会抛
+                # RunCancelledError,需此处推进到 cancelled
+                self._finalize_cancellation(run_id)
             return
         if state.next:
             # interrupted：保留 graph/config/threads 供 resume 使用，不清理。
             # _mark_interrupted 记录时间戳供 _sweep_interrupted_runs TTL 驱逐。
-            self._run_repo.update_status(run_id, "interrupted")
-            self._mark_interrupted(run_id)
-            self._bus.publish(run_id, {"event_type": "run_interrupted", "run_id": run_id})
+            # 条件更新:仅当仍是 running 时才标 interrupted(避免覆盖 cancel_run 的 cancelling)
+            if self._run_repo.try_claim(run_id, "running", "interrupted"):
+                self._mark_interrupted(run_id)
+                self._bus.publish(run_id, {"event_type": "run_interrupted", "run_id": run_id})
+            else:
+                self._finalize_cancellation(run_id)
         else:
             tokens = state.values.get("total_tokens", 0) if state.values else 0
-            self._run_repo.end_run(run_id, "completed", total_tokens=tokens)
-            eid = self._audit_repo.add_event(run_id, "run_end", "system")
+            # 条件 end_run:仅当仍是 running 时才标 completed(避免覆盖 cancel_run 的 cancelling)
+            if self._run_repo.end_run_if_status(run_id, "running", "completed", tokens):
+                eid = self._audit_repo.add_event(run_id, "run_end", "system")
+                self._bus.publish(
+                    run_id, {"id": eid, "event_type": "run_end", "run_id": run_id}
+                )
+                self._cleanup_run(run_id)
+                # SP7b: completed 后异步触发进化
+                self._trigger_evolution_async(run_id)
+            else:
+                # status 非 running(被 cancel 为 cancelling),推进到 cancelled
+                self._finalize_cancellation(run_id)
+
+    def _finalize_cancellation(self, run_id: str) -> None:
+        """worker 自然完成时发现 status 已是 cancelling(cancel_run 已设 cancel event),
+        帮忙推进到 cancelled。
+
+        竞态场景(P0-2 修复):
+        1. cancel_run try_claim(running→cancelling) 成功 + set cancel event
+        2. worker graph.invoke 在 set 前已自然返回(未检测 event,未抛 RunCancelledError)
+        3. _handle_invoke_result 的条件更新失败(status 非 running)
+        4. 本方法把 cancelling → cancelled,避免 status 卡在 cancelling
+
+        若 status 既非 cancelling 也非 running(已被其他方终结),只 cleanup 内存。
+        """
+        if self._run_repo.end_run_if_status(run_id, "cancelling", "cancelled"):
+            eid = self._audit_repo.add_event(run_id, "run_cancelled", "user")
             self._bus.publish(
-                run_id, {"id": eid, "event_type": "run_end", "run_id": run_id}
+                run_id,
+                {
+                    "id": eid,
+                    "event_type": "run_cancelled",
+                    "run_id": run_id,
+                    "payload": {"reason": "cancelled after natural completion"},
+                },
             )
-            self._cleanup_run(run_id)
-            # SP7b: completed 后异步触发进化
-            self._trigger_evolution_async(run_id)
+        self._cleanup_run(run_id)
 
     def _mark_interrupted(self, run_id: str) -> None:
         """记录 run 进入 interrupted 状态的时间戳(供 TTL 清理)。
@@ -417,11 +486,19 @@ class RunManager:
         - 其他异常: 标 failed + 发 error 事件(程序错误/LLM 异常等)
 
         两种分支都调用 _cleanup_run 释放 graph/config/threads/cancel_event 内存。
+
+        竞态保护(P0-2):用 end_run_if_status 条件更新,避免覆盖 cancel_run 设置的
+        cancelling 状态。RunCancelledError 时期望 status=cancelling;其他异常时期望
+        status=running,若已被 cancel 为 cancelling 则标 cancelled(尊从 cancel 语义)。
         """
         if isinstance(error, RunCancelledError):
             # 用户取消:标 cancelled + 发 run_cancelled 事件
             logger.info("run %s cancelled by user", run_id)
-            self._run_repo.end_run(run_id, "cancelled")
+            # 条件 end_run:期望 cancelling(cancel_run 已转换);失败兜底 running
+            # (cancel event 在 worker 抛异常后才 set 的极少场景)
+            ended = self._run_repo.end_run_if_status(run_id, "cancelling", "cancelled")
+            if not ended:
+                self._run_repo.end_run_if_status(run_id, "running", "cancelled")
             eid = self._audit_repo.add_event(run_id, "run_cancelled", "user")
             self._bus.publish(
                 run_id,
@@ -435,7 +512,10 @@ class RunManager:
         else:
             # 普通异常:沿用 failed 逻辑
             logger.exception("run %s failed", run_id, exc_info=error)
-            self._run_repo.end_run(run_id, "failed")
+            # 条件 end_run:期望 running;若已被 cancel 为 cancelling 则标 cancelled
+            ended = self._run_repo.end_run_if_status(run_id, "running", "failed")
+            if not ended:
+                self._run_repo.end_run_if_status(run_id, "cancelling", "cancelled")
             eid = self._audit_repo.add_event(
                 run_id, "error", "system", {"error": str(error)}
             )

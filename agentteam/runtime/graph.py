@@ -12,6 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from agentteam.domain.agent import Agent, TeamRef
 from agentteam.domain.library import AgentLibrary
 from agentteam.domain.team import Team
+from agentteam.logging_config import get_logger
 from agentteam.models.provider import ModelProvider
 from agentteam.runtime.approval import make_step_gate, make_worker_gate
 from agentteam.runtime.nodes import (
@@ -24,6 +25,8 @@ from agentteam.runtime.skills import SkillLoader
 from agentteam.runtime.state import TeamState, is_rejected
 from agentteam.runtime.trace import TraceWriter
 from agentteam.tools.registry import ToolRegistry
+
+logger = get_logger("runtime.graph")
 
 
 # ---- 安全表达式求值(替代 eval) ----
@@ -171,6 +174,9 @@ def _eval_condition(cond: str, state: dict) -> bool:
     except _SafeEvalError:
         return False
     except Exception:
+        # P2-6:原裸 except 静默吞所有异常,condition 是 LLM 生成内容,
+        # 调试时完全看不到为何 step 被跳过。加日志便于排障。
+        logger.warning("condition eval failed: %r", cond, exc_info=True)
         return False
 
 

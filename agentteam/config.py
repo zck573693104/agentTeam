@@ -86,6 +86,11 @@ class Settings(BaseSettings):
         ge=0,
         description="interrupted run 超过该秒数未被 resume 则驱逐内存态;0 禁用",
     )
+    interrupted_sweep_interval_seconds: int = Field(
+        default=600,
+        ge=0,
+        description="interrupted run 清理任务执行间隔(秒);0 禁用后台定时清理(仅在 shutdown 时清理)",
+    )
 
 
 _settings_instance: Settings | None = None

@@ -6,8 +6,8 @@ import json
 import queue as queue_mod
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from agentteam.api.events import BroadcastTraceWriter, EventBus
@@ -24,13 +24,13 @@ if TYPE_CHECKING:
 
 
 class CreateRunRequest(BaseModel):
-    team_name: str
-    task: str
+    team_name: str = Field(max_length=128, description="团队名")
+    task: str = Field(max_length=16384, description="任务描述(上限 16KB 防止 prompt 滥用)")
 
 
 class ApproveRequest(BaseModel):
     approved: bool
-    reason: str | None = None
+    reason: str | None = Field(default=None, max_length=2048, description="审批理由")
 
 
 def run_to_dict(row) -> dict:
@@ -125,8 +125,11 @@ def runs_router(
         return {"run_id": run_id}
 
     @router.get("")
-    def list_runs():
-        rows = run_repo.list_runs()
+    def list_runs(
+        limit: int | None = Query(default=50, ge=1, le=500, description="每页数量"),
+        offset: int = Query(default=0, ge=0, description="偏移量"),
+    ):
+        rows = run_repo.list_runs(limit=limit, offset=offset)
         return [run_to_dict(r) for r in rows]
 
     @router.get("/{run_id}")
@@ -137,19 +140,27 @@ def runs_router(
         return run_to_dict(run)
 
     @router.get("/{run_id}/trace")
-    def get_trace(run_id: str):
+    def get_trace(
+        run_id: str,
+        limit: int | None = Query(default=None, ge=1, le=5000, description="事件数量上限"),
+        offset: int = Query(default=0, ge=0, description="偏移量"),
+    ):
         run = run_repo.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
-        rows = audit_repo.list_events(run_id)
+        rows = audit_repo.list_events(run_id, limit=limit, offset=offset)
         return [dict(r) for r in rows]
 
     @router.get("/{run_id}/approvals")
-    def list_approvals(run_id: str):
+    def list_approvals(
+        run_id: str,
+        limit: int | None = Query(default=None, ge=1, le=500, description="审批记录数量上限"),
+        offset: int = Query(default=0, ge=0, description="偏移量"),
+    ):
         run = run_repo.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
-        rows = audit_repo.list_approvals(run_id)
+        rows = audit_repo.list_approvals(run_id, limit=limit, offset=offset)
         return [dict(r) for r in rows]
 
     @router.get("/{run_id}/stream")

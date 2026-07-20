@@ -217,8 +217,8 @@ def test_handle_error_with_cancelled_error_marks_cancelled():
 
     rm._handle_error(run_id, RunCancelledError("Run run-cancelled-by-worker cancelled by user"))
 
-    # 标 cancelled(不是 failed)
-    rm._run_repo.end_run.assert_called_once_with(run_id, "cancelled")
+    # 标 cancelled(不是 failed)。P0-2 修复后用条件 end_run_if_status 避免覆盖竞态。
+    rm._run_repo.end_run_if_status.assert_called_once_with(run_id, "cancelling", "cancelled")
     # 发 run_cancelled 事件(actor=user,表示用户触发)
     rm._audit_repo.add_event.assert_called_once_with(run_id, "run_cancelled", "user")
     # publish 到 EventBus
@@ -238,8 +238,8 @@ def test_handle_error_with_other_error_marks_failed():
 
     rm._handle_error(run_id, ValueError("something broke"))
 
-    # 标 failed(不是 cancelled)
-    rm._run_repo.end_run.assert_called_once_with(run_id, "failed")
+    # 标 failed(不是 cancelled)。P0-2 修复后用条件 end_run_if_status 避免覆盖竞态。
+    rm._run_repo.end_run_if_status.assert_called_once_with(run_id, "running", "failed")
     # 发 error 事件(actor=system)
     rm._audit_repo.add_event.assert_called_once_with(
         run_id, "error", "system", {"error": "something broke"}
@@ -272,8 +272,8 @@ def test_run_in_background_catches_runcancellederror_via_baseexception():
     # 直接调用 _run_in_background(不走 start_run 的线程,简化测试)
     rm._run_in_background(run_id, fake_graph, {}, "task")
 
-    # 应标 cancelled(不是 failed,也不是卡 cancelling)
-    rm._run_repo.end_run.assert_called_once_with(run_id, "cancelled")
+    # 应标 cancelled(不是 failed,也不是卡 cancelling)。P0-2 修复后用条件 end_run_if_status。
+    rm._run_repo.end_run_if_status.assert_called_once_with(run_id, "cancelling", "cancelled")
     # add_event 被调用 2 次(run_start + run_cancelled),检查最后一次是 run_cancelled
     rm._audit_repo.add_event.assert_called_with(run_id, "run_cancelled", "user")
     # cleanup 被调用

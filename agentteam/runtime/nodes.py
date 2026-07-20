@@ -9,9 +9,12 @@ from pydantic import BaseModel, Field
 
 from agentteam.domain.agent import Agent
 from agentteam.domain.approval import ApprovalPolicy
+from agentteam.logging_config import get_logger
 from agentteam.runtime.errors import RunCancelledError
 from agentteam.runtime.state import TeamState
 from agentteam.runtime.trace import TraceWriter
+
+logger = get_logger("runtime.nodes")
 
 
 class PlanStep(BaseModel):
@@ -372,6 +375,8 @@ def make_tool_step(
                 try:
                     result = tool.invoke(tc["args"])
                 except Exception as e:
+                    # P2-7:加日志记录工具名与异常,便于排障
+                    logger.exception("tool %s invoke failed", tc["name"])
                     result = f"工具执行出错：{type(e).__name__}: {e}"
             new_messages.append(
                 ToolMessage(content=str(result), tool_call_id=tc["id"])

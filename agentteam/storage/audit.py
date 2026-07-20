@@ -47,11 +47,25 @@ class AuditRepo:
             self._conn.commit()
             return cur.lastrowid  # type: ignore[return-value]
 
-    def list_events(self, run_id: str) -> list[sqlite3.Row]:
+    def list_events(
+        self, run_id: str, limit: int | None = None, offset: int = 0
+    ) -> list[sqlite3.Row]:
+        """按 id 升序返回 run 的事件,支持分页。
+
+        limit=None 不分页(向后兼容,但长 run 建议传 limit 避免全量加载);
+        limit=N 只返回前 N 条;offset 跳过前 offset 条(配合 limit 翻页)。
+        """
         with self._lock:
-            cur = self._conn.execute(
-                "SELECT * FROM run_events WHERE run_id = ? ORDER BY id ASC", (run_id,)
-            )
+            if limit is None:
+                cur = self._conn.execute(
+                    "SELECT * FROM run_events WHERE run_id = ? ORDER BY id ASC",
+                    (run_id,),
+                )
+            else:
+                cur = self._conn.execute(
+                    "SELECT * FROM run_events WHERE run_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
+                    (run_id, limit, offset),
+                )
             return cur.fetchall()
 
     def list_events_after(self, run_id: str, after_id: int) -> list[sqlite3.Row]:
@@ -111,10 +125,19 @@ class AuditRepo:
             )
             return cur.fetchall()
 
-    def list_approvals(self, run_id: str) -> list[sqlite3.Row]:
-        """列出某 run 的所有审批记录（含已决策），按请求时间排序。"""
+    def list_approvals(
+        self, run_id: str, limit: int | None = None, offset: int = 0
+    ) -> list[sqlite3.Row]:
+        """列出某 run 的所有审批记录（含已决策），按请求时间排序,支持分页。"""
         with self._lock:
-            cur = self._conn.execute(
-                "SELECT * FROM approvals WHERE run_id = ? ORDER BY requested_at", (run_id,)
-            )
+            if limit is None:
+                cur = self._conn.execute(
+                    "SELECT * FROM approvals WHERE run_id = ? ORDER BY requested_at",
+                    (run_id,),
+                )
+            else:
+                cur = self._conn.execute(
+                    "SELECT * FROM approvals WHERE run_id = ? ORDER BY requested_at LIMIT ? OFFSET ?",
+                    (run_id, limit, offset),
+                )
             return cur.fetchall()

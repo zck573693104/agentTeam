@@ -116,7 +116,8 @@ def test_trigger_exception_does_not_affect_run_result():
     # 等待 daemon thread 执行(会抛异常但被 _safe_trigger 吞没)
     import time
     time.sleep(0.2)
-    # run 状态已正确标记为 failed(不受 evolution 异常影响)
-    rm._run_repo.end_run.assert_called_with("r1", "failed")
+    # run 状态已正确标记为 failed(不受 evolution 异常影响)。
+    # P0-2 修复后用条件 end_run_if_status 避免覆盖竞态。
+    rm._run_repo.end_run_if_status.assert_called_with("r1", "running", "failed")
     # trigger 确实被调用一次
     mock_evo.trigger.assert_called_once_with("r1")

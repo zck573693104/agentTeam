@@ -53,6 +53,30 @@ class RunRepo:
             )
             self._conn.commit()
 
+    def end_run_if_status(
+        self, run_id: str, expected_status: str, status: str, total_tokens: int = 0
+    ) -> bool:
+        """条件 end_run:仅当当前 status == expected_status 时才 end_run。
+
+        用于 worker 自然完成时避免覆盖 cancel_run 设置的 cancelling 状态:
+        _handle_invoke_result 调用 end_run_if_status(run_id, "running", "completed"),
+        若 status 已被 cancel 改为 cancelling,则返回 False,不覆盖,
+        让 _finalize_cancellation 推进到 cancelled。
+
+        与 try_claim 的区别:try_claim 只更新 status(不设 ended_at/total_tokens),
+        适合中间态转换(running→interrupted);本方法设 ended_at + total_tokens,
+        适合终态写入(running→completed/cancelled/failed)。
+        """
+        now = _now()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE runs SET status = ?, ended_at = ?, updated_at = ?, total_tokens = ? "
+                "WHERE id = ? AND status = ?",
+                (status, now, now, total_tokens, run_id, expected_status),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
     def list_runs(self, limit: int | None = None, offset: int = 0) -> list[sqlite3.Row]:
         """按创建时间倒序返回 runs,支持分页。
 

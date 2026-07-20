@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, TypedDict
+from typing import Annotated, Literal, TypedDict
 
 from langgraph.graph.message import add_messages
 
@@ -20,12 +20,25 @@ def set_union(left: set, right: set) -> set:
     return left | right
 
 
-class Step(TypedDict):
-    """计划中的一步。"""
+# DAG/sequential 执行模式类型(P3-6:原为裸 str,typo 如 "DAG" 不会被类型检查发现)
+ExecutionMode = Literal["sequential", "dag"]
+
+
+class Step(TypedDict, total=False):
+    """计划中的一步。
+
+    total=False:除 worker/instruction 外的字段均可选(sequential 模式不填 dag 字段)。
+    原仅声明 3 字段,运行时 plan step 实际含 id/depends_on/condition(P1-2),
+    导致 TypedDict 形同虚设、mypy 误报。
+    """
 
     worker: str
     instruction: str
     status: str  # pending | running | done | failed
+    # —— DAG 模式字段 ——
+    id: str  # step 唯一标识,dag 路由用
+    depends_on: list[str]  # 依赖的 step id 列表
+    condition: str | None  # 执行条件表达式(None 表示无条件执行)
 
 
 class TeamState(TypedDict):
@@ -43,7 +56,7 @@ class TeamState(TypedDict):
     # 跨层执行路径追踪，如 "team:dev.ceo.cto"
     path: str
     # —— SP6-P1: DAG 模式字段 ——
-    execution_mode: str  # "sequential" | "dag"，默认 "sequential"
+    execution_mode: ExecutionMode  # 默认 "sequential"
     completed_steps: Annotated[set[str], set_union]  # dag 模式: 已完成的 step id
     skipped_steps: Annotated[set[str], set_union]  # dag 模式: condition=False 跳过的 step id
 
@@ -77,6 +90,6 @@ class WorkerState(TypedDict):
     total_tokens: Annotated[int, operator.add]
     # —— SP6-P1: DAG 模式字段(与 TeamState 共享,worker 回传 completed_steps) ——
     current_step_id: str  # dag 模式: 当前执行的 step id
-    execution_mode: str  # 从父图透传
+    execution_mode: ExecutionMode  # 从父图透传
     completed_steps: Annotated[set[str], set_union]  # worker 返回 {step_id} 经 reducer 合并
     skipped_steps: Annotated[set[str], set_union]  # 透传
