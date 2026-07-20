@@ -499,17 +499,19 @@ def test_plan_dag_parallel_execution_e2e():
     from tests.conftest import FakeLLM, FakeModelProvider
 
     leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "leader-model"))
+    # 各 worker 使用独立 model(独立 FakeLLM),避免并行触发时共享同一响应队列
+    # 导致 FakeLLM.invoke() 按序消费与并行执行顺序不确定冲突(flaky)。
     worker_a = Worker(
         name="a", role="r", description="", system_prompt="A",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-a"),
     )
     worker_b = Worker(
         name="b", role="r", description="", system_prompt="B",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-b"),
     )
     worker_c = Worker(
         name="c", role="r", description="", system_prompt="C",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-c"),
     )
     team = Team(
         name="dag_team", description="dag test",
@@ -533,17 +535,19 @@ def test_plan_dag_parallel_execution_e2e():
         AIMessage(content="C done, all complete"),
     ])
 
-    # worker LLM: A/B/C 各 1 次直接答案
-    worker_llm = FakeLLM()
-    worker_llm.set_invoke_responses([
-        AIMessage(content="result A"),
-        AIMessage(content="result B"),
-        AIMessage(content="result C"),
-    ])
+    # 每个 worker 独立 LLM,各自 1 次直接答案,并行触发互不影响
+    worker_llm_a = FakeLLM()
+    worker_llm_a.set_invoke_responses([AIMessage(content="result A")])
+    worker_llm_b = FakeLLM()
+    worker_llm_b.set_invoke_responses([AIMessage(content="result B")])
+    worker_llm_c = FakeLLM()
+    worker_llm_c.set_invoke_responses([AIMessage(content="result C")])
 
     provider = FakeModelProvider({
         "leader-model": leader_llm,
-        "worker-model": worker_llm,
+        "worker-model-a": worker_llm_a,
+        "worker-model-b": worker_llm_b,
+        "worker-model-c": worker_llm_c,
     })
     compiler = TeamCompiler(provider, ToolRegistry())
     graph = compiler.compile(team, checkpointer=MemorySaver())
@@ -577,17 +581,19 @@ def test_plan_dag_condition_skip_e2e():
     from tests.conftest import FakeLLM, FakeModelProvider
 
     leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "leader-model"))
+    # A/C 使用独立 model(独立 FakeLLM),避免并行触发时共享同一响应队列
+    # 导致 FakeLLM.invoke() 按序消费与并行执行顺序不确定冲突(flaky)。
     worker_a = Worker(
         name="a", role="r", description="", system_prompt="A",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-a"),
     )
     worker_b = Worker(
         name="b", role="r", description="", system_prompt="B",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-b"),
     )
     worker_c = Worker(
         name="c", role="r", description="", system_prompt="C",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-c"),
     )
     team = Team(
         name="dag_cond_team", description="dag condition test",
@@ -613,15 +619,19 @@ def test_plan_dag_condition_skip_e2e():
         AIMessage(content="C done"),
     ])
 
-    worker_llm = FakeLLM()
-    worker_llm.set_invoke_responses([
-        AIMessage(content="result A"),
-        AIMessage(content="result C"),
-    ])
+    # A/C 各自独立 LLM,并行触发互不影响(B 被 skip 不执行,但仍需提供 LLM
+    # 供编译期解析 model)
+    worker_llm_a = FakeLLM()
+    worker_llm_a.set_invoke_responses([AIMessage(content="result A")])
+    worker_llm_b = FakeLLM()
+    worker_llm_c = FakeLLM()
+    worker_llm_c.set_invoke_responses([AIMessage(content="result C")])
 
     provider = FakeModelProvider({
         "leader-model": leader_llm,
-        "worker-model": worker_llm,
+        "worker-model-a": worker_llm_a,
+        "worker-model-b": worker_llm_b,
+        "worker-model-c": worker_llm_c,
     })
     compiler = TeamCompiler(provider, ToolRegistry())
     graph = compiler.compile(team, checkpointer=MemorySaver())
