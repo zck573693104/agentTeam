@@ -89,7 +89,7 @@ def test_legacy_team_compiles_and_runs():
     graph.invoke(initial, config)
     state = graph.get_state(config)
     assert not state.next
-    assert state.values["worker_outputs"]["coder"] == "print('hi')"
+    assert state.values["worker_outputs"]["coder"]["artifact"] == "print('hi')"
 
 
 def test_legacy_serializer_roundtrip():

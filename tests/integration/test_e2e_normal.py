@@ -76,5 +76,5 @@ def test_e2e_normal_worker_outputs(run_manager, run_repo, integration_db):
     values = state.values
     assert "analyst" in values.get("worker_outputs", {})
     assert "coder" in values.get("worker_outputs", {})
-    assert values["worker_outputs"]["analyst"] == "需求分析结果"
-    assert values["worker_outputs"]["coder"] == "代码实现"
+    assert values["worker_outputs"]["analyst"]["artifact"] == "需求分析结果"
+    assert values["worker_outputs"]["coder"]["artifact"] == "代码实现"

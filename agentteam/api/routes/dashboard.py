@@ -43,6 +43,8 @@ def dashboard_router(run_repo: RunRepo, audit_repo: AuditRepo) -> APIRouter:
         - by_team: 按 team_name 分组计数
         - tokens_by_team: 按 team_name 汇总 token 用量(识别 top 消费团队)
         - by_chain: 按 run_events.chain 分组计数(call/tool/decision 三链分布)
+        - by_state_bucket: 按 run_events.state_bucket 分组计数
+          (Graph Engineering P5: schedule/artifact/context/policy 状态域分布)
         - top_tools: 工具调用频次 top 10(从 run_events.payload 提取)
         - total_tokens: 全局 token 总用量
         - total_runs: 全局 run 总数
@@ -58,6 +60,9 @@ def dashboard_router(run_repo: RunRepo, audit_repo: AuditRepo) -> APIRouter:
         # P-B8: 按 chain 分组计数(三链分布,识别工具密集/决策密集型 run)
         by_chain = audit_repo.aggregate_by_chain()
 
+        # Graph Engineering P5: 按 state_bucket 分组计数(状态域分布)
+        by_state_bucket = audit_repo.aggregate_by_state_bucket()
+
         # P-B8: 工具调用频次 top 10(从 tool_call 事件的 payload.tools 提取)
         top_tools = audit_repo.aggregate_top_tools(limit=10)
 
@@ -68,6 +73,7 @@ def dashboard_router(run_repo: RunRepo, audit_repo: AuditRepo) -> APIRouter:
             "by_team": by_team,
             "tokens_by_team": tokens_by_team,
             "by_chain": by_chain,
+            "by_state_bucket": by_state_bucket,
             "top_tools": top_tools,
         }
 

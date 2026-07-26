@@ -114,8 +114,8 @@ def test_end_to_end_run_two_steps():
     assert result["plan"][1]["status"] == "done"
 
     # 两个 worker 都有产出
-    assert result["worker_outputs"]["coder"] == "print('hello world')"
-    assert result["worker_outputs"]["tester"] == "assert True"
+    assert result["worker_outputs"]["coder"]["artifact"] == "print('hello world')"
+    assert result["worker_outputs"]["tester"]["artifact"] == "assert True"
 
     # current_step 推进到末尾
     assert result["current_step"] == 2
@@ -573,7 +573,7 @@ def test_e2e_tool_approval_interrupt_resume(fake_llm, fake_trace_writer, tmp_pat
 
     # 验证 worker 产出
     values = state.values
-    assert values["worker_outputs"]["w1"] == "文件已写入"
+    assert values["worker_outputs"]["w1"]["artifact"] == "文件已写入"
 
     # 验证轨迹事件
     event_types = [e["event_type"] for e in fake_trace_writer.events]
@@ -719,7 +719,7 @@ def test_e2e_mcp_tools_via_fake_loader(fake_llm, fake_trace_writer):
 
     state = graph.get_state(config)
     assert not state.next, "图应该已完成"
-    assert state.values["worker_outputs"]["w1"] == "搜索完成"
+    assert state.values["worker_outputs"]["w1"]["artifact"] == "搜索完成"
 
     # 验证 tool_call 轨迹事件
     event_types = [e["event_type"] for e in fake_trace_writer.events]

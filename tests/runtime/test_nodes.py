@@ -67,7 +67,7 @@ def test_worker_node_direct_answer(fake_llm):
     }
     result = node(state)
 
-    assert result["worker_outputs"] == {"coder": "hello world"}
+    assert result["worker_outputs"]["coder"]["artifact"] == "hello world"
     assert len(result["messages"]) == 1
     assert "coder" in result["messages"][0].content
 
@@ -105,7 +105,7 @@ def test_worker_node_react_with_tool(fake_llm, tmp_path, monkeypatch):
     result = node(state)
 
     assert target.read_text(encoding="utf-8") == "hi"
-    assert result["worker_outputs"] == {"coder": "已写入文件"}
+    assert result["worker_outputs"]["coder"]["artifact"] == "已写入文件"
 
 
 def test_worker_node_respects_max_iterations(fake_llm):
@@ -320,7 +320,7 @@ def test_finalize_writes_worker_output(fake_llm):
         "run_id": "run-1",
     }
     result = node(state)
-    assert result["worker_outputs"] == {"coder": "print('hello')"}
+    assert result["worker_outputs"]["coder"]["artifact"] == "print('hello')"
     assert len(result["messages"]) == 1
     assert "coder" in result["messages"][0].content
     assert len(result["audit_events"]) == 1
@@ -341,7 +341,7 @@ def test_finalize_fallback_to_last_ai_message(fake_llm):
         "run_id": "run-1",
     }
     result = node(state)
-    assert result["worker_outputs"]["w1"] == "还在思考..."
+    assert result["worker_outputs"]["w1"]["artifact"] == "还在思考..."
 
 
 def test_finalize_emits_worker_end_trace(fake_llm, fake_trace_writer):
@@ -536,7 +536,7 @@ def test_worker_subgraph_direct_answer(fake_llm):
     }
     result = subgraph.invoke(state)
 
-    assert result["worker_outputs"] == {"coder": "hello world"}
+    assert result["worker_outputs"]["coder"]["artifact"] == "hello world"
     assert len(result["messages"]) == 1
     assert "coder" in result["messages"][0].content
 
@@ -564,7 +564,7 @@ def test_worker_subgraph_react_with_tool(fake_llm, tmp_path, monkeypatch):
     result = subgraph.invoke(state)
 
     assert target.read_text(encoding="utf-8") == "hi"
-    assert result["worker_outputs"]["coder"] == "已写入文件"
+    assert result["worker_outputs"]["coder"]["artifact"] == "已写入文件"
 
 
 def test_worker_subgraph_respects_max_iterations(fake_llm):

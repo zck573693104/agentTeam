@@ -275,6 +275,51 @@ def _migration_v7_alters(conn: sqlite3.Connection) -> None:
         pass
 
 
+# v8: run_events 加 state_bucket 列(Graph Engineering 学习点 P5 状态四分)
+# state_bucket 区分事件所属状态桶:
+# - schedule: 调度状态(current_step/completed_steps/skipped_steps 推进)
+# - artifact: 工件状态(worker_outputs/final_answer 产物)
+# - context:  上下文状态(messages/react_messages 内容)
+# - policy:   治理状态(pending_approval/quota_status/pep_decision)
+# 与 chain(调用链/工具链/决策链)正交:chain 描述事件归属的链类型,
+# state_bucket 描述事件影响的状态域,便于按域独立 checkpoint/审计/统计。
+_MIGRATION_V8_ALTER_RUN_EVENTS_BUCKET = (
+    "ALTER TABLE run_events ADD COLUMN state_bucket TEXT"
+)
+
+
+def _migration_v8_alters(conn: sqlite3.Connection) -> None:
+    """v8 ALTER 兼容旧库:列已存在时静默跳过。"""
+    try:
+        conn.execute(_MIGRATION_V8_ALTER_RUN_EVENTS_BUCKET)
+    except sqlite3.OperationalError:
+        pass
+
+
+# v9: Graph Engineering P4 外部 receipt 幂等 - webhook 投递追踪表
+# 文章原文:"付款、部署、发消息遇到超时,应先读取外部 receipt,再决定重试或补偿"
+# 每次投递生成唯一 delivery_id(payload 内),接收方可据此去重;
+# 投递失败时用同一 delivery_id 重试,接收方看到相同 delivery_id 即知是重试。
+# status: pending(首次) → delivered(成功) / failed(重试耗尽)
+_MIGRATION_V9 = """
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    delivery_id      TEXT PRIMARY KEY,
+    run_id           TEXT NOT NULL,
+    event_type       TEXT NOT NULL,
+    target_url       TEXT NOT NULL,
+    payload          TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT,
+    first_attempt_at TEXT NOT NULL,
+    last_attempt_at  TEXT,
+    delivered_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_run_id ON webhook_deliveries(run_id);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status);
+"""
+
+
 # 迁移列表:(version, description, sql_or_callable)
 # - sql 为 str:直接 executescript
 # - sql 为 callable:调用以 conn 为参数,自行处理(用于 ALTER 等 idempotent 不可表达的场景)
@@ -297,6 +342,8 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (7, "skill_acls + pep_policies + quotas.warn_threshold (P-B4/B5/B7)", _MIGRATION_V7),
     (8, "ALTER runs/run_events/quotas for v6/v7 columns", _migration_v6_alters),
     (9, "ALTER quotas.warn_threshold for v7", _migration_v7_alters),
+    (10, "ALTER run_events.state_bucket for v8 (Graph Engineering P5)", _migration_v8_alters),
+    (11, "webhook_deliveries table (Graph Engineering P4 external receipt)", _MIGRATION_V9),
 ]
 
 

@@ -63,7 +63,7 @@ def test_e2e_three_level_chain():
     state = graph.get_state(config)
     assert not state.next, "图应该已完成"
     # eng 的产出
-    assert state.values["worker_outputs"].get("eng") == "print('hello')"
+    assert state.values["worker_outputs"].get("eng", {}).get("artifact") == "print('hello')"
     # leader_plan 事件（CEO 和 CTO 各 1 次）
     leader_plans = [e for e in state.values["audit_events"]
                     if e["event_type"] == "leader_plan"]
@@ -120,7 +120,7 @@ def test_e2e_team_nesting():
     state = graph.get_state(config)
     assert not state.next
     # tester 的产出（嵌套子图中产出冒泡到父图）
-    assert state.values["worker_outputs"].get("tester") == "assert True"
+    assert state.values["worker_outputs"].get("tester", {}).get("artifact") == "assert True"
 
 
 def test_e2e_library_ref():
@@ -160,7 +160,7 @@ def test_e2e_library_ref():
 
     state = graph.get_state(config)
     assert not state.next
-    assert state.values["worker_outputs"].get("eng") == "code done"
+    assert state.values["worker_outputs"].get("eng", {}).get("artifact") == "code done"
 
 
 def test_e2e_mixed_all_features():
@@ -245,5 +245,5 @@ def test_e2e_mixed_all_features():
 
     state = graph.get_state(config)
     assert not state.next
-    assert state.values["worker_outputs"].get("eng") == "code"
-    assert state.values["worker_outputs"].get("tester") == "assert True"
+    assert state.values["worker_outputs"].get("eng", {}).get("artifact") == "code"
+    assert state.values["worker_outputs"].get("tester", {}).get("artifact") == "assert True"

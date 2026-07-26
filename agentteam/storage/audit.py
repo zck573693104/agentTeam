@@ -28,6 +28,7 @@ class AuditRepo(BaseSqliteRepo):
         trace_id: str | None = None,
         parent_span_id: str | None = None,
         chain: str | None = None,
+        state_bucket: str | None = None,
     ) -> int:
         """写入一条 run_event。
 
@@ -36,13 +37,20 @@ class AuditRepo(BaseSqliteRepo):
         - parent_span_id:父 span id(用于嵌套调用关系,如 tool_call 的父是 worker)
         - chain:事件所属链类型,取值 'call'(调用链)/ 'tool'(工具链)/ 'decision'(决策链)
           None 时根据 event_type 默认推断(_infer_chain)
+
+        Graph Engineering P5 状态四分:
+        - state_bucket:事件影响的状态域,取值 'schedule'(调度)/ 'artifact'(工件)/
+          'context'(上下文)/ 'policy'(治理)。None 时根据 event_type 默认推断(_infer_bucket)。
+          与 chain 正交:chain 描述事件归属链类型,state_bucket 描述事件影响的状态域。
         """
         if chain is None:
             chain = _infer_chain(event_type)
+        if state_bucket is None:
+            state_bucket = _infer_bucket(event_type)
         cur = self._execute(
             "INSERT INTO run_events "
-            "(run_id, event_type, actor, timestamp, payload, duration_ms, tokens, trace_id, parent_span_id, chain) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(run_id, event_type, actor, timestamp, payload, duration_ms, tokens, trace_id, parent_span_id, chain, state_bucket) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
                 event_type,
@@ -54,6 +62,7 @@ class AuditRepo(BaseSqliteRepo):
                 trace_id,
                 parent_span_id,
                 chain,
+                state_bucket,
             ),
         )
         return cur.lastrowid  # type: ignore[return-value]
@@ -180,6 +189,23 @@ class AuditRepo(BaseSqliteRepo):
         )
         return [{"tool": r["tool"], "count": r["n"]} for r in rows]
 
+    def aggregate_by_state_bucket(self) -> dict[str, int]:
+        """Graph Engineering P5: 按 state_bucket 分组计数(状态域分布)。
+
+        返回 dict 如 {'schedule': 50, 'artifact': 80, 'context': 120, 'policy': 15}。
+        state_bucket 列为 NULL 的旧数据归入 'unknown'。
+
+        与 aggregate_by_chain 正交:
+        - chain:事件归属的链类型(call/tool/decision)
+        - state_bucket:事件影响的状态域(schedule/artifact/context/policy)
+        同一事件可属于不同维度,如 leader_plan 属于 decision 链,影响 schedule 桶。
+        """
+        rows = self._fetchall(
+            "SELECT COALESCE(state_bucket, 'unknown') AS bucket, COUNT(*) AS n "
+            "FROM run_events GROUP BY state_bucket"
+        )
+        return {row["bucket"]: row["n"] for row in rows}
+
 
 # P-B3: event_type → chain 推断表
 # 调用链(call):run 生命周期 + agent 节点进出
@@ -209,3 +235,40 @@ _CHAIN_MAP: dict[str, str] = {
 def _infer_chain(event_type: str) -> str:
     """根据 event_type 推断 chain,未知类型默认 'call'(向后兼容)。"""
     return _CHAIN_MAP.get(event_type, "call")
+
+
+# Graph Engineering P5: event_type → state_bucket 推断表
+# schedule:调度状态(current_step/completed_steps/skipped_steps/run 生命周期)
+# artifact:工件状态(worker_outputs/final_answer 产物)
+# context:上下文状态(messages/react_messages 内容传递)
+# policy:治理状态(pending_approval/quota/pep 决策)
+# 与 _CHAIN_MAP 正交:chain 描述事件归属链类型,bucket 描述事件影响的状态域
+_BUCKET_MAP: dict[str, str] = {
+    # schedule:run 生命周期 + plan 推进 + step 完成
+    "run_start": "schedule",
+    "run_end": "schedule",
+    "run_cancelled": "schedule",
+    "leader_plan": "schedule",          # plan 拆解决定调度
+    "plan_rejected": "schedule",
+    "condition_eval": "schedule",        # dag 条件决定 step 跳过
+    "worker_start": "schedule",
+    "worker_end": "schedule",
+    "supervisor": "schedule",
+    # artifact:worker 产出 + review
+    "leader_review": "artifact",         # review 评估 worker 产出质量
+    # tool:工具调用产生/读取 artifact,但事件本身更偏向 context/schedule
+    "tool_call": "artifact",             # 工具调用产生/读取工件
+    "tool_result": "artifact",
+    # policy:审批决策
+    "approval_requested": "policy",
+    "approval_decided": "policy",
+}
+
+
+def _infer_bucket(event_type: str) -> str:
+    """根据 event_type 推断 state_bucket,未知类型默认 'context'(向后兼容)。
+
+    Graph Engineering P5 状态四分:把事件按影响的状态域分类,
+    便于按域独立 checkpoint/审计/统计。
+    """
+    return _BUCKET_MAP.get(event_type, "context")

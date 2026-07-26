@@ -38,6 +38,7 @@ from agentteam.storage.runs import RunRepo
 from agentteam.storage.skills_meta import SkillMetaRepo
 from agentteam.storage.teams import TeamRepo
 from agentteam.storage.users import UserRepo
+from agentteam.storage.webhook import WebhookDeliveryRepo
 from agentteam.tools.registry import ToolRegistry
 
 logger = get_logger("api.server")
@@ -97,6 +98,8 @@ def create_app(
     user_repo = UserRepo(conn, lock=conn_lock)
     pep_repo = PEPRepo(conn, lock=conn_lock)
     skill_meta_repo = SkillMetaRepo(conn, lock=conn_lock)
+    # Graph Engineering P4: webhook 投递幂等追踪仓库(delivery_id + receipt + retry)
+    webhook_delivery_repo = WebhookDeliveryRepo(conn, lock=conn_lock)
     team_store = TeamStore(repo=team_repo)
     event_bus = EventBus()
 
@@ -165,7 +168,7 @@ def create_app(
             run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,
             checkpointer=saver, agent_library=lib, skill_loader=skill_loader,
             quota_repo=quota_repo, admin_audit_repo=admin_audit_repo,
-            pep_repo=pep_repo,
+            pep_repo=pep_repo, delivery_repo=webhook_delivery_repo,
         )
     )
     app.include_router(dashboard_router(run_repo, audit_repo))

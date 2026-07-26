@@ -81,6 +81,7 @@ def runs_router(
     quota_repo: QuotaRepo | None = None,
     admin_audit_repo: AdminAuditRepo | None = None,
     pep_repo=None,
+    delivery_repo=None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/runs", tags=["runs"])
     lib = agent_library or AgentLibrary()
@@ -149,6 +150,7 @@ def runs_router(
                 audit_repo=audit_repo,
                 triggered_by_user=triggered_by_user,
                 pep_repo=pep_repo,
+                delivery_repo=delivery_repo,
             )
         except Exception as e:
             run_repo.end_run(run_id, "failed")
@@ -354,6 +356,7 @@ def runs_router(
                         skill_loader=skill_loader,
                     ),
                     approved=req.approved, reason=req.reason, decider=decider,
+                    delivery_repo=delivery_repo,
                 )
         except Exception as e:
             # BUG-10 修复(沿用):catch Exception 确保任何 resume/recompile 异常
@@ -397,5 +400,88 @@ def runs_router(
                 detail=f"Run '{run_id}' not active or already cancelled (current status: {current_status})",
             )
         return {"ok": True}
+
+    @router.post("/{run_id}/retry-step/{step_id}")
+    def retry_step(run_id: str, step_id: str, request: Request):
+        """Graph Engineering P1 局部重跑:dag 模式失败后只重跑指定 step。
+
+        文章原文:"并行分支失败时,保留已验证工件,只重跑受影响的一支"。
+        实现:从 checkpoint 移除该 step 的 completed/worker_outputs,触发 dag 路由重跑。
+
+        前置条件:
+        - run 状态为 failed/interrupted(整 run 失败或部分 step 卡住)
+        - run 必须有内存态 graph(否则需先 recompile)
+        - run 必须是 dag 模式(sequential 模式无 step 级重跑概念)
+        - step_id 必须存在于 plan 中
+
+        状态流转:failed/interrupted → running(dag 续跑)。
+        """
+        run = run_repo.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+        # 仅 failed / interrupted 允许 retry(防止在 running 时并发触发)
+        if run["status"] not in ("failed", "interrupted"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Run '{run_id}' cannot retry-step in status: {run['status']}. "
+                    f"Only failed/interrupted runs can retry."
+                ),
+            )
+
+        # P-B2 WAT 双身份:retry 决策者记入 audit
+        user = getattr(request.state, "user", None)
+        decider = user["username"] if user else "api-user"
+
+        # 原子地 claim:仅当状态仍为 failed/interrupted 时才置 running,
+        # 避免并发 retry/approve 竞态覆盖。
+        original_status = run["status"]
+        if not run_repo.try_claim(run_id, original_status, "running"):
+            current = run_repo.get_run(run_id)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Run '{run_id}' state changed (current: "
+                    f"{current['status'] if current else 'unknown'}). Retry aborted."
+                ),
+            )
+
+        try:
+            run_manager.retry_step(run_id, step_id, decider=decider)
+        except ValueError as e:
+            # 校验失败(graph 不在内存 / 非 dag 模式 / step_id 不存在):
+            # 回滚到原 status,避免误伤仍可继续的 run。
+            run_repo.try_claim(run_id, "running", original_status)
+            eid = audit_repo.add_event(
+                run_id, "error", "system", {"error": str(e), "retry_step": step_id}
+            )
+            event_bus.publish(
+                run_id,
+                {
+                    "id": eid,
+                    "event_type": "error",
+                    "run_id": run_id,
+                    "payload": {"error": str(e), "retry_step": step_id},
+                },
+            )
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            # 其他异常(checkpoint 损坏等)→ 标 failed
+            run_repo.end_run(run_id, "failed")
+            eid = audit_repo.add_event(
+                run_id, "error", "system", {"error": str(e), "retry_step": step_id}
+            )
+            event_bus.publish(
+                run_id,
+                {
+                    "id": eid,
+                    "event_type": "error",
+                    "run_id": run_id,
+                    "payload": {"error": str(e), "retry_step": step_id},
+                },
+            )
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"ok": True, "step_id": step_id}
 
     return router

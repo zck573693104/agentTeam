@@ -74,7 +74,7 @@ def test_e2e_worker_level_mcp():
 
     state = graph.get_state(config)
     assert not state.next
-    assert state.values["worker_outputs"]["coder"] == "git status: clean"
+    assert state.values["worker_outputs"]["coder"]["artifact"] == "git status: clean"
 
 
 def test_e2e_teamref_mcp_overrides():
@@ -148,4 +148,4 @@ def test_e2e_teamref_mcp_overrides():
 
     state = graph.get_state(config)
     assert not state.next
-    assert state.values["worker_outputs"]["tester"] == "extra result"
+    assert state.values["worker_outputs"]["tester"]["artifact"] == "extra result"

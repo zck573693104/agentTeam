@@ -64,3 +64,12 @@ class Agent:
 
     # SP7b: 进化代数,默认 1(每次 EvolutionEngine.trigger 任一维度成功后 +=1)
     version: int = 1
+
+    # Graph Engineering P3 Maker/Checker 独立性:
+    # supervisor 角色 review 子节点产出时,可指定独立模型(避免 maker/checker
+    # 同模型自欺)。None 时回退到 self.model(向后兼容)。
+    # 文章原文:"Maker 与 Checker 至少要在证据、权限、工具、数据或模型上有一项真实独立"
+    review_model: ModelRef | None = None
+    # review 时强制调用的工具集(如 ["run_tests","lint"]),让 Checker 用独立工具验证
+    # 而非仅凭 LLM 自由判断。空 list 时 review 不调用额外工具。
+    review_tools: list[str] = field(default_factory=list)

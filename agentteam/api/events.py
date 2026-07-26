@@ -82,6 +82,9 @@ class BroadcastTraceWriter:
 
     emit() 捕获 AuditRepo.add_event() 返回的 SQLite 行 ID，
     放入发布到 EventBus 的事件 dict 中，供 SSE 回放去重。
+
+    Graph Engineering P5: 支持 state_bucket 参数(状态四分),
+    透传给 AuditRepo.add_event()。调用方未显式传时由 _infer_bucket 推断。
     """
 
     def __init__(self, audit_repo: AuditRepo, bus: EventBus) -> None:
@@ -96,9 +99,19 @@ class BroadcastTraceWriter:
         payload: dict[str, Any] | None = None,
         duration_ms: int | None = None,
         tokens: int | None = None,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
+        chain: str | None = None,
+        state_bucket: str | None = None,
     ) -> None:
         event_id = self._audit_repo.add_event(
-            run_id, event_type, actor, payload, duration_ms, tokens
+            run_id, event_type, actor, payload,
+            duration_ms=duration_ms,
+            tokens=tokens,
+            trace_id=trace_id,
+            parent_span_id=parent_span_id,
+            chain=chain,
+            state_bucket=state_bucket,
         )
         self._bus.publish(
             run_id,
@@ -110,5 +123,9 @@ class BroadcastTraceWriter:
                 "payload": payload or {},
                 "duration_ms": duration_ms,
                 "tokens": tokens,
+                "trace_id": trace_id,
+                "parent_span_id": parent_span_id,
+                "chain": chain,
+                "state_bucket": state_bucket,
             },
         )

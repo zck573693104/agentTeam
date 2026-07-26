@@ -174,4 +174,4 @@ def test_e2e_tool_approval_write_file(run_manager, run_repo, integration_db, tmp
 
     # 验证 worker 产出
     state = graph.get_state(config)
-    assert state.values["worker_outputs"]["coder"] == "文件已写入"
+    assert state.values["worker_outputs"]["coder"]["artifact"] == "文件已写入"

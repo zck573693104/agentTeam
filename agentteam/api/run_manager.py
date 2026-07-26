@@ -113,6 +113,7 @@ class RunManager:
         approved: bool,
         reason: str | None = None,
         decider: str = "api-user",
+        delivery_repo=None,
     ) -> None:
         """lazy recompile: 用 compiler_factory 构造 graph,注入内存,再 resume。
 
@@ -126,6 +127,8 @@ class RunManager:
             compiler_factory: 无参闭包,返回注册好所有 team 的 TeamCompiler。
                               抽成闭包避免 RunManager 直接依赖 ModelProvider/ToolRegistry 等。
             approved / reason / decider: 透传给 resume_run
+            delivery_repo: Graph Engineering P4 webhook 投递追踪仓库,
+                透传给 compiler.compile → approval gate(服务重启后仍需幂等追踪)。
 
         异常契约:
             compiler_factory() / compiler.compile() / resume_run() 抛出的异常
@@ -140,6 +143,7 @@ class RunManager:
             checkpointer=self._saver,
             trace_writer=trace_writer,
             audit_repo=self._audit_repo,
+            delivery_repo=delivery_repo,
         )
         config = {"configurable": {"thread_id": run_id}}
         with self._lock:
@@ -192,6 +196,113 @@ class RunManager:
         future = self._run_executor.submit(
             self._resume_in_background, run_id, graph, config,
             Command(resume=resume_value),
+        )
+        with self._lock:
+            self._threads[run_id] = future
+
+    def retry_step(
+        self, run_id: str, step_id: str, decider: str = "api-user",
+    ) -> None:
+        """Graph Engineering P1 局部重跑:dag 模式失败后只重跑指定 step。
+
+        文章原文:"并行分支失败时,保留已验证工件,只重跑受影响的一支"。
+
+        实现机制:
+        1. 从 checkpoint 读 run 当前 state(含 completed_steps / worker_outputs)
+        2. 把 step_id 从 completed_steps 移除(若在其中),让 dag 路由重新触发它
+        3. 清除该 step 的 worker_outputs(避免下游误用旧产出)
+        4. 用 Command(update=...) 写回 state,然后 graph.invoke(None, config) 续跑
+
+        前置条件:
+        - run 状态为 failed(整 run 失败)或 interrupted(部分 step 卡住)
+        - run 必须有内存态 graph(has_graph=True),否则需先 recompile
+        - run 必须是 dag 模式(sequential 模式无 step 级重跑概念)
+        - step_id 必须存在于 plan 中
+
+        异常:
+        - ValueError: graph 不存在 / 不是 dag 模式 / step_id 不存在
+        - 其他异常: 重跑失败,run 标 failed
+        """
+        with self._lock:
+            graph = self._graphs.get(run_id)
+            config = self._configs.get(run_id)
+        if graph is None or config is None:
+            raise ValueError(
+                f"Run {run_id} graph not in memory. "
+                f"Retry step requires in-memory graph (call recompile first)."
+            )
+
+        # 读 checkpoint 当前 state
+        try:
+            state_obj = graph.get_state(config)
+        except Exception as e:
+            raise ValueError(f"Failed to read checkpoint for run {run_id}: {e}") from e
+
+        if state_obj is None or state_obj.values is None:
+            raise ValueError(f"Run {run_id} has no checkpoint state")
+
+        values = state_obj.values
+        execution_mode = values.get("execution_mode", "sequential")
+        if execution_mode != "dag":
+            raise ValueError(
+                f"Run {run_id} is not dag mode (mode={execution_mode}). "
+                f"Retry step only supported for dag mode."
+            )
+
+        plan = values.get("plan", [])
+        step_exists = any(
+            (s.get("id") or s.get("worker")) == step_id for s in plan
+        )
+        if not step_exists:
+            raise ValueError(
+                f"Step '{step_id}' not found in run {run_id} plan. "
+                f"Available: {[s.get('id') or s.get('worker') for s in plan]}"
+            )
+
+        completed = set(values.get("completed_steps", set()))
+        worker_outputs = dict(values.get("worker_outputs", {}))
+
+        # 找到 step 对应的 worker name(用于清 worker_outputs)
+        worker_name = None
+        for s in plan:
+            if (s.get("id") or s.get("worker")) == step_id:
+                worker_name = s.get("worker")
+                break
+
+        # 从 completed_steps 移除该 step(若存在),让路由重新触发
+        completed.discard(step_id)
+        # 清除该 step 的 worker_outputs(避免下游误用旧产出)
+        if worker_name and worker_name in worker_outputs:
+            del worker_outputs[worker_name]
+
+        # 用 Command(update=...) 写回 state,然后续跑
+        from langgraph.types import Command
+
+        update_value = {
+            "completed_steps": completed,
+            "worker_outputs": worker_outputs,
+        }
+        # 记录重跑事件(审计 + 通知)
+        eid = self._audit_repo.add_event(
+            run_id, "step_retry", decider,
+            {"step_id": step_id, "worker": worker_name},
+            state_bucket="schedule",
+        )
+        self._bus.publish(
+            run_id,
+            {
+                "id": eid,
+                "event_type": "step_retry",
+                "run_id": run_id,
+                "payload": {"step_id": step_id, "worker": worker_name},
+            },
+        )
+
+        # 状态转 running
+        self._run_repo.update_status(run_id, "running")
+        future = self._run_executor.submit(
+            self._resume_in_background, run_id, graph, config,
+            Command(update=update_value),
         )
         with self._lock:
             self._threads[run_id] = future

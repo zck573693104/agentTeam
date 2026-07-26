@@ -102,8 +102,9 @@ def test_cross_level_step_and_tool_approval(fake_trace_writer, tmp_path):
     assert len(approval_requests) == 2  # 父 step + 子 tool
     assert len(approval_decideds) == 2
 
-    # 验证 worker 产出
-    assert state.values["worker_outputs"].get("child") == "work done"
+    # 验证 worker 产出(P2 Node Contract:结构化 WorkerOutput)
+    child_output = state.values["worker_outputs"].get("child")
+    assert child_output["artifact"] == "work done"
 
 
 def test_cross_level_step_rejection_terminates(fake_trace_writer):

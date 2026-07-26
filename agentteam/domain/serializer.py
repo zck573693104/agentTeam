@@ -103,6 +103,9 @@ def _agent_from_dict(d: dict) -> Agent:
         mcp_servers=[_mcp_server_from_dict(s) for s in d.get("mcp_servers", [])],
         skills=d.get("skills", []),
         version=d.get("version", 1),
+        # Graph Engineering P3: Maker/Checker 独立模型/工具(向后兼容:旧 schema 无此字段时取默认值)
+        review_model=_model_ref_from_dict(d.get("review_model")),
+        review_tools=d.get("review_tools", []),
     )
 
 
@@ -131,6 +134,9 @@ def _agent_to_dict(agent: Agent) -> dict:
         "mcp_servers": [asdict(s) for s in agent.mcp_servers],
         "skills": list(agent.skills),
         "version": agent.version,
+        # Graph Engineering P3: Maker/Checker 独立模型/工具
+        "review_model": asdict(agent.review_model) if agent.review_model else None,
+        "review_tools": list(agent.review_tools),
     }
 
 

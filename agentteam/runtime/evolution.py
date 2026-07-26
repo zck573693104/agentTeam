@@ -7,6 +7,14 @@
 - 失败保护:任一维度失败仅记 error,不影响其他维度 / run 结果
 - 防抖:同一 agent 5 分钟内只触发一次
 - 版本原子性:一次 trigger 内 4 维度全部尝试后,任一成功则 version += 1
+
+Graph Engineering P6 反指标(防止进化优化到偏离初衷):
+文章原文:"防止指标被优化到偏离初衷:加反指标(anti_metrics),
+冻结不变量(frozen_rules),提案需通过反指标验证。"
+- anti_metrics: 不应被优化目标的指标列表(如安全/合规相关),
+  记录到 history.reason 供人工 review,提醒该次进化可能偏离初衷。
+- frozen_rules: 硬约束校验函数列表,提案应用前必须全部通过,
+  任一失败则拒绝应用(success=False,reason 记录违规详情)。
 """
 from __future__ import annotations
 
@@ -15,8 +23,9 @@ import json
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable
 
 from agentteam.domain.agent import Agent
 from agentteam.domain.library import AgentLibrary
@@ -28,6 +37,84 @@ from agentteam.storage.evolution import EvolutionRepo
 from agentteam.storage.runs import RunRepo
 
 logger = get_logger("runtime.evolution")
+
+
+# Graph Engineering P6: frozen_rule 校验函数签名
+# (agent, dimension, before_value, after_value) -> (ok, reason)
+# - ok=True: 校验通过,提案可应用
+# - ok=False: 校验失败,reason 记录违规详情,提案被拒绝
+FrozenRule = Callable[[Agent, str, Any, Any], "tuple[bool, str]"]
+
+
+def _frozen_max_iterations_range(
+    agent: Agent, dimension: str, before: Any, after: Any,
+) -> tuple[bool, str]:
+    """默认 frozen_rule:max_iterations 必须保持在 [1, 20] 区间。
+
+    防止 ParamTuner 把 max_iterations 调到极端值(如 0 或 1000):
+    - 0 会导致 worker 一次都不执行
+    - 1000 会导致单次 run 成本失控
+    """
+    if dimension != "params":
+        return True, ""
+    if not isinstance(after, dict):
+        return True, ""
+    mi = after.get("max_iterations")
+    if mi is None:
+        return True, ""
+    try:
+        mi_int = int(mi)
+    except (TypeError, ValueError):
+        return False, f"max_iterations not numeric: {mi!r}"
+    if not (1 <= mi_int <= 20):
+        return False, f"max_iterations {mi_int} out of [1, 20]"
+    return True, ""
+
+
+@dataclass
+class EvolutionConfig:
+    """Graph Engineering P6: 进化治理配置。
+
+    anti_metrics: 不应被优化目标的指标名列表(如 "safety_score"/"compliance_rate")。
+        evolution_history.reason 会标注这些指标,提醒人工 review 该次进化是否
+        以牺牲反指标为代价换取正向指标提升。本字段为软约束(仅记录不阻断),
+        因为反指标的实际值需外部 metrics 系统采集,引擎内无法直接测量。
+    frozen_rules: 硬约束校验函数列表。每次进化提案应用前必须全部通过,
+        任一返回 (False, reason) 则拒绝应用并记 history(success=False)。
+        默认包含 _frozen_max_iterations_range。
+    """
+    anti_metrics: list[str] = field(default_factory=list)
+    frozen_rules: list[FrozenRule] = field(default_factory=lambda: [_frozen_max_iterations_range])
+
+    def validate_proposal(
+        self, agent: Agent, dimension: str, before: Any, after: Any,
+    ) -> tuple[bool, str]:
+        """运行所有 frozen_rule,返回 (是否通过, 拒绝原因)。
+
+        任一 frozen_rule 返回 False 即整体失败(短路求值)。
+        全部通过返回 (True, "")。
+        """
+        for rule in self.frozen_rules:
+            try:
+                ok, reason = rule(agent, dimension, before, after)
+            except Exception as e:
+                # 校验函数自身异常:保守拒绝,避免异常规则放行危险变更
+                return False, f"frozen_rule {rule.__name__} raised: {e}"
+            if not ok:
+                return False, reason or f"frozen_rule {getattr(rule, '__name__', rule)} rejected"
+        return True, ""
+
+    def anti_metric_warning(self, dimension: str) -> str:
+        """生成反指标提醒文本,附加到 history.reason。
+
+        无 anti_metrics 时返回空串(不影响现有 reason)。
+        """
+        if not self.anti_metrics:
+            return ""
+        return (
+            f" [anti-metrics watch: {', '.join(self.anti_metrics)}] "
+            f"请人工确认本次 {dimension} 进化未以牺牲反指标为代价。"
+        )
 
 
 @dataclass
@@ -54,6 +141,7 @@ class EvolutionEngine:
         default_model: ModelRef,
         skill_loader: SkillLoader | None = None,
         skills_dir: Path | None = None,
+        evolution_config: EvolutionConfig | None = None,
     ) -> None:
         self._mp = model_provider
         self._agent_library = agent_library
@@ -63,6 +151,9 @@ class EvolutionEngine:
         self._default_model = default_model
         self._skill_loader = skill_loader
         self._skills_dir = skills_dir
+        # Graph Engineering P6: 进化治理配置(反指标 + 冻结不变量)。
+        # None 时用默认 config(仅含 max_iterations 范围校验)。
+        self._config = evolution_config or EvolutionConfig()
         self._last_trigger: dict[str, float] = {}
         self._lock = threading.Lock()
 
@@ -167,12 +258,33 @@ class EvolutionEngine:
             if new_prompt == old_prompt:
                 return EvolutionResult(True, "prompt", "no change needed")
 
+            # Graph Engineering P6: 提案应用前校验 frozen_rules
+            ok, reason = self._config.validate_proposal(
+                agent, "prompt", old_prompt, new_prompt,
+            )
+            if not ok:
+                # frozen_rule 拒绝:记 history(success=False),不应用变更
+                reject_reason = (
+                    f"frozen_rule rejected: {reason}"
+                    + self._config.anti_metric_warning("prompt")
+                )
+                self._evolution_repo.add_record(
+                    agent_name=agent.name, version=agent.version,
+                    dimension="prompt",
+                    before_value=old_prompt, after_value=new_prompt,
+                    diff=_compute_diff(old_prompt, new_prompt),
+                    reason=reject_reason, run_id=run_id, success=False,
+                    error=reject_reason,
+                )
+                return EvolutionResult(False, "prompt", reject_reason)
+
             self._evolution_repo.add_record(
                 agent_name=agent.name, version=agent.version,
                 dimension="prompt",
                 before_value=old_prompt, after_value=new_prompt,
                 diff=_compute_diff(old_prompt, new_prompt),
-                reason=response.content, run_id=run_id, success=True,
+                reason=response.content + self._config.anti_metric_warning("prompt"),
+                run_id=run_id, success=True,
             )
             self._agent_library.update_prompt(agent.name, new_prompt)
             return EvolutionResult(True, "prompt", "prompt updated")
@@ -256,12 +368,34 @@ class EvolutionEngine:
             if not has_change:
                 return EvolutionResult(True, "params", "no change needed")
 
+            # Graph Engineering P6: 提案应用前校验 frozen_rules
+            # (默认 _frozen_max_iterations_range 会再校一次 [1,20],作为最后防线)
+            ok, reason = self._config.validate_proposal(
+                agent, "params", old_params, new_params,
+            )
+            if not ok:
+                reject_reason = (
+                    f"frozen_rule rejected: {reason}"
+                    + self._config.anti_metric_warning("params")
+                )
+                self._evolution_repo.add_record(
+                    agent_name=agent.name, version=agent.version,
+                    dimension="params",
+                    before_value=_json.dumps(old_params, default=str),
+                    after_value=_json.dumps(new_params, default=str),
+                    diff="", reason=reject_reason, run_id=run_id,
+                    success=False, error=reject_reason,
+                )
+                return EvolutionResult(False, "params", reject_reason)
+
             self._evolution_repo.add_record(
                 agent_name=agent.name, version=agent.version,
                 dimension="params",
                 before_value=_json.dumps(old_params, default=str),
                 after_value=_json.dumps(new_params, default=str),
-                diff="", reason=response.content, run_id=run_id, success=True,
+                diff="",
+                reason=response.content + self._config.anti_metric_warning("params"),
+                run_id=run_id, success=True,
             )
             self._agent_library.update_params(agent.name, new_params)
             return EvolutionResult(True, "params", "params tuned")

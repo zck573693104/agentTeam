@@ -422,7 +422,7 @@ def test_finalize_dag_mode_returns_completed_steps(fake_llm):
     # dag 模式回传 completed_steps(set,经 set_union reducer 合并到父图)
     assert result["completed_steps"] == {"step_a"}
     # 仍有 worker_outputs 与 messages
-    assert result["worker_outputs"] == {"a": "result A"}
+    assert result["worker_outputs"]["a"]["artifact"] == "result A"
     assert len(result["messages"]) == 1
 
 
@@ -442,7 +442,7 @@ def test_finalize_sequential_mode_no_completed_steps(fake_llm):
     result = node(state)
     # sequential 模式不回传 completed_steps
     assert "completed_steps" not in result
-    assert result["worker_outputs"] == {"w1": "done"}
+    assert result["worker_outputs"]["w1"]["artifact"] == "done"
 
 
 def test_init_worker_dag_mode_raises_when_no_ready_step(fake_llm):
@@ -564,9 +564,9 @@ def test_plan_dag_parallel_execution_e2e():
     assert "step_b" in result["completed_steps"]
     assert "step_c" in result["completed_steps"]
     # 3 个 worker 都有产出
-    assert result["worker_outputs"]["a"] == "result A"
-    assert result["worker_outputs"]["b"] == "result B"
-    assert result["worker_outputs"]["c"] == "result C"
+    assert result["worker_outputs"]["a"]["artifact"] == "result A"
+    assert result["worker_outputs"]["b"]["artifact"] == "result B"
+    assert result["worker_outputs"]["c"]["artifact"] == "result C"
 
 
 def test_plan_dag_condition_skip_e2e():
@@ -650,8 +650,8 @@ def test_plan_dag_condition_skip_e2e():
     # B 未执行(worker_outputs 无 b)
     assert "b" not in result.get("worker_outputs", {})
     # A 和 C 有产出
-    assert result["worker_outputs"]["a"] == "result A"
-    assert result["worker_outputs"]["c"] == "result C"
+    assert result["worker_outputs"]["a"]["artifact"] == "result A"
+    assert result["worker_outputs"]["c"]["artifact"] == "result C"
 
 
 def test_plan_sequential_backward_compat_e2e():
@@ -717,7 +717,7 @@ def test_plan_sequential_backward_compat_e2e():
     assert result["plan"][0]["status"] == "done"
     assert result["plan"][1]["status"] == "done"
     # 两个 worker 都有产出
-    assert result["worker_outputs"]["coder"] == "print('hello world')"
-    assert result["worker_outputs"]["tester"] == "assert True"
+    assert result["worker_outputs"]["coder"]["artifact"] == "print('hello world')"
+    assert result["worker_outputs"]["tester"]["artifact"] == "assert True"
     # completed_steps 在 sequential 模式下不被写入(或为空)
     assert not result.get("completed_steps", set())
