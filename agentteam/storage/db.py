@@ -116,79 +116,8 @@ CREATE INDEX IF NOT EXISTS idx_evo_agent_success_ts ON evolution_history(agent_n
 CREATE INDEX IF NOT EXISTS idx_approvals_run_id_status_2 ON approvals(run_id, status);
 """
 
-# v5: 管理操作审计表(P-A3 对标阿里云 AgentTeams "安全审计"):
-# 记录 Team/Library/Evolution/Quota 等管理面 CRUD 操作,与 run_events(执行面)分离。
-# run_events 记 run 执行轨迹(actor 是 agent);admin_events 记管理操作(actor 是 operator)。
-_MIGRATION_V5 = """
-CREATE TABLE IF NOT EXISTS admin_events (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type   TEXT NOT NULL,
-    resource     TEXT NOT NULL,
-    resource_id  TEXT,
-    actor        TEXT NOT NULL DEFAULT 'api-user',
-    timestamp    TEXT NOT NULL,
-    payload      TEXT NOT NULL DEFAULT '{}'
-);
-CREATE INDEX IF NOT EXISTS idx_admin_events_ts ON admin_events(timestamp);
-CREATE INDEX IF NOT EXISTS idx_admin_events_resource ON admin_events(resource, resource_id);
-CREATE INDEX IF NOT EXISTS idx_admin_events_actor ON admin_events(actor);
-
-CREATE TABLE IF NOT EXISTS quotas (
-    team_name       TEXT PRIMARY KEY,
-    token_limit     INTEGER NOT NULL DEFAULT 0,
-    period_seconds  INTEGER NOT NULL DEFAULT 86400,
-    created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL,
-    description     TEXT NOT NULL DEFAULT ''
-);
-"""
-
-# v6: 用户/角色/权限(P-B1 对标阿里云 AgentTeams "访问控制:L1/L2/L3 + TeamAdmin"):
-# - users: 人类用户,API Key 与 user 绑定,实现 WAT 双身份
-# - roles: 角色定义(admin/manager/team_admin/user)
-# - user_roles: 用户-角色多对多(+ team_name 上下文,team_admin 仅对指定 team 生效)
-# - permissions: 角色权限矩阵(action 如 team:create/run:approve/quota:set)
-# 同时为 runs 加 triggered_by_user 列(P-B2 WAT 双身份)
-_MIGRATION_V6 = """
-CREATE TABLE IF NOT EXISTS users (
-    id           TEXT PRIMARY KEY,
-    username     TEXT NOT NULL UNIQUE,
-    display_name TEXT NOT NULL DEFAULT '',
-    email        TEXT,
-    api_key_hash TEXT NOT NULL UNIQUE,
-    status       TEXT NOT NULL DEFAULT 'active',
-    created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
-CREATE INDEX IF NOT EXISTS idx_users_api_key_hash ON users(api_key_hash);
-CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
-
-CREATE TABLE IF NOT EXISTS roles (
-    name        TEXT PRIMARY KEY,
-    description TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS user_roles (
-    user_id    TEXT NOT NULL,
-    role_name  TEXT NOT NULL,
-    team_name  TEXT,
-    PRIMARY KEY (user_id, role_name, team_name),
-    FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id);
-CREATE INDEX IF NOT EXISTS idx_user_roles_team ON user_roles(team_name);
-
-CREATE TABLE IF NOT EXISTS permissions (
-    role_name TEXT NOT NULL,
-    action    TEXT NOT NULL,
-    PRIMARY KEY (role_name, action),
-    FOREIGN KEY (role_name) REFERENCES roles(name)
-);
-"""
-
-# v6 ALTER: runs 加 triggered_by_user 列(P-B2 WAT 双身份)
+# v6 ALTER: runs 加 triggered_by_user 列 + run_events 加 trace_id/parent_span_id/chain 列
+# (原 v6 中 users/roles/permissions 成品表已移除,这里仅保留 runs/run_events 的 ALTER)
 # SQLite 不支持 ADD COLUMN IF NOT EXISTS,需 try/except
 _MIGRATION_V6_ALTER_RUNS = (
     "ALTER TABLE runs ADD COLUMN triggered_by_user TEXT"
@@ -218,63 +147,6 @@ def _migration_v6_alters(conn: sqlite3.Connection) -> None:
             pass
 
 
-# v7: Skill 供应链(P-B5):版本/可见性/per-consumer ACL
-# - skills 表:skill 元数据(可见性/版本/状态/所有者)
-# - skill_acls:per-consumer 调用授权(team_name → skill_name)
-# - mcp_servers 加 auth_type/auth_credential 列(P-B6 MCP 鉴权)
-_MIGRATION_V7 = """
-CREATE TABLE IF NOT EXISTS skills (
-    name        TEXT PRIMARY KEY,
-    version     INTEGER NOT NULL DEFAULT 1,
-    status      TEXT NOT NULL DEFAULT 'published',
-    visibility  TEXT NOT NULL DEFAULT 'public',
-    owner_team  TEXT,
-    description TEXT NOT NULL DEFAULT '',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status);
-CREATE INDEX IF NOT EXISTS idx_skills_visibility ON skills(visibility);
-CREATE INDEX IF NOT EXISTS idx_skills_owner ON skills(owner_team);
-
-CREATE TABLE IF NOT EXISTS skill_acls (
-    skill_name TEXT NOT NULL,
-    team_name  TEXT NOT NULL,
-    granted_at TEXT NOT NULL,
-    PRIMARY KEY (skill_name, team_name)
-);
-CREATE INDEX IF NOT EXISTS idx_skill_acls_skill ON skill_acls(skill_name);
-CREATE INDEX IF NOT EXISTS idx_skill_acls_team ON skill_acls(team_name);
-
-CREATE TABLE IF NOT EXISTS pep_policies (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL UNIQUE,
-    effect      TEXT NOT NULL DEFAULT 'deny',
-    principal   TEXT NOT NULL,
-    action      TEXT NOT NULL,
-    resource    TEXT NOT NULL,
-    condition   TEXT NOT NULL DEFAULT '{}',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_pep_principal ON pep_policies(principal);
-CREATE INDEX IF NOT EXISTS idx_pep_action ON pep_policies(action);
-"""
-
-# v7 ALTER: quotas 加 warn_threshold 列(P-B7 配额告警阈值)
-_MIGRATION_V7_ALTER_QUOTA = (
-    "ALTER TABLE quotas ADD COLUMN warn_threshold INTEGER NOT NULL DEFAULT 0"
-)
-
-
-def _migration_v7_alters(conn: sqlite3.Connection) -> None:
-    """v7 ALTER 兼容旧库:列已存在时静默跳过。"""
-    try:
-        conn.execute(_MIGRATION_V7_ALTER_QUOTA)
-    except sqlite3.OperationalError:
-        pass
-
-
 # v8: run_events 加 state_bucket 列(Graph Engineering 学习点 P5 状态四分)
 # state_bucket 区分事件所属状态桶:
 # - schedule: 调度状态(current_step/completed_steps/skipped_steps 推进)
@@ -296,30 +168,6 @@ def _migration_v8_alters(conn: sqlite3.Connection) -> None:
         pass
 
 
-# v9: Graph Engineering P4 外部 receipt 幂等 - webhook 投递追踪表
-# 文章原文:"付款、部署、发消息遇到超时,应先读取外部 receipt,再决定重试或补偿"
-# 每次投递生成唯一 delivery_id(payload 内),接收方可据此去重;
-# 投递失败时用同一 delivery_id 重试,接收方看到相同 delivery_id 即知是重试。
-# status: pending(首次) → delivered(成功) / failed(重试耗尽)
-_MIGRATION_V9 = """
-CREATE TABLE IF NOT EXISTS webhook_deliveries (
-    delivery_id      TEXT PRIMARY KEY,
-    run_id           TEXT NOT NULL,
-    event_type       TEXT NOT NULL,
-    target_url       TEXT NOT NULL,
-    payload          TEXT NOT NULL,
-    status           TEXT NOT NULL DEFAULT 'pending',
-    attempts         INTEGER NOT NULL DEFAULT 0,
-    last_error       TEXT,
-    first_attempt_at TEXT NOT NULL,
-    last_attempt_at  TEXT,
-    delivered_at     TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_run_id ON webhook_deliveries(run_id);
-CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status);
-"""
-
-
 # 迁移列表:(version, description, sql_or_callable)
 # - sql 为 str:直接 executescript
 # - sql 为 callable:调用以 conn 为参数,自行处理(用于 ALTER 等 idempotent 不可表达的场景)
@@ -337,13 +185,8 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (2, "evolution_history table (SP7b)", _MIGRATION_V2),
     (3, "library_agents.version column", _migration_v3),
     (4, "performance indexes (WAL/aggregate)", _MIGRATION_V4),
-    (5, "admin_events + quotas tables (P-A3/A4 governance)", _MIGRATION_V5),
-    (6, "users/roles/permissions + runs.triggered_by_user + run_events.trace_id (P-B1/B2/B3)", _MIGRATION_V6),
-    (7, "skill_acls + pep_policies + quotas.warn_threshold (P-B4/B5/B7)", _MIGRATION_V7),
-    (8, "ALTER runs/run_events/quotas for v6/v7 columns", _migration_v6_alters),
-    (9, "ALTER quotas.warn_threshold for v7", _migration_v7_alters),
+    (8, "ALTER runs/run_events for v6 columns (triggered_by_user/trace_id/parent_span_id/chain)", _migration_v6_alters),
     (10, "ALTER run_events.state_bucket for v8 (Graph Engineering P5)", _migration_v8_alters),
-    (11, "webhook_deliveries table (Graph Engineering P4 external receipt)", _MIGRATION_V9),
 ]
 
 

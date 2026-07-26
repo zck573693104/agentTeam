@@ -117,28 +117,6 @@ def test_sse_replay_after_run_completes(make_client):
     assert "run_end" in text
 
 
-def test_sse_for_interrupted_run(make_client):
-    """有 step 审批的 run 中断后连 SSE，应收到 run_interrupted 事件。"""
-    from agentteam.runtime.nodes import Plan, PlanStep
-
-    llm = FakeLLM()
-    llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    provider = FakeModelProvider({"qwen-max": llm})
-
-    client = make_client(provider)
-    client.post("/api/teams", json=make_team_json(with_approval=True))
-
-    resp = client.post("/api/runs", json={"team_name": "dev", "task": "approval test"})
-    run_id = resp.json()["run_id"]
-    _wait_for_run(client, run_id)
-
-    # 连 SSE
-    resp = client.get(f"/api/runs/{run_id}/stream")
-    assert resp.status_code == 200
-    text = resp.text
-    assert "run_interrupted" in text
-
-
 def test_sse_connects_while_run_is_running(make_client):
     """客户端在 run 执行中连 SSE，应通过直播模式收到事件并在 run_end 后关闭。
 

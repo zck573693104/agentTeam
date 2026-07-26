@@ -8,7 +8,6 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from agentteam.domain.agent import Agent
-from agentteam.domain.approval import ApprovalPolicy
 from agentteam.logging_config import get_logger
 from agentteam.runtime.errors import RunCancelledError
 from agentteam.runtime.state import TeamState
@@ -377,25 +376,32 @@ def make_finalize(
 def make_tool_step(
     agent: Agent,
     tools: list[BaseTool],
-    approval_policy: ApprovalPolicy | None = None,
     trace_writer: TraceWriter | None = None,
-    audit_repo=None,
-    pep_repo=None,
+    pipeline=None,
 ):
-    """创建 tool_step 节点：检查工具级审批 → interrupt → 执行工具 → 回灌结果。
+    """创建 tool_step 节点：执行 ToolCallPipeline → 回灌 ToolMessage。
 
-    审批按批次：批次中任一工具匹配 targets 则触发一次 interrupt。
-    所有副作用（DB 写、trace、工具执行）放在 interrupt() 之后。
+    架构调整(借鉴 pi-mono):原 make_tool_step 内嵌 PEP 拦截 + 审批 + 执行
+    三件事,现解耦为可插拔 ToolCallPipeline。core 仅提供 pipeline 框架
+    和默认 ExecutionStage;审批/PEP 等成品功能通过 stage 或 hooks 注入。
 
-    P-B4 PEP 指令级拦截:工具调用前先评估策略,
-    deny 的工具直接返回拒绝消息(不进入审批流程,不执行)。
-    pep_repo=None 时跳过 PEP(向后兼容)。
+    Args:
+        agent: 执行此步的 worker agent。
+        tools: 可用工具列表。
+        trace_writer: 轨迹写入器(可选)。
+        pipeline: 预构建的 ToolCallPipeline(可选)。None 时用默认 pipeline
+            (仅 ExecutionStage)。调用方可通过 pipeline.add_stage 注入自定义 stage。
     """
-    from langgraph.types import interrupt
-    from agentteam.runtime.approval import _should_approve
-    from agentteam.runtime.pep import check_pep, PEPDeniedError
+    from agentteam.runtime.tool_pipeline import (
+        ToolCallContext,
+        ToolCallPipeline,
+        build_default_pipeline,
+    )
+    from agentteam.runtime.hooks import get_hooks
 
     tool_map = {t.name: t for t in tools}
+    active_pipeline = pipeline or build_default_pipeline(tool_map)
+    hooks = get_hooks()
 
     def tool_step(state: dict) -> dict:
         run_id = state.get("run_id", "")
@@ -403,110 +409,43 @@ def make_tool_step(
         iteration = state.get("iteration", 0)
         new_messages = []
 
-        # P-B4 PEP 指令级拦截:策略 deny 的工具直接拒绝,不进入审批/执行
-        # 逐个评估,deny 的工具回灌拒绝消息;allow 的工具继续走原流程
-        if pep_repo is not None and tool_calls:
-            allowed_calls: list[dict] = []
-            for tc in tool_calls:
-                try:
-                    check_pep(
-                        pep_repo,
-                        principal=agent.name,
-                        action="tool:invoke",
-                        resource=tc["name"],
-                    )
-                    allowed_calls.append(tc)
-                except PEPDeniedError as e:
-                    if trace_writer is not None:
-                        trace_writer.emit(
-                            run_id, "tool_call", agent.name,
-                            {
-                                "tools": [tc["name"]],
-                                "pep": "denied",
-                                "reason": e.reason,
-                            },
-                        )
-                    new_messages.append(
-                        ToolMessage(
-                            content=f"工具 {tc['name']} 被 PEP 策略拒绝: {e.reason}",
-                            tool_call_id=tc["id"],
-                        )
-                    )
-            tool_calls = allowed_calls
-            if not tool_calls:
-                # 全部被 PEP 拒绝,直接返回
-                return {
-                    "react_messages": new_messages,
-                    "tool_calls": [],
-                    "iteration": iteration + 1,
-                }
-
-        # 检查是否需要工具级审批
-        needs_approval = (
-            approval_policy is not None
-            and approval_policy.level == "tool"
-            and any(_should_approve(approval_policy, tc["name"]) for tc in tool_calls)
-        )
-
-        if needs_approval:
-            decision = interrupt({
-                "gate": "tool",
-                "worker": agent.name,
-                "tool_calls": [{"name": tc["name"], "args": tc["args"]} for tc in tool_calls],
-                "message": f"Worker {agent.name} 请求调用工具: {[tc['name'] for tc in tool_calls]}",
-            })
-            approved = decision.get("approved", False)
-            decider = decision.get("decider", "unknown")
-
-            # 副作用在 interrupt 之后
-            if audit_repo is not None:
-                approval_id = audit_repo.add_approval(run_id)
-                audit_repo.decide_approval(
-                    approval_id, "approved" if approved else "rejected", decider
-                )
-            if trace_writer is not None:
-                trace_writer.emit(
-                    run_id, "approval_requested", "system",
-                    {"gate": "tool", "worker": agent.name,
-                     "tools": [tc["name"] for tc in tool_calls]},
-                )
-                trace_writer.emit(
-                    run_id, "approval_decided", decider,
-                    {"gate": "tool", "approved": approved},
-                )
-
-            if not approved:
-                for tc in tool_calls:
-                    new_messages.append(
-                        ToolMessage(content="工具调用已被拒绝", tool_call_id=tc["id"])
-                    )
-                return {
-                    "react_messages": new_messages,
-                    "tool_calls": [],
-                    "iteration": iteration + 1,
-                }
-
-        # 执行工具
-        if trace_writer is not None:
+        if trace_writer is not None and tool_calls:
             trace_writer.emit(
                 run_id, "tool_call", agent.name,
                 {"tools": [tc["name"] for tc in tool_calls]},
             )
 
         for tc in tool_calls:
-            tool = tool_map.get(tc["name"])
-            if tool is None:
-                result = f"工具 {tc['name']} 不存在"
-            else:
-                try:
-                    result = tool.invoke(tc["args"])
-                except Exception as e:
-                    # P2-7:加日志记录工具名与异常,便于排障
-                    logger.exception("tool %s invoke failed", tc["name"])
-                    result = f"工具执行出错：{type(e).__name__}: {e}"
-            new_messages.append(
-                ToolMessage(content=str(result), tool_call_id=tc["id"])
+            # 构建 pipeline 上下文
+            ctx = ToolCallContext(
+                run_id=run_id,
+                agent_name=agent.name,
+                tool_call=tc,
+                state=dict(state),
             )
+            # pre_tool_call 钩子(对标 pi-mono beforeToolCall)
+            # 钩子可往 ctx.metadata 写决策信息,供后续 stage 读取
+            hooks.emit("pre_tool_call", {
+                "run_id": run_id,
+                "agent_name": agent.name,
+                "tool_call": tc,
+                "ctx": ctx,
+            })
+            # 执行 pipeline
+            result = active_pipeline.execute(ctx)
+            new_messages.append(
+                ToolMessage(
+                    content=result.content,
+                    tool_call_id=result.tool_call_id,
+                )
+            )
+            # post_tool_call 钩子(对标 pi-mono afterToolCall)
+            hooks.emit("post_tool_call", {
+                "run_id": run_id,
+                "agent_name": agent.name,
+                "tool_call": tc,
+                "result": result,
+            })
 
         return {
             "react_messages": new_messages,
@@ -525,26 +464,24 @@ def make_worker_subgraph(
     audit_repo=None,
     run_manager=None,
     skills: dict[str, str] | None = None,
-    pep_repo=None,
+    pipeline=None,
 ):
     """编译 Worker ReAct 子图：init_worker → agent_step → tool_step → 循环 → finalize。
 
     返回 compiled subgraph，可直接作为父图的节点。
     新增 run_manager 参数:透传给 make_agent_step,使 worker 能检查取消信号。
     新增 skills 参数(SP7a):透传给 make_init_worker,注入到 react_messages。
-    新增 pep_repo 参数(P-B4):透传给 make_tool_step,实现指令级 PEP 拦截。
+    新增 pipeline 参数(架构调整):透传给 make_tool_step,可插拔工具调用流水线。
     """
     from langgraph.graph import END, START, StateGraph
     from agentteam.runtime.state import WorkerState
-
-    approval_policy = agent.approval_policy
 
     sg = StateGraph(WorkerState)
     sg.add_node("init_worker", make_init_worker(agent, trace_writer, skills=skills))
     sg.add_node("agent_step", make_agent_step(agent, llm, tools, run_manager=run_manager))
     sg.add_node(
         "tool_step",
-        make_tool_step(agent, tools, approval_policy, trace_writer, audit_repo, pep_repo=pep_repo),
+        make_tool_step(agent, tools, trace_writer, pipeline=pipeline),
     )
     sg.add_node("finalize", make_finalize(agent, trace_writer))
 
@@ -584,36 +521,34 @@ def make_worker_node(
     audit_repo=None,
     run_manager=None,
     skills: dict[str, str] | None = None,
-    pep_repo=None,
+    pipeline=None,
 ):
     """返回可调用节点函数，内部使用子图。
 
     剥离共享累加器字段（messages/audit_events/worker_outputs）后传入子图，
     避免子图 reducer 与父图 reducer 双重累积导致重复。
-    透传 config 以支持子图内 interrupt/resume（工具级审批）。
+    透传 config 以支持子图内 interrupt/resume。
 
     输出过滤:dag 模式下多个 worker 并行触发,子图回传的 plan/current_step 等
     LastValue 通道会并发写入冲突(InvalidUpdateError)。因此只回传累加器
-    (有 reducer) + dag 模式 completed_steps + 审批信号,其余字段由父图自管。
+    (有 reducer) + dag 模式 completed_steps,其余字段由父图自管。
     新增 run_manager 参数:透传给 make_worker_subgraph,使 worker 能检查取消信号。
     新增 skills 参数(SP7a):透传给 make_worker_subgraph,注入到 react_messages。
-    新增 pep_repo 参数(P-B4):透传给 make_worker_subgraph,实现指令级 PEP 拦截。
+    新增 pipeline 参数(架构调整):透传给 make_worker_subgraph,可插拔工具流水线。
     """
     subgraph = make_worker_subgraph(
         agent, llm, tools, trace_writer, audit_repo,
-        run_manager=run_manager, skills=skills, pep_repo=pep_repo,
+        run_manager=run_manager, skills=skills, pipeline=pipeline,
     )
 
     # 共享累加器字段：子图不需要读取它们（只用 react_messages 内部通信），
     # 但若传入，子图的 reducer 会累积它们，返回时父图 reducer 再次累积 → 重复。
     # 因此从输入中剥离，让子图只产出自己的增量。
     _ACCUMULATOR_KEYS = frozenset({"messages", "audit_events", "worker_outputs", "total_tokens"})
-    # 只回传这些 key:累加器(有 reducer) + dag completed_steps(set_union) + 审批信号。
-    # plan/current_step/execution_mode 等 LastValue 通道不回传,避免并行 worker 冲突。
+    # 只回传这些 key:累加器(有 reducer) + dag completed_steps(set_union)。
     _RETURN_KEYS = frozenset({
         "messages", "audit_events", "worker_outputs", "total_tokens",
         "completed_steps",  # dag 模式:worker 完成后回传 {current_step_id}
-        "pending_approval",  # 审批中断信号需冒泡到父图
     })
 
     def worker_node(state: TeamState, config=None) -> dict:

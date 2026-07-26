@@ -1,6 +1,5 @@
-"""agentteam.runtime — 执行内核（TeamCompiler, nodes, state, trace, approval）。"""
+"""agentteam.runtime — 执行内核（TeamCompiler, nodes, state, trace）。"""
 
-from agentteam.runtime.approval import make_step_gate, make_worker_gate
 from agentteam.runtime.graph import TeamCompiler
 from agentteam.runtime.nodes import (
     make_agent_step,
@@ -28,9 +27,7 @@ __all__ = [
     "make_init_worker",
     "make_leader_plan_node",
     "make_leader_review_node",
-    "make_step_gate",
     "make_tool_step",
-    "make_worker_gate",
     "make_worker_node",
     "make_worker_subgraph",
 ]

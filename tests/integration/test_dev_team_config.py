@@ -110,4 +110,3 @@ def test_dev_team_can_be_compiled():
     assert "worker_coder" in node_names
     assert "worker_tester" in node_names
     assert "worker_reviewer" in node_names
-    assert "step_gate" in node_names  # Leader 有 step 级策略

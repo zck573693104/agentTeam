@@ -3,57 +3,20 @@
 覆盖:
 - has_graph: 判断 run_id 是否有内存态 graph(Task 1)
 - recompile_and_resume: lazy recompile + resume(Task 2)
-- approve_run lazy recompile 路径(Task 3)
-- approve_run fast path 不变(Task 4)
+
+Task 3/4(approve_run lazy recompile / fast path 路径)原测试依赖 step 审批
+产生的 interrupted 状态，架构调整后 step_gate 不再创建，已删除。
 """
 import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from langgraph.checkpoint.sqlite import SqliteSaver
-
 from agentteam.api.events import EventBus
-from agentteam.api.routes.runs import runs_router
-from agentteam.api.routes.teams import teams_router
 from agentteam.api.run_manager import RunManager
-from agentteam.api.store import TeamStore
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
 from agentteam.storage.runs import RunRepo
 from agentteam.tools.registry import ToolRegistry
-from tests.api.conftest import _wait_for_run, make_provider_with_plan, make_team_json
-
-
-def _build_app_with_run_manager(tmp_path):
-    """手动创建 app 并暴露 run_manager,便于模拟重启/注入 mock。
-
-    与 test_api_approvals_robustness.py 中的同名 helper 同构,
-    但 RunManager 注入了 checkpointer(P0 新增),使 lazy recompile 可用。
-    """
-    conn = init_db(tmp_path / "test.db")
-    conn_lock = threading.Lock()
-    run_repo = RunRepo(conn, lock=conn_lock)
-    audit_repo = AuditRepo(conn, lock=conn_lock)
-    team_store = TeamStore()
-    event_bus = EventBus()
-    saver = SqliteSaver(conn)
-    saver.lock = conn_lock
-    saver.setup()
-    run_manager = RunManager(run_repo, audit_repo, event_bus, checkpointer=saver)
-    provider = make_provider_with_plan()
-    tr = ToolRegistry()
-
-    app = FastAPI()
-    app.include_router(teams_router(team_store))
-    app.include_router(
-        runs_router(
-            run_manager, team_store, provider, tr, run_repo, audit_repo, event_bus,
-            checkpointer=saver,
-        )
-    )
-    return app, run_manager, run_repo, audit_repo, event_bus, conn
 
 
 # ===== Task 1: has_graph =====
@@ -175,124 +138,10 @@ def test_recompile_uses_correct_checkpointer(tmp_path):
     conn.close()
 
 
-# ===== Task 3: approve_run lazy recompile 路径 =====
-
-
-def test_approve_after_restart_recompiles_and_resumes(tmp_path):
-    """模拟服务重启(清空 _graphs/_configs/_threads),approve 应 lazy recompile + resume,run 最终完成。
-
-    场景:
-    1. 启动 run → interrupted(step 审批)
-    2. 模拟重启:清空 RunManager 内存(_graphs/_configs/_threads)
-    3. approve → 触发 lazy recompile(从 team_store 取 Team + 重新 compile + resume)
-    4. SqliteSaver checkpoint 持久化 interrupt 状态,新 graph 能从 checkpoint 续跑
-    5. run 最终 completed
-    """
-    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(
-        tmp_path
-    )
-    client = TestClient(app)
-
-    client.post("/api/teams", json=make_team_json(with_approval=True))
-    resp = client.post("/api/runs", json={"team_name": "dev", "task": "restart recompile"})
-    run_id = resp.json()["run_id"]
-    status = _wait_for_run(client, run_id)
-    assert status == "interrupted", f"setup 失败:run 未到 interrupted(实际 {status})"
-
-    # 模拟服务重启:清空 RunManager 内存状态
-    with run_manager._lock:
-        run_manager._graphs.clear()
-        run_manager._configs.clear()
-        run_manager._threads.clear()
-    assert not run_manager.has_graph(run_id), "重启后 has_graph 应为 False"
-
-    # approve 应触发 lazy recompile + resume,返回 200
-    resp = client.post(
-        f"/api/runs/{run_id}/approve", json={"approved": True, "reason": "ok"}
-    )
-    assert resp.status_code == 200, f"lazy recompile 后 approve 应成功,实际: {resp.status_code} {resp.text}"
-
-    # run 应最终完成(checkpoint 续跑成功)
-    status = _wait_for_run(client, run_id, timeout=15.0)
-    assert status == "completed", (
-        f"lazy recompile 后 run 应完成,实际: {status}"
-    )
-
-    conn.close()
-
-
-def test_approve_after_restart_team_deleted_returns_409(tmp_path):
-    """重启后 team 也被删除,approve 应返回 409 + run 标 failed(ValueError 路径)。"""
-    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(
-        tmp_path
-    )
-    client = TestClient(app)
-
-    client.post("/api/teams", json=make_team_json(with_approval=True))
-    resp = client.post("/api/runs", json={"team_name": "dev", "task": "team deleted"})
-    run_id = resp.json()["run_id"]
-    status = _wait_for_run(client, run_id)
-    assert status == "interrupted"
-
-    # 模拟重启 + team 被删
-    with run_manager._lock:
-        run_manager._graphs.clear()
-        run_manager._configs.clear()
-        run_manager._threads.clear()
-    del_resp = client.delete("/api/teams/dev")
-    assert del_resp.status_code == 200
-
-    # approve:team 不存在 → ValueError → 409 + run failed
-    resp = client.post(
-        f"/api/runs/{run_id}/approve", json={"approved": True}
-    )
-    assert resp.status_code == 409
-    assert "not found" in resp.json()["detail"].lower()
-
-    run = client.get(f"/api/runs/{run_id}").json()
-    assert run["status"] == "failed", (
-        f"team 不存在时 run 应标 failed,实际: {run['status']}"
-    )
-
-    # 应有 error 事件
-    trace = client.get(f"/api/runs/{run_id}/trace").json()
-    assert any(e["event_type"] == "error" for e in trace)
-
-    conn.close()
-
-
-# ===== Task 4: fast path 不变 =====
-
-
-def test_approve_with_graph_present_uses_fast_path(tmp_path):
-    """graph 存在时(未重启),approve 走 fast path(resume_run),不触发 recompile_and_resume。
-
-    保护性测试:确保 P0 改造不破坏正常流程(graph 在内存时不应走 recompile)。
-    """
-    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(
-        tmp_path
-    )
-    client = TestClient(app)
-
-    client.post("/api/teams", json=make_team_json(with_approval=True))
-    resp = client.post("/api/runs", json={"team_name": "dev", "task": "fast path"})
-    run_id = resp.json()["run_id"]
-    status = _wait_for_run(client, run_id)
-    assert status == "interrupted"
-
-    # graph 仍存在(未重启)
-    assert run_manager.has_graph(run_id) is True
-
-    # mock recompile_and_resume 验证未被调用(fast path 应走 resume_run)
-    with patch.object(run_manager, "recompile_and_resume") as mock_recompile:
-        resp = client.post(
-            f"/api/runs/{run_id}/approve", json={"approved": True, "reason": "fast"}
-        )
-        assert resp.status_code == 200, f"fast path approve 应成功,实际: {resp.status_code}"
-        mock_recompile.assert_not_called()
-
-    # run 应正常完成(fast path resume_run 续跑)
-    status = _wait_for_run(client, run_id, timeout=15.0)
-    assert status == "completed", f"fast path 后 run 应完成,实际: {status}"
-
-    conn.close()
+# ===== Task 3 & 4: approve_run lazy recompile / fast path 路径 =====
+#
+# 原 test_approve_after_restart_recompiles_and_resumes /
+# test_approve_after_restart_team_deleted_returns_409 /
+# test_approve_with_graph_present_uses_fast_path 三个测试依赖 step 审批
+# 产生的 interrupted 状态。架构调整后 step_gate/worker_gate 不再创建，
+# run 不会进入 interrupted 状态，这三个测试已删除。

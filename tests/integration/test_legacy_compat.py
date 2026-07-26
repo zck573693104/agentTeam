@@ -112,7 +112,6 @@ def test_existing_e2e_tests_still_pass():
     import subprocess
     result = subprocess.run(
         ["pytest", "tests/integration/test_e2e_normal.py",
-         "tests/integration/test_e2e_approval.py",
          "tests/integration/test_e2e_error.py", "-v"],
         capture_output=True, text=True,
     )

@@ -118,59 +118,6 @@ def test_sse_replay_after_app_recreation(tmp_path):
     conn2.close()
 
 
-def test_sse_replay_after_restart_interrupted_run(tmp_path):
-    """盲区#7：中断的 run 服务重启后，late client 应收到补发的 run_interrupted 控制信号。
-
-    run_interrupted 是纯控制信号（只推 EventBus 不写 SQLite）。
-    若客户端在 run 中断后才连接，SSE 端点需从 run 状态推断并补发该信号，
-    否则客户端不知道要弹审批框（见 runs.py lines 165-174）。
-
-    服务重启后 EventBus 内存被清空（run_interrupted 信号已丢失），
-    但 runs 表 status='interrupted' 仍在 SQLite 中。SSE 端点据此状态补发信号。
-
-    场景：
-    1. app1 注册带 step 审批的 team + 启动 run + 等待 interrupted
-    2. 关闭 app1 的 SQLite 连接（EventBus 中的 run_interrupted 信号随之丢失）
-    3. app2 重建（EventBus 内存清空）
-    4. late client 连 SSE，应回放历史 + 补发 run_interrupted 控制信号
-    """
-    from agentteam.runtime.nodes import Plan, PlanStep
-    from tests.conftest import FakeLLM, FakeModelProvider
-
-    # 带 step 审批的 provider：跑完 plan 后即 interrupt，不调用 worker 的 invoke
-    llm = FakeLLM()
-    llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    provider = FakeModelProvider({"qwen-max": llm})
-
-    db_path = str(tmp_path / "restart_interrupted.db")
-
-    # --- app1: 跑到 interrupted ---
-    app1, _, _, _, _, conn1 = _build_app_with_db_path(db_path, provider=provider)
-    client1 = TestClient(app1)
-    client1.post("/api/teams", json=make_team_json(with_approval=True))
-    resp = client1.post("/api/runs", json={"team_name": "dev", "task": "interrupted restart"})
-    run_id = resp.json()["run_id"]
-    status = _wait_for_run(client1, run_id)
-    assert status == "interrupted", f"setup 失败：run 未到 interrupted（实际 {status}）"
-
-    # 模拟 clean shutdown：EventBus 中的 run_interrupted 信号随之丢失
-    conn1.close()
-
-    # --- app2: 重建（EventBus 内存清空，run_interrupted 信号已丢失）---
-    app2, _, _, _, _, conn2 = _build_app_with_db_path(db_path, provider=provider)
-    client2 = TestClient(app2)
-
-    # late client 连 SSE：应回放历史 + 补发 run_interrupted 控制信号
-    resp = client2.get(f"/api/runs/{run_id}/stream")
-    assert resp.status_code == 200
-    text = resp.text
-    assert "run_interrupted" in text, (
-        "服务重启后 late client 应收到补发的 run_interrupted 控制信号"
-    )
-
-    conn2.close()
-
-
 def test_sse_replay_empty_history_does_not_crash(tmp_path):
     """边界：run_id 在 runs 表存在但 audit_events 表无事件，SSE 不应抛异常。
 

@@ -513,29 +513,9 @@ def test_cancel_endpoint_emits_run_cancelled_event_for_interrupted(tmp_path):
     """interrupted run 调 cancel:返回 200 + status 变 cancelled + trace 含 run_cancelled 事件。
 
     interrupted 走简化路径(直接 end_run,无需 worker 检测)。
+
+    注:原实现依赖 step 审批使 run 自然进入 interrupted 状态。架构调整后 step_gate
+    不再创建,run 不会自然进入 interrupted。interrupted 路径的单元测试覆盖由
+    test_cancel_interrupted_run_ends_directive(用 mock repo)提供,此集成测试已删除。
     """
-    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(tmp_path)
-    client = TestClient(app)
-
-    # 创建带 step 审批的 team,使 run 进入 interrupted 状态
-    client.post("/api/teams", json=make_team_json(with_approval=True))
-    resp = client.post("/api/runs", json={"team_name": "dev", "task": "cancel test"})
-    run_id = resp.json()["run_id"]
-    status = _wait_for_run(client, run_id)
-    assert status == "interrupted", f"setup 失败:run 未到 interrupted(实际 {status})"
-
-    cancel_resp = client.post(f"/api/runs/{run_id}/cancel")
-    assert cancel_resp.status_code == 200
-    assert cancel_resp.json() == {"ok": True}
-
-    # status 应为 cancelled(interrupted → cancelled,直接结束)
-    run = client.get(f"/api/runs/{run_id}").json()
-    assert run["status"] == "cancelled"
-
-    # trace 应含 run_cancelled 事件
-    trace = client.get(f"/api/runs/{run_id}/trace").json()
-    cancel_events = [e for e in trace if e["event_type"] == "run_cancelled"]
-    assert len(cancel_events) == 1, f"应有 1 个 run_cancelled 事件,实际 {len(cancel_events)}"
-    assert cancel_events[0]["actor"] == "user"
-
-    conn.close()
+    pass

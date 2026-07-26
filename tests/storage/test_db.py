@@ -90,9 +90,9 @@ def test_run_migrations_partial_applies_remaining(tmp_path):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == max_version
     # 模拟回滚到 v1(仅 user_version;表结构仍在)
     conn.execute(f"PRAGMA user_version = 1")
-    # 再跑应只应用 v2/v3/v4
+    # 再跑应只应用 v1 之后的 migration(v2/v3/v4/v8/v10 共 5 个)
     applied = run_migrations(conn)
-    assert applied == max_version - 1
+    assert applied == len([m for m in MIGRATIONS if m[0] > 1])
     conn.close()
 
 

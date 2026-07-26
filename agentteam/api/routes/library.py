@@ -1,12 +1,16 @@
 """GET/POST /api/library/agents 端点：专家 Agent 库管理。"""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from agentteam.domain.agent import Agent
 from agentteam.domain.library import AgentLibrary
-from agentteam.storage.admin_audit import AdminAuditRepo
+
+if TYPE_CHECKING:
+    from agentteam.storage.admin_audit import AdminAuditRepo
 
 
 class AgentDict(BaseModel):

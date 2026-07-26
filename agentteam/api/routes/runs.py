@@ -15,9 +15,7 @@ from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
 from agentteam.domain.library import AgentLibrary
 from agentteam.models.provider import ModelProvider
-from agentteam.storage.admin_audit import AdminAuditRepo
 from agentteam.storage.audit import AuditRepo
-from agentteam.storage.quotas import QuotaRepo
 from agentteam.storage.runs import RunRepo
 from agentteam.tools.registry import ToolRegistry
 
@@ -148,9 +146,6 @@ def runs_router(
                 checkpointer=checkpointer,
                 trace_writer=trace_writer,
                 audit_repo=audit_repo,
-                triggered_by_user=triggered_by_user,
-                pep_repo=pep_repo,
-                delivery_repo=delivery_repo,
             )
         except Exception as e:
             run_repo.end_run(run_id, "failed")
@@ -356,7 +351,6 @@ def runs_router(
                         skill_loader=skill_loader,
                     ),
                     approved=req.approved, reason=req.reason, decider=decider,
-                    delivery_repo=delivery_repo,
                 )
         except Exception as e:
             # BUG-10 修复(沿用):catch Exception 确保任何 resume/recompile 异常

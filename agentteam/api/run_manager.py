@@ -20,13 +20,11 @@ if TYPE_CHECKING:
 logger = get_logger("api.run_manager")
 
 # 后台 run 线程池上限(防止 1000 并发 run 启 1000 线程压垮进程)。
-# evolution 单独的线程池(避免 evolution 占满 run 线程池)。
 # interrupted run TTL:超过该秒数未被 resume 的 interrupted run,
 # 视为被遗弃,从内存驱逐 graph/config(节省内存,resume 时按 lazy recompile 路径重建)。
 # 全部从集中式 Settings 读取(原 os.environ.get 已收敛到 agentteam.config)。
 _settings = get_settings()
 _MAX_RUN_WORKERS = _settings.max_run_workers
-_MAX_EVOLUTION_WORKERS = _settings.max_evolution_workers
 _INTERRUPTED_TTL_SECONDS = _settings.interrupted_ttl_seconds
 _SWEEP_INTERVAL_SECONDS = _settings.interrupted_sweep_interval_seconds
 
@@ -45,9 +43,7 @@ class RunManager:
         audit_repo: AuditRepo,
         event_bus: EventBus,
         checkpointer=None,
-        evolution_engine=None,
         max_run_workers: int = _MAX_RUN_WORKERS,
-        max_evolution_workers: int = _MAX_EVOLUTION_WORKERS,
     ) -> None:
         self._run_repo = run_repo
         self._audit_repo = audit_repo
@@ -61,7 +57,6 @@ class RunManager:
         self._threads: dict[str, Future] = {}
         self._lock = threading.Lock()
         self._cancel_events: dict[str, threading.Event] = {}
-        self._evolution = evolution_engine
         # interrupted_at:记录 run 进入 interrupted 状态的时间戳,
         # 用于 TTL 清理(避免 abandoned interrupted run 永久驻留内存)
         self._interrupted_at: dict[str, float] = {}
@@ -69,9 +64,6 @@ class RunManager:
         # 提交超限的 run 会在池内排队等待,而非立即失败。
         self._run_executor = ThreadPoolExecutor(
             max_workers=max_run_workers, thread_name_prefix="agentteam-run",
-        )
-        self._evolution_executor = ThreadPoolExecutor(
-            max_workers=max_evolution_workers, thread_name_prefix="agentteam-evo",
         )
         # 后台定时清理 interrupted run 内存态(P1 资源泄漏修复)。
         # _sweep_interrupted_runs 原本仅在 shutdown 时调用,正常运行期间
@@ -113,7 +105,6 @@ class RunManager:
         approved: bool,
         reason: str | None = None,
         decider: str = "api-user",
-        delivery_repo=None,
     ) -> None:
         """lazy recompile: 用 compiler_factory 构造 graph,注入内存,再 resume。
 
@@ -127,8 +118,6 @@ class RunManager:
             compiler_factory: 无参闭包,返回注册好所有 team 的 TeamCompiler。
                               抽成闭包避免 RunManager 直接依赖 ModelProvider/ToolRegistry 等。
             approved / reason / decider: 透传给 resume_run
-            delivery_repo: Graph Engineering P4 webhook 投递追踪仓库,
-                透传给 compiler.compile → approval gate(服务重启后仍需幂等追踪)。
 
         异常契约:
             compiler_factory() / compiler.compile() / resume_run() 抛出的异常
@@ -143,7 +132,6 @@ class RunManager:
             checkpointer=self._saver,
             trace_writer=trace_writer,
             audit_repo=self._audit_repo,
-            delivery_repo=delivery_repo,
         )
         config = {"configurable": {"thread_id": run_id}}
         with self._lock:
@@ -192,7 +180,7 @@ class RunManager:
             resume_value["reason"] = reason
 
         self._run_repo.update_status(run_id, "running")
-        # resume 走 run 线程池而非 evolution 线程池:resume 仍是 run 执行路径
+        # resume 走 run 线程池:resume 仍是 run 执行路径
         future = self._run_executor.submit(
             self._resume_in_background, run_id, graph, config,
             Command(resume=resume_value),
@@ -440,7 +428,7 @@ class RunManager:
         """关闭后台线程池,释放资源。
 
         在 server.py lifespan 的 shutdown 阶段调用,确保进程退出时
-        所有 run/evolution 后台任务有机会完成或被取消。
+        所有 run 后台任务有机会完成或被取消。
 
         参数:
             wait: True=等待正在执行的任务完成(优雅停机);
@@ -453,31 +441,6 @@ class RunManager:
         # 驱逐 interrupted run 的内存态
         self._sweep_interrupted_runs()
         self._run_executor.shutdown(wait=wait, cancel_futures=not wait)
-        self._evolution_executor.shutdown(wait=wait, cancel_futures=not wait)
-
-    def _trigger_evolution_async(self, run_id: str) -> None:
-        """异步触发 EvolutionEngine(SP7b)。
-
-        提交到 evolution_executor(独立小池):不阻塞 API 响应,
-        失败不影响 run 结果。evolution_engine=None 时静默跳过(向后兼容)。
-        单独线程池避免 evolution 占满 run 线程池导致新 run 排队。
-
-        异常隔离:trigger 内部各维度已有 try/except,但 trigger() 顶层
-        仍可能抛异常(get_run DB 异常 / update_version / skill_loader.reload),
-        用 _safe_trigger wrapper 捕获所有异常并记录日志,
-        保持与 _run_in_background 的 try/except 风格一致。
-        """
-        if self._evolution is None:
-            return
-
-        def _safe_trigger() -> None:
-            try:
-                self._evolution.trigger(run_id)
-            except Exception:
-                # executor 异常不应影响 run 已标记的终态,但必须记录日志以便排障
-                logger.exception("evolution trigger failed for run %s", run_id)
-
-        self._evolution_executor.submit(_safe_trigger)
 
     def _run_in_background(self, run_id: str, graph, config: dict, task: str) -> None:
         try:
@@ -558,8 +521,6 @@ class RunManager:
                     run_id, {"id": eid, "event_type": "run_end", "run_id": run_id}
                 )
                 self._cleanup_run(run_id)
-                # SP7b: completed 后异步触发进化
-                self._trigger_evolution_async(run_id)
             else:
                 # status 非 running(被 cancel 为 cancelling),推进到 cancelled
                 self._finalize_cancellation(run_id)
@@ -654,7 +615,3 @@ class RunManager:
                 },
             )
         self._cleanup_run(run_id)
-        # SP7b: failed 后异步触发进化(cancelled 不触发)。
-        # 触发顺序与 _handle_invoke_result 对称:cleanup 之后,确保内存态已释放。
-        if not isinstance(error, RunCancelledError):
-            self._trigger_evolution_async(run_id)
