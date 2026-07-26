@@ -25,6 +25,9 @@ PRESET_REGISTRY: dict[str, str] = {
     "customer_support": "agentteam.presets.customer_support",
     "data_analysis": "agentteam.presets.data_analysis",
     "content_marketing": "agentteam.presets.content_marketing",
+    "schedule_management": "agentteam.presets.schedule_management",
+    "project_management": "agentteam.presets.project_management",
+    "personal_assistant": "agentteam.presets.personal_assistant",
 }
 
 

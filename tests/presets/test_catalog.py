@@ -42,10 +42,27 @@ def test_get_preset_enterprise_dev_returns_module():
     assert mod.METADATA["name"] == "enterprise_dev"
 
 
-def test_list_presets_returns_all_four():
-    """list_presets 返回 4 个 preset(完成 Task 5 后)。"""
+def test_list_presets_returns_all_seven():
+    """list_presets 返回 7 个 preset(4 企业级 + 3 生产力)。"""
     from agentteam.presets import list_presets
     result = list_presets()
     names = sorted(p["name"] for p in result)
-    assert names == ["content_marketing", "customer_support",
-                     "data_analysis", "enterprise_dev"]
+    assert names == [
+        "content_marketing", "customer_support", "data_analysis",
+        "enterprise_dev", "personal_assistant", "project_management",
+        "schedule_management",
+    ]
+
+
+def test_list_presets_includes_productivity_category():
+    """list_presets 包含 productivity 分类(日程/项目/个人助理)。"""
+    from agentteam.presets import list_presets
+    result = list_presets()
+    categories = {p["category"] for p in result}
+    assert "productivity" in categories
+    productivity_names = sorted(
+        p["name"] for p in result if p["category"] == "productivity"
+    )
+    assert productivity_names == [
+        "personal_assistant", "project_management", "schedule_management",
+    ]
