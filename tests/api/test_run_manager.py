@@ -9,7 +9,7 @@ from agentteam.domain.team import Leader, Team
 from agentteam.domain.worker import Worker
 from agentteam.models.provider import ModelRef
 from agentteam.runtime.graph import TeamCompiler
-from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
 from agentteam.storage.runs import RunRepo
@@ -68,8 +68,11 @@ def test_start_run_completes_without_approval(tmp_path):
     rm = RunManager(run_repo, audit_repo, bus)
 
     fake_llm = FakeLLM()
-    fake_llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    fake_llm.set_invoke_responses([AIMessage(content="done"), AIMessage(content="ok")])
+    fake_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="w1", instruction="do x")]),
+        ReviewVerdict(passed=True, reason="ok"),
+    ])
+    fake_llm.set_invoke_responses([AIMessage(content="done")])
 
     team = _make_team_no_approval()
     graph = _compile_graph(team, fake_llm, conn)
@@ -117,8 +120,11 @@ def test_cleanup_after_run_completes(tmp_path):
     rm = RunManager(run_repo, audit_repo, bus)
 
     fake_llm = FakeLLM()
-    fake_llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    fake_llm.set_invoke_responses([AIMessage(content="done"), AIMessage(content="ok")])
+    fake_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="w1", instruction="do x")]),
+        ReviewVerdict(passed=True, reason="ok"),
+    ])
+    fake_llm.set_invoke_responses([AIMessage(content="done")])
 
     team = _make_team_no_approval()
     graph = _compile_graph(team, fake_llm, conn)

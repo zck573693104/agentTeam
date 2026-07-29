@@ -6,7 +6,7 @@ from agentteam.domain.team import Leader, Team
 from agentteam.domain.worker import Worker
 from agentteam.models.provider import ModelRef
 from agentteam.runtime.graph import TeamCompiler, route_from_plan, route_from_review
-from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
 from agentteam.tools.registry import ToolRegistry
 from tests.conftest import FakeLLM, FakeModelProvider
 
@@ -78,15 +78,15 @@ def test_end_to_end_run_two_steps():
     """Leader 拆 2 步 → coder 执行 → review → tester 执行 → review → 结束。"""
     team = _make_team()
 
-    # Leader LLM：1 次结构化输出（拆计划）+ 2 次 invoke（点评）
+    # Leader LLM：1 次结构化输出（拆计划 Plan）+ 2 次结构化输出（点评 ReviewVerdict）
     leader_llm = FakeLLM()
-    leader_llm.set_structured_responses([Plan(steps=[
-        PlanStep(worker="coder", instruction="写 hello world"),
-        PlanStep(worker="tester", instruction="写测试"),
-    ])])
-    leader_llm.set_invoke_responses([
-        AIMessage(content="coder 干得不错"),
-        AIMessage(content="tester 测试到位，全部完成"),
+    leader_llm.set_structured_responses([
+        Plan(steps=[
+            PlanStep(worker="coder", instruction="写 hello world"),
+            PlanStep(worker="tester", instruction="写测试"),
+        ]),
+        ReviewVerdict(passed=True, reason="coder 干得不错"),
+        ReviewVerdict(passed=True, reason="tester 测试到位，全部完成"),
     ])
 
     # Worker LLM：coder 1 次 + tester 1 次（都直接给最终答案，不调工具）
@@ -220,15 +220,16 @@ def test_e2e_no_policy_runs_without_interrupt(fake_llm, fake_trace_writer):
     from agentteam.domain.worker import Worker
     from agentteam.models.provider import ModelRef
     from agentteam.runtime.graph import TeamCompiler
-    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
     from agentteam.tools.registry import ToolRegistry
     from tests.conftest import FakeModelProvider
 
-    fake_llm.set_structured_responses(
-        [Plan(steps=[PlanStep(worker="w1", instruction="do x")])]
-    )
+    fake_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="w1", instruction="do x")]),
+        ReviewVerdict(passed=True, reason="ok"),
+    ])
     fake_llm.set_invoke_responses(
-        [AIMessage(content="done"), AIMessage(content="ok")]
+        [AIMessage(content="done")]
     )
 
     provider = FakeModelProvider({"qwen-max": fake_llm})
@@ -267,7 +268,7 @@ def test_e2e_mcp_tools_via_fake_loader(fake_llm, fake_trace_writer):
     from agentteam.domain.worker import Worker
     from agentteam.models.provider import ModelRef
     from agentteam.runtime.graph import TeamCompiler
-    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
     from agentteam.tools.registry import ToolRegistry
     from tests.conftest import FakeModelProvider
 
@@ -280,16 +281,16 @@ def test_e2e_mcp_tools_via_fake_loader(fake_llm, fake_trace_writer):
     fake_loader = lambda server: [mcp_tool]  # noqa: E731
     reg = ToolRegistry(mcp_loader=fake_loader)
 
-    fake_llm.set_structured_responses(
-        [Plan(steps=[PlanStep(worker="w1", instruction="搜索测试")])]
-    )
+    fake_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="w1", instruction="搜索测试")]),
+        ReviewVerdict(passed=True, reason="好的"),
+    ])
     fake_llm.set_invoke_responses([
         AIMessage(
             content="",
             tool_calls=[{"name": "mcp:searcher:search", "args": {"query": "hello"}, "id": "tc1", "type": "tool_call"}],
         ),
         AIMessage(content="搜索完成"),
-        AIMessage(content="好的"),
     ])
 
     provider = FakeModelProvider({"qwen-max": fake_llm})

@@ -142,20 +142,22 @@ def test_token_tracking_accumulates_usage_metadata(make_client):
     """LLM 响应带 usage_metadata 时，run 完成后 total_tokens 应累积写入 DB。"""
     from langchain_core.messages import AIMessage
 
-    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
     from tests.conftest import FakeLLM, FakeModelProvider
 
     llm = FakeLLM()
-    llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    # agent_step 返回 30 tokens, leader_review 返回 50 tokens → 总计 80
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列。leader_review 改用结构化输出后不再携带
+    # usage_metadata,故 total_tokens 仅来自 worker 的 agent_step。
+    llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="w1", instruction="do x")]),
+        ReviewVerdict(passed=True, reason="ok"),
+    ])
+    # agent_step 返回 30 tokens → 累积写入 DB
     llm.set_invoke_responses([
         AIMessage(
             content="done",
             usage_metadata={"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
-        ),
-        AIMessage(
-            content="ok",
-            usage_metadata={"input_tokens": 20, "output_tokens": 30, "total_tokens": 50},
         ),
     ])
     provider = FakeModelProvider({"qwen-max": llm})
@@ -169,4 +171,4 @@ def test_token_tracking_accumulates_usage_metadata(make_client):
     assert status == "completed"
 
     run = client.get(f"/api/runs/{run_id}").json()
-    assert run["total_tokens"] == 80
+    assert run["total_tokens"] == 30

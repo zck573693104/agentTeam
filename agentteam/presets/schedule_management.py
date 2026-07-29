@@ -33,6 +33,8 @@ TEAM: Team = Team(
             "你是日程主管,派活给日程规划师(planner)、提醒专员(reminder)"
             "和优先级评估师(prioritizer),汇总日程安排。"
         ),
+        # P2 maker/checker 独立:review 用不同模型,避免同模型自评自批
+        review_model=ModelRef("openai", "gpt-4o-mini"),
         children=[
             Agent(
                 name="planner", role="worker",

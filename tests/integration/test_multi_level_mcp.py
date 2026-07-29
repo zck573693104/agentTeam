@@ -8,7 +8,7 @@ from agentteam.domain.mcp_server import MCPServer
 from agentteam.domain.team import Team
 from agentteam.models.provider import ModelRef
 from agentteam.runtime.graph import TeamCompiler
-from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
 from agentteam.tools.registry import ToolRegistry
 from tests.conftest import FakeLLM, FakeModelProvider
 
@@ -34,10 +34,10 @@ def _initial_state(task="t", run_id="r1"):
 def test_e2e_worker_level_mcp():
     """Worker 级 MCP：coder 挂载 git MCP，调用 git_status 工具。"""
     leader_llm = FakeLLM()
-    leader_llm.set_structured_responses([Plan(steps=[
-        PlanStep(worker="coder", instruction="check git status"),
-    ])])
-    leader_llm.set_invoke_responses([AIMessage(content="coder done")])
+    leader_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="coder", instruction="check git status")]),
+        ReviewVerdict(passed=True, reason="coder done"),
+    ])
 
     coder_llm = FakeLLM()
     coder_llm.set_invoke_responses([
@@ -80,16 +80,16 @@ def test_e2e_worker_level_mcp():
 def test_e2e_teamref_mcp_overrides():
     """TeamRef 级 MCP 覆盖：父 Team 引用 sub-Team 时追加 MCP 服务。"""
     parent_llm = FakeLLM()
-    parent_llm.set_structured_responses([Plan(steps=[
-        PlanStep(worker="qa", instruction="run extra tool"),
-    ])])
-    parent_llm.set_invoke_responses([AIMessage(content="qa done")])
+    parent_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="qa", instruction="run extra tool")]),
+        ReviewVerdict(passed=True, reason="qa done"),
+    ])
 
     sub_llm = FakeLLM()
-    sub_llm.set_structured_responses([Plan(steps=[
-        PlanStep(worker="tester", instruction="test"),
-    ])])
-    sub_llm.set_invoke_responses([AIMessage(content="sub done")])
+    sub_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="tester", instruction="test")]),
+        ReviewVerdict(passed=True, reason="sub done"),
+    ])
 
     tester_llm = FakeLLM()
     tester_llm.set_invoke_responses([

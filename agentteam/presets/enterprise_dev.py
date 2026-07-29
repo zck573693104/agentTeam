@@ -65,12 +65,16 @@ TEAM: Team = Team(
     root=Agent(
         name="ceo", role="supervisor",
         system_prompt="你是 CEO,派活给技术副总裁 CTO,审核 CTO 产出。",
+        # P2 maker/checker 独立:review 用不同模型,避免同模型自评自批
+        review_model=ModelRef("openai", "gpt-4o-mini"),
         children=[Agent(
             name="cto", role="supervisor",
             system_prompt=(
                 "你是 CTO,派活给工程师(eng)、审查员(reviewer)和测试小队(qa_team),"
                 "汇总各方产出回复 CEO。"
             ),
+            # P2 maker/checker 独立
+            review_model=ModelRef("openai", "gpt-4o-mini"),
             children=[
                 # 专家库引用:复用 code_engineer 模板,覆盖 name 为 eng
                 Agent(name="eng", role="worker", ref="library:code_engineer"),

@@ -40,9 +40,15 @@ class PlanStep(BaseModel):
         default=None, description="Python 表达式,求值 False 则跳过"
     )
     # Graph Engineering P2 节点契约字段
-    acceptance_criteria: str | None = Field(
+    # P1 升级:支持 str(自然语言,LLM 判断)或 dict(结构化,机器验证)
+    # dict 形式:{"type": "contains|regex|test|llm_judge", ...}
+    # 详见 agentteam.runtime.criteria.evaluate_criteria
+    acceptance_criteria: str | dict | None = Field(
         default=None,
-        description="可验证的验收标准(leader_review 据此判断产出是否合格)",
+        description=(
+            "可验证的验收标准。str=自然语言(LLM 判断);"
+            "dict=结构化机器验证({type: contains/regex/test/llm_judge, ...})"
+        ),
     )
     budget_tokens: int = Field(
         default=0,
@@ -621,32 +627,43 @@ def make_supervisor_node(compiled_graph, agent_name: str):
     return supervisor_node
 
 
+class ReviewVerdict(BaseModel):
+    """leader_review 的结构化验收结论。
+
+    Graph Engineering P0: review 节点必须能 reject,否则就是装饰品。
+    passed=False 时,leader_review 写 state["rejected"]=True,路由函数检查后 END。
+    """
+
+    passed: bool = Field(description="验收是否通过")
+    reason: str = Field(description="通过/拒绝的原因(审计用)")
+
+
 def make_leader_review_node(
     agent: Agent, llm: BaseChatModel, trace_writer: TraceWriter | None = None,
     review_llm: BaseChatModel | None = None,
 ):
-    """创建 leader_review 节点：点评 worker 产出。
+    """创建 leader_review 节点：点评 worker 产出,产出 ReviewVerdict。
+
+    Graph Engineering P0/P1/P2 落地:
+    - P0 reject 能力:用 with_structured_output(ReviewVerdict) 输出 passed/reason,
+      passed=False 时写 state["rejected"]=True,路由检查 is_rejected → END。
+    - P1 机器验证:acceptance_criteria 支持结构化形式(contains/regex/test/llm_judge),
+      机器验证失败直接 reject,通过后再走 LLM 语义判断。
+    - P2 maker/checker 独立:review_llm 不为 None 时用独立模型,避免同模型自评。
 
     dag 模式:
     - completed_steps 已由 worker 通过 set_union reducer 更新,leader_review 不覆盖
     - 不推进 current_step(dag 模式不用)
     - 仅做 LLM 点评 + emit trace
     sequential 模式:沿用 current_step += 1 + 标记 plan[current] done(向后兼容)
-
-    Graph Engineering P2 节点契约:
-    - 对照 plan step 的 acceptance_criteria 验收 worker 产出
-    - worker_outputs 现为结构化 WorkerOutput dict(artifact/evidence/state_delta/failure)
-    - failure 非空直接判不合格;acceptance_criteria 存在时把它喂给 LLM 评估
-
-    Graph Engineering P3 Maker/Checker 独立性:
-    - review_llm 不为 None 时,使用独立模型做 review(避免 maker/checker 同模型自欺)
-    - review_llm 为 None 时回退到 llm(向后兼容)
     """
+
+    from agentteam.runtime.criteria import evaluate_criteria
 
     def leader_review(state: TeamState) -> dict:
         run_id = state.get("run_id", "")
         execution_mode = state.get("execution_mode", "sequential")
-        # P3: 优先用独立 review_llm,避免 maker/checker 同模型
+        # P2: 优先用独立 review_llm,避免 maker/checker 同模型
         actual_llm = review_llm if review_llm is not None else llm
 
         if execution_mode == "dag":
@@ -676,6 +693,43 @@ def make_leader_review_node(
                         {"auto_verdict": "failed", "failure": worker_output.failure},
                         state_bucket="artifact",
                     )
+                # P0: 写 rejected 信号
+                return {
+                    "messages": [
+                        AIMessage(content=f"[Leader] {review_text}", name=agent.name)
+                    ],
+                    "audit_events": [{"event_type": "leader_review", "actor": agent.name}],
+                    "rejected": True,
+                    "rejection_reason": f"worker {recent_worker} 报告失败: {worker_output.failure}",
+                }
+
+            # P1: 机器验证 acceptance_criteria(contains/regex/test)
+            machine_verdict = evaluate_criteria(acceptance_criteria, worker_output)
+            if machine_verdict is not None:
+                # 机器验证有结论:失败直接 reject,通过则跳过 LLM
+                if not machine_verdict.passed:
+                    review_text = f"[机器验收] Worker {recent_worker} 不通过: {machine_verdict.reason}"
+                    if trace_writer:
+                        trace_writer.emit(
+                            run_id, "leader_review", agent.name,
+                            {"machine_verdict": "failed", "reason": machine_verdict.reason},
+                            state_bucket="artifact",
+                        )
+                    return {
+                        "messages": [
+                            AIMessage(content=f"[Leader] {review_text}", name=agent.name)
+                        ],
+                        "audit_events": [{"event_type": "leader_review", "actor": agent.name}],
+                        "rejected": True,
+                        "rejection_reason": machine_verdict.reason,
+                    }
+                # 机器验证通过,跳过 LLM 调用
+                review_text = f"[机器验收] Worker {recent_worker} 通过: {machine_verdict.reason}"
+                if trace_writer:
+                    trace_writer.emit(
+                        run_id, "leader_review", agent.name,
+                        {"machine_verdict": "passed"}, state_bucket="artifact",
+                    )
                 return {
                     "messages": [
                         AIMessage(content=f"[Leader] {review_text}", name=agent.name)
@@ -683,12 +737,12 @@ def make_leader_review_node(
                     "audit_events": [{"event_type": "leader_review", "actor": agent.name}],
                 }
 
-            # P2: 构造验收 prompt(若有 acceptance_criteria)
+            # P1: 无机器验证或机器验证无结论 → LLM 语义判断(结构化输出 verdict)
             criteria_hint = ""
             if acceptance_criteria:
                 criteria_hint = (
                     f"\n验收标准: {acceptance_criteria}\n"
-                    f"请对照验收标准判断 worker 产出是否合格,并说明理由。\n"
+                    f"请对照验收标准判断 worker 产出是否合格。\n"
                 )
             evidence_hint = ""
             if worker_output.evidence:
@@ -696,7 +750,8 @@ def make_leader_review_node(
                     f"\nWorker 提供的证据: {worker_output.evidence}\n"
                 )
 
-            review_response = actual_llm.invoke(
+            verdict_llm = actual_llm.with_structured_output(ReviewVerdict)
+            verdict: ReviewVerdict = verdict_llm.invoke(
                 [
                     SystemMessage(content=agent.system_prompt),
                     HumanMessage(
@@ -704,7 +759,7 @@ def make_leader_review_node(
                             f"Worker {recent_worker} 完成了步骤，"
                             f"产出: {worker_output.artifact}"
                             f"{evidence_hint}{criteria_hint}"
-                            f"请简要点评。"
+                            f"请给出验收结论。"
                         )
                     ),
                 ]
@@ -712,18 +767,25 @@ def make_leader_review_node(
             if trace_writer:
                 trace_writer.emit(
                     run_id, "leader_review", agent.name,
-                    {"has_criteria": bool(acceptance_criteria)},
+                    {
+                        "has_criteria": bool(acceptance_criteria),
+                        "passed": verdict.passed,
+                        "reason": verdict.reason,
+                    },
                     state_bucket="artifact",
                 )
-            usage = getattr(review_response, "usage_metadata", None)
-            tokens = usage.get("total_tokens", 0) if usage else 0
-            return {
+            review_text = f"[LLM 验收] Worker {recent_worker} {'通过' if verdict.passed else '不通过'}: {verdict.reason}"
+            result: dict = {
                 "messages": [
-                    AIMessage(content=f"[Leader] {review_response.content}", name=agent.name)
+                    AIMessage(content=f"[Leader] {review_text}", name=agent.name)
                 ],
                 "audit_events": [{"event_type": "leader_review", "actor": agent.name}],
-                "total_tokens": tokens,
             }
+            # P0: reject 信号
+            if not verdict.passed:
+                result["rejected"] = True
+                result["rejection_reason"] = verdict.reason
+            return result
 
         # sequential 模式:沿用原逻辑 + P2 节点契约
         current = state["current_step"]
@@ -744,6 +806,45 @@ def make_leader_review_node(
                     {"auto_verdict": "failed", "failure": worker_output.failure},
                     state_bucket="artifact",
                 )
+            # P0: reject 不推进 current_step
+            return {
+                "plan": plan,
+                "messages": [
+                    AIMessage(content=f"[Leader] {review_text}", name=agent.name)
+                ],
+                "audit_events": [{"event_type": "leader_review", "actor": agent.name}],
+                "rejected": True,
+                "rejection_reason": f"worker {worker_name} 报告失败: {worker_output.failure}",
+            }
+
+        # P1: 机器验证
+        machine_verdict = evaluate_criteria(acceptance_criteria, worker_output)
+        if machine_verdict is not None:
+            if not machine_verdict.passed:
+                review_text = f"[机器验收] Worker {worker_name} 不通过: {machine_verdict.reason}"
+                if trace_writer:
+                    trace_writer.emit(
+                        run_id, "leader_review", agent.name,
+                        {"machine_verdict": "failed", "reason": machine_verdict.reason},
+                        state_bucket="artifact",
+                    )
+                # P0: reject 不推进 current_step
+                return {
+                    "plan": plan,
+                    "messages": [
+                        AIMessage(content=f"[Leader] {review_text}", name=agent.name)
+                    ],
+                    "audit_events": [{"event_type": "leader_review", "actor": agent.name}],
+                    "rejected": True,
+                    "rejection_reason": machine_verdict.reason,
+                }
+            # 机器验证通过
+            review_text = f"[机器验收] Worker {worker_name} 通过: {machine_verdict.reason}"
+            if trace_writer:
+                trace_writer.emit(
+                    run_id, "leader_review", agent.name,
+                    {"machine_verdict": "passed"}, state_bucket="artifact",
+                )
             return {
                 "plan": plan,
                 "current_step": current + 1,
@@ -753,17 +854,19 @@ def make_leader_review_node(
                 "audit_events": [{"event_type": "leader_review", "actor": agent.name}],
             }
 
+        # P1: LLM 语义判断
         criteria_hint = ""
         if acceptance_criteria:
             criteria_hint = (
                 f"\n验收标准: {acceptance_criteria}\n"
-                f"请对照验收标准判断 worker 产出是否合格,并说明理由。\n"
+                f"请对照验收标准判断 worker 产出是否合格。\n"
             )
         evidence_hint = ""
         if worker_output.evidence:
             evidence_hint = f"\nWorker 提供的证据: {worker_output.evidence}\n"
 
-        review_response = actual_llm.invoke(
+        verdict_llm = actual_llm.with_structured_output(ReviewVerdict)
+        verdict: ReviewVerdict = verdict_llm.invoke(
             [
                 SystemMessage(content=agent.system_prompt),
                 HumanMessage(
@@ -771,7 +874,7 @@ def make_leader_review_node(
                         f"Worker {worker_name} 完成了步骤 {current}，"
                         f"产出: {worker_output.artifact}"
                         f"{evidence_hint}{criteria_hint}"
-                        f"请简要点评。"
+                        f"请给出验收结论。"
                     )
                 ),
             ]
@@ -779,19 +882,27 @@ def make_leader_review_node(
         if trace_writer:
             trace_writer.emit(
                 run_id, "leader_review", agent.name,
-                {"has_criteria": bool(acceptance_criteria)},
+                {
+                    "has_criteria": bool(acceptance_criteria),
+                    "passed": verdict.passed,
+                    "reason": verdict.reason,
+                },
                 state_bucket="artifact",
             )
-        usage = getattr(review_response, "usage_metadata", None)
-        tokens = usage.get("total_tokens", 0) if usage else 0
-        return {
+        review_text = f"[LLM 验收] Worker {worker_name} {'通过' if verdict.passed else '不通过'}: {verdict.reason}"
+        result: dict = {
             "plan": plan,
-            "current_step": current + 1,
             "messages": [
-                AIMessage(content=f"[Leader] {review_response.content}", name=agent.name)
+                AIMessage(content=f"[Leader] {review_text}", name=agent.name)
             ],
             "audit_events": [{"event_type": "leader_review", "actor": agent.name}],
-            "total_tokens": tokens,
         }
+        if verdict.passed:
+            result["current_step"] = current + 1
+        else:
+            # P0: reject 不推进 current_step
+            result["rejected"] = True
+            result["rejection_reason"] = verdict.reason
+        return result
 
     return leader_review

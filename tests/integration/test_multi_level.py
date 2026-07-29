@@ -7,7 +7,7 @@ from agentteam.domain.library import AgentLibrary
 from agentteam.domain.team import Team
 from agentteam.models.provider import ModelRef
 from agentteam.runtime.graph import TeamCompiler
-from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
 from agentteam.tools.registry import ToolRegistry
 from tests.conftest import FakeLLM, FakeModelProvider
 
@@ -23,16 +23,22 @@ def _initial_state(task="t", run_id="r1"):
 def test_e2e_three_level_chain():
     """3 级 supervisor 链：CEO → CTO → eng，全部跑通。"""
     # CEO LLM：拆 1 步给 cto
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 ReviewVerdict
     ceo_llm = FakeLLM()
-    ceo_llm.set_structured_responses([Plan(steps=[PlanStep(worker="cto", instruction="做技术")])])
-    ceo_llm.set_invoke_responses([AIMessage(content="cto 干得不错")])
+    ceo_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="cto", instruction="做技术")]),
+        ReviewVerdict(passed=True, reason="cto 干得不错"),
+    ])
 
     # CTO LLM：拆 1 步给 eng
     cto_llm = FakeLLM()
-    cto_llm.set_structured_responses([Plan(steps=[PlanStep(worker="eng", instruction="写代码")])])
-    cto_llm.set_invoke_responses([AIMessage(content="eng 干得不错")])
+    cto_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="eng", instruction="写代码")]),
+        ReviewVerdict(passed=True, reason="eng 干得不错"),
+    ])
 
-    # eng LLM：直接给答案
+    # eng LLM：直接给答案(worker 走 invoke)
     eng_llm = FakeLLM()
     eng_llm.set_invoke_responses([AIMessage(content="print('hello')")])
 
@@ -73,12 +79,18 @@ def test_e2e_three_level_chain():
 def test_e2e_team_nesting():
     """Team 嵌套：父 Team 引用子 Team，子 Team 内部独立编排。"""
     parent_llm = FakeLLM()
-    parent_llm.set_structured_responses([Plan(steps=[PlanStep(worker="qa", instruction="测试")])])
-    parent_llm.set_invoke_responses([AIMessage(content="qa 完成")])
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 ReviewVerdict
+    parent_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="qa", instruction="测试")]),
+        ReviewVerdict(passed=True, reason="qa 完成"),
+    ])
 
     sub_llm = FakeLLM()
-    sub_llm.set_structured_responses([Plan(steps=[PlanStep(worker="tester", instruction="写测试")])])
-    sub_llm.set_invoke_responses([AIMessage(content="tester 完成")])
+    sub_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="tester", instruction="写测试")]),
+        ReviewVerdict(passed=True, reason="tester 完成"),
+    ])
 
     tester_llm = FakeLLM()
     tester_llm.set_invoke_responses([AIMessage(content="assert True")])
@@ -126,8 +138,12 @@ def test_e2e_team_nesting():
 def test_e2e_library_ref():
     """专家库引用：Agent(ref=...) 被派活，库中 system_prompt 生效。"""
     ceo_llm = FakeLLM()
-    ceo_llm.set_structured_responses([Plan(steps=[PlanStep(worker="eng", instruction="写代码")])])
-    ceo_llm.set_invoke_responses([AIMessage(content="ok")])
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 ReviewVerdict
+    ceo_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="eng", instruction="写代码")]),
+        ReviewVerdict(passed=True, reason="ok"),
+    ])
 
     eng_llm = FakeLLM()
     eng_llm.set_invoke_responses([AIMessage(content="code done")])
@@ -166,29 +182,37 @@ def test_e2e_library_ref():
 def test_e2e_mixed_all_features():
     """混合：3 级链 + Team 嵌套 + 专家库。"""
     ceo_llm = FakeLLM()
-    ceo_llm.set_structured_responses([Plan(steps=[
-        PlanStep(worker="cto", instruction="做技术"),
-    ])])
-    ceo_llm.set_invoke_responses([AIMessage(content="cto done")])
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 ReviewVerdict
+    ceo_llm.set_structured_responses([
+        Plan(steps=[
+            PlanStep(worker="cto", instruction="做技术"),
+        ]),
+        ReviewVerdict(passed=True, reason="cto done"),
+    ])
 
     cto_llm = FakeLLM()
-    cto_llm.set_structured_responses([Plan(steps=[
-        PlanStep(worker="eng", instruction="写代码"),
-        PlanStep(worker="qa", instruction="测试"),
-    ])])
-    cto_llm.set_invoke_responses([
-        AIMessage(content="eng done"),
-        AIMessage(content="qa done"),
+    # cto 的 plan 有 2 步(eng, qa),sequential 模式按序执行,
+    # 故 leader_review 调用 2 次: 先 eng 后 qa,两个 ReviewVerdict 排在 Plan 之后
+    cto_llm.set_structured_responses([
+        Plan(steps=[
+            PlanStep(worker="eng", instruction="写代码"),
+            PlanStep(worker="qa", instruction="测试"),
+        ]),
+        ReviewVerdict(passed=True, reason="eng done"),
+        ReviewVerdict(passed=True, reason="qa done"),
     ])
 
     eng_llm = FakeLLM()
     eng_llm.set_invoke_responses([AIMessage(content="code")])
 
     sub_llm = FakeLLM()
-    sub_llm.set_structured_responses([Plan(steps=[
-        PlanStep(worker="tester", instruction="写测试"),
-    ])])
-    sub_llm.set_invoke_responses([AIMessage(content="sub done")])
+    sub_llm.set_structured_responses([
+        Plan(steps=[
+            PlanStep(worker="tester", instruction="写测试"),
+        ]),
+        ReviewVerdict(passed=True, reason="sub done"),
+    ])
 
     tester_llm = FakeLLM()
     tester_llm.set_invoke_responses([AIMessage(content="assert True")])

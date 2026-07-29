@@ -59,12 +59,24 @@ class TeamState(TypedDict):
     execution_mode: ExecutionMode  # 默认 "sequential"
     completed_steps: Annotated[set[str], set_union]  # dag 模式: 已完成的 step id
     skipped_steps: Annotated[set[str], set_union]  # dag 模式: condition=False 跳过的 step id
+    # —— Graph Engineering P0: review 节点 reject 信号 ——
+    # leader_review 输出 verdict.passed=False 时置 True,路由函数检查后直接 END。
+    # 与 pending_approval 拒绝(审批 reject)并列,都是"图终止"信号。
+    rejected: bool
+    rejection_reason: str  # reject 原因,审计/UI 展示用
 
 
 def is_rejected(state: dict) -> bool:
-    """检查状态中是否有被拒绝的审批。"""
+    """检查状态是否被拒绝(审批拒绝 或 review 拒绝)。
+
+    两种 reject 信号都让图终止:
+    - pending_approval 拒绝:人工审批 reject
+    - rejected=True:leader_review 机器/LLM 验收不通过
+    """
     pending = state.get("pending_approval")
-    return pending is not None and not pending.get("approved", True)
+    if pending is not None and not pending.get("approved", True):
+        return True
+    return bool(state.get("rejected", False))
 
 
 class WorkerState(TypedDict):

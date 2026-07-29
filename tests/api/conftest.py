@@ -25,17 +25,23 @@ def _wait_for_run(client, run_id, timeout=10.0):
 def make_provider_with_plan():
     """返回一个预置 Plan + 执行响应的 FakeModelProvider。
 
-    - structured output 返回一个单步 Plan（worker=w1）
-    - invoke 按顺序返回 "done" / "ok" 两条 AIMessage
+    - structured output 按顺序返回: 单步 Plan(worker=w1) + ReviewVerdict(验收通过)
+    - invoke 返回 worker agent_step 的 "done" AIMessage
     """
     from langchain_core.messages import AIMessage
 
-    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
     from tests.conftest import FakeLLM, FakeModelProvider
 
     llm = FakeLLM()
-    llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    llm.set_invoke_responses([AIMessage(content="done"), AIMessage(content="ok")])
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列。leader 与 worker 共用同一 fake_llm,
+    # worker 的 agent_step 仍走 invoke(),留在 invoke_responses。
+    llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="w1", instruction="do x")]),
+        ReviewVerdict(passed=True, reason="ok"),
+    ])
+    llm.set_invoke_responses([AIMessage(content="done")])
     return FakeModelProvider({"qwen-max": llm})
 
 

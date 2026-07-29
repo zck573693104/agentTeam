@@ -9,7 +9,7 @@ from agentteam.domain.team import Leader, Team
 from agentteam.domain.worker import Worker
 from agentteam.models.provider import ModelRef
 from agentteam.runtime.graph import TeamCompiler
-from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
 from agentteam.storage.db import init_db
 from agentteam.tools.registry import ToolRegistry
 from tests.conftest import FakeLLM, FakeModelProvider
@@ -23,12 +23,11 @@ def test_sqlite_saver_no_interrupt_completes(tmp_path):
     checkpointer.setup()
 
     fake_llm = FakeLLM()
-    fake_llm.set_structured_responses(
-        [Plan(steps=[PlanStep(worker="w1", instruction="do x")])]
-    )
-    fake_llm.set_invoke_responses(
-        [AIMessage(content="done"), AIMessage(content="ok")]
-    )
+    fake_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="w1", instruction="do x")]),
+        ReviewVerdict(passed=True, reason="ok"),
+    ])
+    fake_llm.set_invoke_responses([AIMessage(content="done")])
 
     provider = FakeModelProvider({"qwen-max": fake_llm})
     compiler = TeamCompiler(provider, ToolRegistry())

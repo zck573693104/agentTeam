@@ -1,5 +1,5 @@
 """SP6-P1 Plan DAG 测试。"""
-from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
 
 
 def test_plan_step_new_fields_default_values():
@@ -288,11 +288,10 @@ def test_leader_plan_dag_mode_detects_cycle_raises(fake_llm):
 
 def test_leader_review_dag_mode_does_not_advance_current_step(fake_llm):
     """leader_review dag 模式:不推进 current_step(completed_steps 已由 worker 通过 reducer 更新)。"""
-    from langchain_core.messages import AIMessage
     from agentteam.domain.team import Leader
     from agentteam.runtime.nodes import make_leader_review_node
 
-    fake_llm.set_invoke_responses([AIMessage(content="A done")])
+    fake_llm.set_structured_responses([ReviewVerdict(passed=True, reason="A done")])
     leader = Leader(system_prompt="你是主管")
     node = make_leader_review_node(leader, fake_llm)
 
@@ -325,11 +324,10 @@ def test_leader_review_dag_mode_does_not_advance_current_step(fake_llm):
 
 def test_leader_review_sequential_mode_advances_current_step(fake_llm):
     """leader_review sequential 模式:沿用 current_step += 1。"""
-    from langchain_core.messages import AIMessage
     from agentteam.domain.team import Leader
     from agentteam.runtime.nodes import make_leader_review_node
 
-    fake_llm.set_invoke_responses([AIMessage(content="good")])
+    fake_llm.set_structured_responses([ReviewVerdict(passed=True, reason="good")])
     leader = Leader(system_prompt="你是主管")
     node = make_leader_review_node(leader, fake_llm)
 
@@ -520,19 +518,21 @@ def test_plan_dag_parallel_execution_e2e():
     )
 
     leader_llm = FakeLLM()
-    leader_llm.set_structured_responses([Plan(
-        execution_mode="dag",
-        steps=[
-            PlanStep(worker="a", instruction="do A", id="step_a"),
-            PlanStep(worker="b", instruction="do B", id="step_b"),
-            PlanStep(worker="c", instruction="do C", id="step_c",
-                     depends_on=["step_a", "step_b"]),
-        ],
-    )])
-    # 2 次 review(A+B 完成后, C 完成后)
-    leader_llm.set_invoke_responses([
-        AIMessage(content="A/B done"),
-        AIMessage(content="C done, all complete"),
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 2 个 ReviewVerdict
+    # (A+B 完成后, C 完成后)
+    leader_llm.set_structured_responses([
+        Plan(
+            execution_mode="dag",
+            steps=[
+                PlanStep(worker="a", instruction="do A", id="step_a"),
+                PlanStep(worker="b", instruction="do B", id="step_b"),
+                PlanStep(worker="c", instruction="do C", id="step_c",
+                         depends_on=["step_a", "step_b"]),
+            ],
+        ),
+        ReviewVerdict(passed=True, reason="A/B done"),
+        ReviewVerdict(passed=True, reason="C done, all complete"),
     ])
 
     # 每个 worker 独立 LLM,各自 1 次直接答案,并行触发互不影响
@@ -602,21 +602,22 @@ def test_plan_dag_condition_skip_e2e():
     )
 
     leader_llm = FakeLLM()
-    # B 的 condition 永远 False
-    leader_llm.set_structured_responses([Plan(
-        execution_mode="dag",
-        steps=[
-            PlanStep(worker="a", instruction="do A", id="step_a"),
-            PlanStep(worker="b", instruction="do B", id="step_b",
-                     condition="False"),
-            PlanStep(worker="c", instruction="do C", id="step_c",
-                     depends_on=["step_b"]),
-        ],
-    )])
-    # 2 次 review(A 完成后, C 完成后)
-    leader_llm.set_invoke_responses([
-        AIMessage(content="A done"),
-        AIMessage(content="C done"),
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 2 个 ReviewVerdict
+    # (A 完成后, C 完成后)。B 的 condition 永远 False
+    leader_llm.set_structured_responses([
+        Plan(
+            execution_mode="dag",
+            steps=[
+                PlanStep(worker="a", instruction="do A", id="step_a"),
+                PlanStep(worker="b", instruction="do B", id="step_b",
+                         condition="False"),
+                PlanStep(worker="c", instruction="do C", id="step_c",
+                         depends_on=["step_b"]),
+            ],
+        ),
+        ReviewVerdict(passed=True, reason="A done"),
+        ReviewVerdict(passed=True, reason="C done"),
     ])
 
     # A/C 各自独立 LLM,并行触发互不影响(B 被 skip 不执行,但仍需提供 LLM
@@ -681,14 +682,16 @@ def test_plan_sequential_backward_compat_e2e():
     )
 
     leader_llm = FakeLLM()
-    # 默认 execution_mode="sequential"(不显式设置)
-    leader_llm.set_structured_responses([Plan(steps=[
-        PlanStep(worker="coder", instruction="写 hello world"),
-        PlanStep(worker="tester", instruction="写测试"),
-    ])])
-    leader_llm.set_invoke_responses([
-        AIMessage(content="coder 干得不错"),
-        AIMessage(content="tester 测试到位,全部完成"),
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 2 个 ReviewVerdict
+    # (coder / tester 完成后)。默认 execution_mode="sequential"(不显式设置)
+    leader_llm.set_structured_responses([
+        Plan(steps=[
+            PlanStep(worker="coder", instruction="写 hello world"),
+            PlanStep(worker="tester", instruction="写测试"),
+        ]),
+        ReviewVerdict(passed=True, reason="coder 干得不错"),
+        ReviewVerdict(passed=True, reason="tester 测试到位,全部完成"),
     ])
 
     worker_llm = FakeLLM()

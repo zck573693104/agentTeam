@@ -5,7 +5,7 @@ Leader plan → analyst 执行 → Leader review → coder 执行 → Leader rev
 """
 from langchain_core.messages import AIMessage
 
-from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
 from tests.conftest import FakeLLM
 from tests.integration.conftest import make_dev_team_compiled, _wait_for_status
 
@@ -14,24 +14,25 @@ def test_e2e_normal_completion(run_manager, run_repo, integration_db):
     """2-worker 研发小队正常完成 run,状态 pending→running→completed。"""
     fake_llm = FakeLLM()
 
-    # Leader plan: 1 次结构化输出
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 2 个 ReviewVerdict
+    # (analyst / coder 完成后)。leader 与 worker 共用同一 fake_llm,
+    # worker 的 agent_step 仍走 invoke(),留在 invoke_responses。
     fake_llm.set_structured_responses([
         Plan(steps=[
             PlanStep(worker="analyst", instruction="分析需求"),
             PlanStep(worker="coder", instruction="写代码"),
         ]),
+        ReviewVerdict(passed=True, reason="analyst 干得不错"),
+        ReviewVerdict(passed=True, reason="coder 代码到位,全部完成"),
     ])
 
-    # invoke_responses 按实际调用顺序编排(共 4 次 invoke):
+    # invoke_responses 只剩 worker 的 agent_step 调用(leader_review 已改走 structured):
     # [0] analyst worker agent_step → 返回答案
-    # [1] leader review (after analyst) → 返回点评
-    # [2] coder worker agent_step → 返回答案
-    # [3] leader review (after coder) → 返回点评
+    # [1] coder worker agent_step → 返回答案
     fake_llm.set_invoke_responses([
         AIMessage(content="需求分析完成:用户故事已拆解"),  # analyst
-        AIMessage(content="analyst 干得不错"),              # leader review 1
         AIMessage(content="print('hello world')"),         # coder
-        AIMessage(content="coder 代码到位,全部完成"),       # leader review 2
     ])
 
     graph = make_dev_team_compiled(fake_llm, integration_db)
@@ -56,12 +57,13 @@ def test_e2e_normal_worker_outputs(run_manager, run_repo, integration_db):
             PlanStep(worker="analyst", instruction="分析需求"),
             PlanStep(worker="coder", instruction="写代码"),
         ]),
+        ReviewVerdict(passed=True, reason="review 1"),
+        ReviewVerdict(passed=True, reason="review 2"),
     ])
+    # invoke_responses 只剩 worker 的 agent_step 调用(leader_review 已改走 structured)
     fake_llm.set_invoke_responses([
         AIMessage(content="需求分析结果"),    # analyst
-        AIMessage(content="review 1"),        # leader review 1
         AIMessage(content="代码实现"),        # coder
-        AIMessage(content="review 2"),        # leader review 2
     ])
 
     graph = make_dev_team_compiled(fake_llm, integration_db)

@@ -6,6 +6,7 @@ from agentteam.models.provider import ModelRef
 from agentteam.runtime.nodes import (
     Plan,
     PlanStep,
+    ReviewVerdict,
     make_agent_step,
     make_finalize,
     make_init_worker,
@@ -133,7 +134,8 @@ def test_worker_node_respects_max_iterations(fake_llm):
 
 
 def test_leader_review_marks_step_done_and_advances(fake_llm):
-    fake_llm.set_invoke_responses([AIMessage(content="做得好")])
+    # P0: review 现在用 with_structured_output(ReviewVerdict),不再是 invoke
+    fake_llm.set_structured_responses([ReviewVerdict(passed=True, reason="合格")])
 
     leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
     node = make_leader_review_node(leader, fake_llm)
@@ -156,6 +158,183 @@ def test_leader_review_marks_step_done_and_advances(fake_llm):
     assert result["current_step"] == 1
     assert len(result["messages"]) == 1
     assert len(result["audit_events"]) == 1
+    # P0: 通过时不写 rejected
+    assert "rejected" not in result
+
+
+def test_leader_review_reject_writes_rejected_signal(fake_llm):
+    """P0: LLM verdict.passed=False 时,写 rejected=True,不推进 current_step。"""
+    fake_llm.set_structured_responses([
+        ReviewVerdict(passed=False, reason="代码没通过测试")
+    ])
+
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [
+            {"worker": "coder", "instruction": "写代码", "status": "running"},
+        ],
+        "current_step": 0,
+        "worker_outputs": {"coder": "broken code"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    # P0: reject 信号
+    assert result["rejected"] is True
+    assert result["rejection_reason"] == "代码没通过测试"
+    # P0: 不推进 current_step
+    assert "current_step" not in result
+
+
+def test_leader_review_worker_failure_auto_reject(fake_llm):
+    """P0: worker_output.failure 非空时,跳过 LLM 直接 reject。"""
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [{"worker": "coder", "instruction": "写代码", "status": "running"}],
+        "current_step": 0,
+        "worker_outputs": {
+            "coder": {"artifact": "", "failure": "工具调用异常: timeout"}
+        },
+        "audit_events": [],
+    }
+    result = node(state)
+
+    assert result["rejected"] is True
+    assert "timeout" in result["rejection_reason"]
+    # 不应调用 LLM(failure 短路)
+    assert "current_step" not in result
+
+
+def test_leader_review_machine_criteria_contains_pass(fake_llm):
+    """P1: contains 类型机器验证通过,跳过 LLM,推进 current_step。"""
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [{
+            "worker": "coder", "instruction": "写代码", "status": "running",
+            "acceptance_criteria": {
+                "type": "contains", "field": "artifact", "pattern": "def hello"
+            }
+        }],
+        "current_step": 0,
+        "worker_outputs": {"coder": "def hello(): pass"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    # 机器验证通过,推进 current_step,不调用 LLM
+    assert result["current_step"] == 1
+    assert "rejected" not in result
+
+
+def test_leader_review_machine_criteria_contains_fail(fake_llm):
+    """P1: contains 类型机器验证失败,直接 reject,不调用 LLM。"""
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [{
+            "worker": "coder", "instruction": "写代码", "status": "running",
+            "acceptance_criteria": {
+                "type": "contains", "field": "artifact", "pattern": "def hello"
+            }
+        }],
+        "current_step": 0,
+        "worker_outputs": {"coder": "print('no function')"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    assert result["rejected"] is True
+    assert "不包含" in result["rejection_reason"]
+
+
+def test_leader_review_machine_criteria_test_command(fake_llm):
+    """P1: test 类型跑 shell 命令,returncode==0 视为通过。"""
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [{
+            "worker": "coder", "instruction": "写代码", "status": "running",
+            "acceptance_criteria": {
+                "type": "test", "command": "test -n \"$AGENTTEAM_ARTIFACT\""
+            }
+        }],
+        "current_step": 0,
+        "worker_outputs": {"coder": "non-empty artifact"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    # 命令 exit 0 → 机器验证通过
+    assert result["current_step"] == 1
+    assert "rejected" not in result
+
+
+def test_leader_review_str_criteria_falls_back_to_llm(fake_llm):
+    """P1: 纯 str 形式 acceptance_criteria 仍走 LLM 判断(向后兼容)。"""
+    fake_llm.set_structured_responses([ReviewVerdict(passed=True, reason="合格")])
+
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [{
+            "worker": "coder", "instruction": "写代码", "status": "running",
+            "acceptance_criteria": "代码质量良好,无语法错误"
+        }],
+        "current_step": 0,
+        "worker_outputs": {"coder": "def hello(): pass"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    # str 形式 → 走 LLM,推进 current_step
+    assert result["current_step"] == 1
+    assert "rejected" not in result
+
+
+def test_leader_review_dag_mode_reject(fake_llm):
+    """P0: dag 模式下 reject 也写 rejected 信号。"""
+    fake_llm.set_structured_responses([
+        ReviewVerdict(passed=False, reason="产出不符合要求")
+    ])
+
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "execution_mode": "dag",
+        "plan": [{"id": "step1", "worker": "coder", "instruction": "写代码"}],
+        "worker_outputs": {"coder": "broken output"},
+        "completed_steps": set(),
+        "skipped_steps": set(),
+        "audit_events": [],
+    }
+    result = node(state)
+
+    assert result["rejected"] is True
+    assert result["rejection_reason"] == "产出不符合要求"
 
 
 def test_leader_plan_emits_trace_event(fake_llm, fake_trace_writer):
@@ -191,7 +370,8 @@ def test_worker_node_emits_start_and_end_events(fake_llm, fake_trace_writer):
 
 def test_leader_review_emits_trace_event(fake_llm, fake_trace_writer):
     """leader_review 节点 emit leader_review 轨迹事件。"""
-    fake_llm.set_invoke_responses([AIMessage(content="good job")])
+    # P0: 用 ReviewVerdict 替代 invoke
+    fake_llm.set_structured_responses([ReviewVerdict(passed=True, reason="good")])
     leader = Leader(name="leader", system_prompt="test")
     node = make_leader_review_node(leader, fake_llm, trace_writer=fake_trace_writer)
     state = {
