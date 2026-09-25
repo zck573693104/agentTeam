@@ -65,6 +65,14 @@ def _build_compiler(
     return compiler
 
 
+def _team_engine(team) -> str:
+    """Team 执行引擎解析：Team.engine 显式声明优先，否则取环境默认。"""
+    import os
+    return getattr(team, "engine", None) or os.environ.get(
+        "AGENTTEAM_DEFAULT_ENGINE", "langgraph"
+    )
+
+
 def runs_router(
     run_manager: RunManager,
     team_store: TeamStore,
@@ -76,6 +84,7 @@ def runs_router(
     checkpointer=None,
     agent_library: AgentLibrary | None = None,
     skill_loader=None,
+    harness_factory=None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/runs", tags=["runs"])
     lib = agent_library or AgentLibrary()
@@ -87,8 +96,50 @@ def runs_router(
             raise HTTPException(status_code=404, detail=f"Team '{req.team_name}' not found")
 
         run_id = run_repo.create_run(team.name, req.task)
-
         trace_writer = BroadcastTraceWriter(audit_repo, event_bus)
+        config = {"configurable": {"thread_id": run_id}}
+
+        # SP8: harness（opencode 套壳）引擎路径
+        if _team_engine(team) == "opencode":
+            if harness_factory is None:
+                run_repo.end_run(run_id, "failed")
+                eid = audit_repo.add_event(
+                    run_id, "error", "system",
+                    {"error": "harness engine not configured (opencode disabled)"},
+                )
+                event_bus.publish(run_id, {
+                    "id": eid, "event_type": "error", "run_id": run_id,
+                    "payload": {"error": "harness engine not configured"},
+                })
+                raise HTTPException(
+                    status_code=503,
+                    detail="harness engine not configured (opencode disabled)",
+                )
+            try:
+                from agentteam.harness.runner import ensure_backend
+                ensure_backend(harness_factory.client, team, harness_factory._default_model)
+            except Exception as e:
+                run_repo.end_run(run_id, "failed")
+                eid = audit_repo.add_event(
+                    run_id, "error", "system", {"error": str(e)}
+                )
+                event_bus.publish(run_id, {
+                    "id": eid, "event_type": "error", "run_id": run_id,
+                    "payload": {"error": str(e)},
+                })
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"opencode backend unavailable: {e}",
+                )
+            # 注册所有已知 Team（TeamRef 解析 parity）
+            harness_factory.set_teams(team_store.list_all())
+            runner = harness_factory.create(
+                run_id, team, req.task, trace_writer, audit_repo,
+                run_manager=run_manager,
+            )
+            run_manager.start_run(run_id, runner, config, req.task)
+            return {"run_id": run_id}
+
         import agentteam.runtime.graph as _graph  # 局部导入,避免 api→runtime 顶层循环
         compiler = _graph.TeamCompiler(
             model_provider, tool_registry, library=lib,
@@ -120,7 +171,6 @@ def runs_router(
             )
             raise HTTPException(status_code=400, detail=f"Compile failed: {e}")
 
-        config = {"configurable": {"thread_id": run_id}}
         run_manager.start_run(run_id, graph, config, req.task)
         return {"run_id": run_id}
 
@@ -262,16 +312,31 @@ def runs_router(
                 detail=f"Run '{run_id}' is not interrupted (status={current['status']})",
             )
 
+        # SP8: 引擎分支需要 Team（engine 字段 + harness rehydrate 都要）
+        team = team_store.get(run["team_name"])
         try:
             if run_manager.has_graph(run_id):
                 # fast path: graph 仍在内存(正常流程),直接 resume
                 run_manager.resume_run(run_id, req.approved, req.reason)
+            elif _team_engine(team) == "opencode":
+                # harness 引擎重启恢复：重建 runner，invoke 时从
+                # run_engine_state 表恢复编排快照（与 SqliteSaver 对等）
+                if harness_factory is None:
+                    raise ValueError("harness engine not configured")
+                harness_factory.set_teams(team_store.list_all())
+                runner = harness_factory.rehydrate(
+                    run_id, team, run["task"],
+                    BroadcastTraceWriter(audit_repo, event_bus), audit_repo,
+                    run_manager=run_manager,
+                )
+                run_manager.rehydrate_and_resume(
+                    run_id, runner, req.approved, req.reason
+                )
             else:
                 # lazy recompile (P0): 服务重启后 _graphs/_configs 丢失,
                 # 从 team_store 取 Team 重新 compile,再 resume。
                 # SqliteSaver checkpoint 已持久化 interrupt 状态,
                 # 新 graph 持有原 saver 即可从 checkpoint 续跑。
-                team = team_store.get(run["team_name"])
                 if team is None:
                     raise ValueError(
                         f"Team '{run['team_name']}' not found (needed for recompile)"

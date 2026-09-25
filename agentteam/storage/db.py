@@ -86,6 +86,15 @@ def init_db(path: str | Path = "data/agentteam.db") -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS idx_evo_agent ON evolution_history(agent_name, version);
     """)
+    # SP8: harness 引擎编排快照（与 SqliteSaver checkpoint 对等，
+    # 服务重启后 approve 仍可续跑）
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS run_engine_state (
+            run_id     TEXT PRIMARY KEY,
+            state      TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+    """)
     # library_agents 加 version 列(若不存在)
     try:
         conn.execute("ALTER TABLE library_agents ADD COLUMN version INTEGER NOT NULL DEFAULT 1")

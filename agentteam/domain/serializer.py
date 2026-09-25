@@ -97,6 +97,7 @@ def _agent_from_dict(d: dict) -> Agent:
         ref=d.get("ref"),
         mcp_servers=[_mcp_server_from_dict(s) for s in d.get("mcp_servers", [])],
         version=d.get("version", 1),
+        skills=d.get("skills", []),
     )
 
 
@@ -124,12 +125,13 @@ def _agent_to_dict(agent: Agent) -> dict:
         "ref": agent.ref,
         "mcp_servers": [asdict(s) for s in agent.mcp_servers],
         "version": agent.version,
+        "skills": list(agent.skills),
     }
 
 
 def team_to_dict(team: Team) -> dict[str, Any]:
     """Team → JSON-serializable dict（新 schema：含 root 字段）。"""
-    return {
+    d = {
         "name": team.name,
         "description": team.description,
         "root": _agent_to_dict(team.root),
@@ -137,6 +139,10 @@ def team_to_dict(team: Team) -> dict[str, Any]:
         "skills": list(team.skills),
         "mcp_servers": [asdict(s) for s in team.mcp_servers],
     }
+    # SP8: engine 字段仅在显式声明时输出（保持旧客户端兼容）
+    if getattr(team, "engine", None):
+        d["engine"] = team.engine
+    return d
 
 
 def team_from_dict(data: dict[str, Any]) -> Team:
@@ -145,6 +151,7 @@ def team_from_dict(data: dict[str, Any]) -> Team:
     - 新 schema：data 含 'root' 字段
     - 旧 schema：data 含 'leader' + 'workers' 字段，自动转 root
     """
+    engine = data.get("engine")
     if "root" in data:
         return Team(
             name=data["name"],
@@ -153,6 +160,7 @@ def team_from_dict(data: dict[str, Any]) -> Team:
             default_model=_model_ref_from_dict(data["default_model"]),  # type: ignore[arg-type]
             skills=data.get("skills", []),
             mcp_servers=[_mcp_server_from_dict(s) for s in data.get("mcp_servers", [])],
+            engine=engine,
         )
     # 旧 schema
     leader = _leader_from_dict(data["leader"])
@@ -165,4 +173,5 @@ def team_from_dict(data: dict[str, Any]) -> Team:
         default_model=_model_ref_from_dict(data["default_model"]),  # type: ignore[arg-type]
         skills=data.get("skills", []),
         mcp_servers=[_mcp_server_from_dict(s) for s in data.get("mcp_servers", [])],
+        engine=engine,
     )

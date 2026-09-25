@@ -45,8 +45,15 @@ def create_app(
     agent_library: AgentLibrary | None = None,
     skills_dir: Path | None = None,
     web_dist: Path | None | object = _DEFAULT,
+    harness_enabled: bool | None = None,
 ) -> FastAPI:
     conn = init_db(db_path)
+
+    # harness（opencode 引擎）默认启用；AGENTTEAM_HARNESS_DISABLED=1 显式关闭
+    # （如旧引擎回归测试环境）。harness_enabled 参数优先于环境变量。
+    import os as _os
+    if harness_enabled is None:
+        harness_enabled = not _os.environ.get("AGENTTEAM_HARNESS_DISABLED")
 
     # BUG-07:用 lifespan 在 app shutdown 时显式 close conn,
     # 避免 Windows 上 SQLite 文件锁残留(原实现 conn 仅在 app GC 时释放)。
@@ -97,11 +104,34 @@ def create_app(
         checkpointer=saver, evolution_engine=evolution_engine,
     )
 
+    # SP8: harness（opencode 套壳）引擎组装。
+    # client/factory 惰性创建：未配置 opencode 或显式禁用时不建连接，
+    # langgraph 路径（默认）零影响。
+    from agentteam.harness.opencode_client import OpenCodeClient
+    from agentteam.harness.runner import (
+        HarnessEngineFactory,
+        HarnessStateStore,
+        default_oc_config_from_env,
+    )
+
+    harness_factory: HarnessEngineFactory | None = None
+    if harness_enabled:
+        oc_cfg, oc_default_model = default_oc_config_from_env()
+        oc_client = OpenCodeClient(oc_cfg)
+        harness_factory = HarnessEngineFactory(
+            client=oc_client,
+            default_model=oc_default_model,
+            skill_loader=skill_loader,
+            library=lib,
+            state_store=HarnessStateStore(conn, lock=conn_lock),
+        )
+
     app.include_router(teams_router(team_store))
     app.include_router(
         runs_router(
             run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,
             checkpointer=saver, agent_library=lib, skill_loader=skill_loader,
+            harness_factory=harness_factory,
         )
     )
     app.include_router(dashboard_router(run_repo, audit_repo))

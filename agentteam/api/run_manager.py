@@ -118,16 +118,39 @@ class RunManager:
         thread.start()
 
     def resume_run(self, run_id: str, approved: bool, reason: str | None = None) -> None:
-        """用 Command(resume=...) 启新线程续跑。"""
+        """用 Command(resume=...) 启新线程续跑（LangGraph 引擎）。
+
+        harness 引擎（__harness__ 标记）没有 Command 概念，改用
+        {"__resume__": decision} 重入 invoke（见 HarnessRunner._apply_resume）。
+        """
         with self._lock:
             graph = self._graphs.get(run_id)
             config = self._configs.get(run_id)
         if graph is None or config is None:
             raise ValueError(f"Run {run_id} not found or not started")
 
+        if getattr(graph, "__harness__", False):
+            resume_value: dict[str, Any] = {
+                "__resume__": {
+                    "approved": approved,
+                    "decider": "api-user",
+                    **({"reason": reason} if reason else {}),
+                }
+            }
+            self._run_repo.update_status(run_id, "running")
+            thread = threading.Thread(
+                target=self._resume_in_background,
+                args=(run_id, graph, config, resume_value),
+                daemon=True,
+            )
+            with self._lock:
+                self._threads[run_id] = thread
+            thread.start()
+            return
+
         from langgraph.types import Command
 
-        resume_value: dict[str, Any] = {"approved": approved, "decider": "api-user"}
+        resume_value = {"approved": approved, "decider": "api-user"}
         if reason:
             resume_value["reason"] = reason
 
@@ -140,6 +163,24 @@ class RunManager:
         with self._lock:
             self._threads[run_id] = thread
         thread.start()
+
+    def rehydrate_and_resume(
+        self,
+        run_id: str,
+        graph,
+        approved: bool,
+        reason: str | None = None,
+    ) -> None:
+        """把重建的 harness runner 注入内存后 resume（服务重启恢复路径）。
+
+        与 recompile_and_resume 对等：approve_run 检测到内存无 runner
+        （重启后 _graphs 清空）时，由路由层重建 runner 再调用本方法。
+        """
+        with self._lock:
+            self._graphs[run_id] = graph
+            self._configs[run_id] = {"configurable": {"thread_id": run_id}}
+            self._cancel_events.setdefault(run_id, threading.Event())
+        self.resume_run(run_id, approved, reason)
 
     def wait(self, run_id: str, timeout: float = 30.0) -> None:
         """等待 run 的后台线程结束（测试用）。"""

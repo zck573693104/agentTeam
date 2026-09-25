@@ -20,6 +20,13 @@ pip install -e ".[qwen,dev]"
   - `graph.py` — TeamCompiler（Team → StateGraph 编译，含审批门 + MCP 加载）
   - `trace.py` — TraceWriter 协议（SQLite / Fake 实现）
   - `approval.py` — 审批门节点（step 级 / worker 级 / tool 级，interrupt 实现）
+- `agentteam.harness` —— **SP8：opencode 套壳执行引擎**（Agent = 控制平面 + opencode 底座）
+  - `opencode_client.py` — opencode server REST + SSE 客户端（自动重连）
+  - `translator.py` — Team JSON → opencode 会话/权限规则集/MCP/provider 配置
+  - `approval.py` — 三级审批桥（step/worker 控制平面门 + tool 级 permission 桥）
+  - `engine.py` — HarnessRunner（plan→dispatch(seq/dag)→review，graph 协议适配 + 快照续跑）
+  - `events.py` — opencode 事件 → AgentTeam trace 事件词表（前端零改动）
+  - `runner.py` — 状态持久化（run_engine_state 表）+ 引擎工厂
 - `agentteam.api` —— FastAPI 后端 API（团队注册、任务提交、SSE 实时推送、审批续跑、用量统计）
   - `server.py` — FastAPI app 工厂（create_app）
   - `serializer.py` — Team JSON ↔ dataclass 转换
@@ -117,3 +124,85 @@ API 端点：
 - [x] M5a API（FastAPI + SSE + RunManager）
 - [x] M5b Web UI（React + antd + SSE 实时控制台）
 - [x] M6 示例团队 + 测试
+- [x] SP7 Skill 系统 + 自进化
+- [x] SP8 opencode 套壳引擎（双引擎：`Team.engine = "langgraph" | "opencode"`）
+
+## SP8：opencode 套壳引擎（双引擎架构）
+
+AgentTeam 现在支持把执行层架在开源 [opencode](https://github.com/sst/opencode)（MIT）上：
+AgentTeam 保留**控制平面**（Team schema、三级审批策略、专家库、SP7 自进化、审计、
+Web 控制台），opencode server 承担 **agent loop / 工具系统 / 模型接入 / MCP**。
+设计详见 [docs/opencode-harness-design.md](docs/opencode-harness-design.md)。
+
+### 1. 启动 opencode server（执行底座）
+
+```bash
+npm i -g opencode-ai        # 或 curl -fsSL https://opencode.ai/install | bash
+opencode serve --port 4117  # 在你的项目目录下运行（worker 的文件操作落在该目录）
+```
+
+### 2. 启动 AgentTeam API（控制平面）
+
+```bash
+uvicorn agentteam.api.server:create_app --factory
+```
+
+### 3. 注册 opencode 引擎团队并提交任务
+
+```bash
+curl -X POST http://localhost:8000/api/teams -H "Content-Type: application/json" -d '{
+  "name": "oc_dev", "description": "套壳研发小队", "engine": "opencode",
+  "root": {
+    "name": "leader", "role": "supervisor", "system_prompt": "你是研发主管",
+    "children": [
+      {"name": "coder",  "role": "worker", "system_prompt": "你负责写代码", "tools": ["write_file", "bash"]},
+      {"name": "tester", "role": "worker", "system_prompt": "你负责测试", "tools": ["read_file", "bash"]}
+    ]},
+  "default_model": {"provider": "qwen", "name": "qwen-max"},
+  "skills": [], "mcp_servers": []
+}'
+
+curl -X POST http://localhost:8000/api/runs \
+  -H "Content-Type: application/json" \
+  -d '{"team_name": "oc_dev", "task": "实现一个 hello world 程序"}'
+```
+
+不声明 `engine` 的团队自动走原 LangGraph 引擎，行为完全不变。
+
+### 4. 配置（环境变量）
+
+| 变量 | 含义 | 默认 |
+|---|---|---|
+| `AGENTTEAM_OPENCODE_URL` | opencode server 地址 | `http://127.0.0.1:4096` |
+| `AGENTTEAM_OC_MODEL` | 默认模型 `provider/model` | `opencode/ling-3.0-flash-fin-free`（免费） |
+| `OPENCODE_SERVER_PASSWORD` | opencode server Basic Auth | 无 |
+| `AGENTTEAM_DEFAULT_ENGINE` | Team 未声明 engine 时的默认引擎 | `langgraph` |
+| `AGENTTEAM_OC_TIMEOUT` | 单次 prompt 等待上限（秒） | `600` |
+| `AGENTTEAM_OC_SMOKE=0` | 关闭真实 opencode 冒烟测试 | 自动探测 |
+| `AGENTTEAM_HARNESS_DISABLED=1` | 完全禁用 harness 引擎 | 启用 |
+
+### 5. 测试
+
+```bash
+python -m pytest tests -q          # 全量（新旧引擎 + 669 用例）
+python -m pytest tests/harness -q  # 仅套壳引擎（fake server，无外部依赖）
+# 真实 opencode 冒烟：先 `opencode serve --port 4117`，再跑 tests/harness/test_real_opencode.py
+```
+
+## 企业部署指引（opencode 路线）
+
+1. **数据不出域**：AgentTeam 控制平面 + opencode server 全部内网部署；模型走
+   内网网关（vLLM/Ollama/DeepSeek 自托管，或 LiteLLM 统一代理），Team JSON 里
+   `default_model` 指向网关 provider 即可。
+2. **权限最小化**：Worker 的 `tools` 白名单 + `approval_policy(level="tool", targets=[...])`
+   把写文件/执行命令纳入人工审批；生产建议给 opencode server 设置
+   `OPENCODE_SERVER_PASSWORD` 并用防火墙限制 127.0.0.1。
+3. **审计与合规**：所有审批决策、工具调用、token 消耗落在 SQLite（`run_events` /
+   `approvals` / `evolution_history`），可对接企业日志管道；Web 控制台实时查看。
+4. **成本控制**：`GET /api/dashboard` 按团队/状态聚合 token 用量；模型侧用
+   LiteLLM 配预算与限流。
+5. **高可用**：审批等待期间 run 快照持久化（`run_engine_state` 表），服务重启后
+   审批仍可续跑；进化引擎失败自动隔离，不影响主流程。
+6. **已知边界**：opencode v1.18.32 的 per-request `tools` 与 permission `deny`
+   有缺陷（见设计文档 §7），工具白名单当前为 prompt 级约束；审批链路（`ask` 规则）
+   完整可用。升级 opencode 后无需改代码，strict 模式预留位已就绪。

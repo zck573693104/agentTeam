@@ -39,3 +39,6 @@ Thumbs.db
 .env
 .env.local
 *.secret
+
+# opencode smoke sandbox
+.tmp_oc_smoke/

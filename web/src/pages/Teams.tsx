@@ -84,6 +84,15 @@ export default function Teams() {
     { title: "名称", dataIndex: "name" },
     { title: "描述", dataIndex: "description" },
     {
+      title: "引擎",
+      dataIndex: "engine",
+      render: (engine: string | null | undefined) => (
+        <Tag color={engine === "opencode" ? "purple" : "default"}>
+          {engine === "opencode" ? "opencode" : "langgraph"}
+        </Tag>
+      ),
+    },
+    {
       title: "Worker 数",
       render: (_: unknown, r: Team) => countWorkers(r.root),
     },
