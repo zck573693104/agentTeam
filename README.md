@@ -21,9 +21,9 @@ pip install -e ".[qwen,dev]"
   - `trace.py` — TraceWriter 协议（SQLite / Fake 实现）
   - `approval.py` — 审批门节点（step 级 / worker 级 / tool 级，interrupt 实现）
 - `agentteam.harness` —— **SP8：opencode 套壳执行引擎**（Agent = 控制平面 + opencode 底座）
-  - `opencode_client.py` — opencode server REST + SSE 客户端（自动重连）
-  - `translator.py` — Team JSON → opencode 会话/权限规则集/MCP/provider 配置
-  - `approval.py` — 三级审批桥（step/worker 控制平面门 + tool 级 permission 桥）
+  - `opencode_client.py` — opencode v2 `/api/*` REST + SSE 客户端（自动重连、回合锚点）
+  - `translator.py` — Team JSON → opencode v2 会话/prompt 内联/计划 schema/MCP/provider 配置
+  - `approval.py` — 三级审批桥（step/worker 控制平面门 + tool 级事后中断与审计）
   - `engine.py` — HarnessRunner（plan→dispatch(seq/dag)→review，graph 协议适配 + 快照续跑）
   - `events.py` — opencode 事件 → AgentTeam trace 事件词表（前端零改动）
   - `runner.py` — 状态持久化（run_engine_state 表）+ 引擎工厂
@@ -178,6 +178,7 @@ curl -X POST http://localhost:8000/api/runs \
 | `OPENCODE_SERVER_PASSWORD` | opencode server Basic Auth | 无 |
 | `AGENTTEAM_DEFAULT_ENGINE` | Team 未声明 engine 时的默认引擎 | `langgraph` |
 | `AGENTTEAM_OC_TIMEOUT` | 单次 prompt 等待上限（秒） | `600` |
+| `AGENTTEAM_OC_TOOL_GUARD` | 白名单外工具调用的处置：`strict`（中断+审批）/ `audit`（只记账继续跑）/ `off` | `strict` |
 | `AGENTTEAM_OC_SMOKE=0` | 关闭真实 opencode 冒烟测试 | 自动探测 |
 | `AGENTTEAM_HARNESS_DISABLED=1` | 完全禁用 harness 引擎 | 启用 |
 
@@ -195,14 +196,21 @@ python -m pytest tests/harness -q  # 仅套壳引擎（fake server，无外部�
    内网网关（vLLM/Ollama/DeepSeek 自托管，或 LiteLLM 统一代理），Team JSON 里
    `default_model` 指向网关 provider 即可。
 2. **权限最小化**：Worker 的 `tools` 白名单 + `approval_policy(level="tool", targets=[...])`
-   把写文件/执行命令纳入人工审批；生产建议给 opencode server 设置
-   `OPENCODE_SERVER_PASSWORD` 并用防火墙限制 127.0.0.1。
+   把写文件/执行命令纳入人工审批。**注意 v2 底座上的语义是「事后中断 + 审计」**
+   （opencode v2 无会话级权限规则集，见设计文档 §4/§8）：违规调用一旦被观测到即
+   中断回合、写 `tool_denied` 并挂起等人工，放行后从断点续跑；但**首个被观测到的
+   调用可能已经执行完毕**，需要「执行前拦住」语义的合规场景请把该 worker 的
+   `engine` 留在 `langgraph`。生产建议给 opencode server 设置
+   `OPENCODE_SERVER_PASSWORD`、用防火墙限制 127.0.0.1，并把 server 跑在
+   容器/独立用户下（worker 的文件操作与命令都在其工作目录内发生）。
 3. **审计与合规**：所有审批决策、工具调用、token 消耗落在 SQLite（`run_events` /
    `approvals` / `evolution_history`），可对接企业日志管道；Web 控制台实时查看。
 4. **成本控制**：`GET /api/dashboard` 按团队/状态聚合 token 用量；模型侧用
    LiteLLM 配预算与限流。
 5. **高可用**：审批等待期间 run 快照持久化（`run_engine_state` 表），服务重启后
    审批仍可续跑；进化引擎失败自动隔离，不影响主流程。
-6. **已知边界**：opencode v1.18.32 的 per-request `tools` 与 permission `deny`
-   有缺陷（见设计文档 §7），工具白名单当前为 prompt 级约束；审批链路（`ask` 规则）
-   完整可用。升级 opencode 后无需改代码，strict 模式预留位已就绪。
+6. **已知边界**：执行底座已迁到 opencode v2 `/api/*` 面（v1.18.32 实测）。v2 不提供
+   per-request `system`/`format`/`tools`，也没有会话级 permission 规则集，因此
+   system prompt 内联进用户文本、Plan JSON 靠 prompt + 宽容提取、工具管控靠
+   「prompt 约束 + 事后中断审计」（逐项对策见设计文档 §8）。若 opencode 后续补齐
+   事前权限门，只需替换 `approval.review_tool_call` 的处置分支，控制平面与审计词表不变。

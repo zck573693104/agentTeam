@@ -1,31 +1,40 @@
-"""HarnessRunner：opencode 会话编排引擎（SP8 核心）。
+"""HarnessRunner：opencode v2 会话编排引擎（SP8 核心）。
 
 把 AgentTeam 的 supervisor 编排语义（plan→dispatch→review，sequential/dag，
-三级审批）映射到 opencode 会话原语上，并以 graph 协议（invoke/get_state）
+三级审批）映射到 opencode v2 `/api/*` 会话原语上，并以 graph 协议（invoke/get_state）
 接入现有 RunManager 生命周期（interrupt/resume/cancel/进化触发全复用）。
+
+v2 迁移带来的三处实现差异（实测依据见 docs/opencode-harness-design.md §8）：
+- 只有异步 prompt：`POST /api/session/{id}/prompt` + 轮询 `finish=="stop"`
+  （v1 的同步 /message 与 per-request system/format/tools 都不存在）。
+  system prompt 由 translator 内联进用户文本，计划 JSON 由 prompt 内嵌 schema
+  + `translator.extract_json` 容错提取。
+- tool 级审批从「事前规则集」改为「事后中断 + 审计」：引擎在等待循环里消费
+  EventMapper 观测到的工具调用，命中白名单外/审批目标即 POST interrupt 终止
+  回合、发 tool_denied 并 park 等人工（代价：首个调用可能已执行完）。
+- token 用量取逐消息 `tokens` 求和（v2 会话对象聚合恒为 0）。
 
 可恢复性设计（与 LangGraph SqliteSaver checkpoint 对等）：
 - 编排状态是**纯 JSON 可序列化**的 frame 栈 + stage 状态机。
   park（审批等待人工）时整体快照 → ApprovalInterrupt → invoke return →
   RunManager 标 interrupted；resume 时 invoke({"__resume__": ...}) 重入，
-  先 resolve 决策（审计落账；tool 门还向 opencode 回帖）再推进到下一 stage。
+  先 resolve 决策（审计落账；tool 门还要向会话补发「已批准，继续」）再推进。
 - 快照经 state_store 持久化到 SQLite（run_engine_state 表），
   服务重启后 approve 走 rehydrate 路径重建 runner 再续跑。
-- dag 并行 fan-out 用 ThreadPoolExecutor；park 时所有在飞会话 id 已在
-  frame["round"] 快照内，resume 后对已完成的会话直接取结果
+- dag 并行 fan-out 由 opencode 服务端并发执行，主线程单点轮询；park 时全部
+  在飞会话 id 已在 frame["round"] 快照内，resume 后对已完成的会话直接取结果
   （opencode 会话在服务端存活，幂等）。
 
 stage 状态机（每 frame 一个 stage，_advance 每次推进一步）：
   sequential: gate_step → gate_worker → run → review → gate_step → ... → done
   dag:        round_gate → dispatch_round → round_wait → round_review → ... → done
 park ctx 记录 stage + frame_idx；resume 时 _apply_resume 推进 stage
-（gate 类）或回帖后续等（tool 类），drive 循环从断点继续。
+（gate 类）或补发续跑（tool 类），drive 循环从断点继续。
 
 与 LangGraph 引擎的语义对齐见 docs/opencode-harness-design.md §3.2。
 """
 from __future__ import annotations
 
-import json
 import threading
 import time
 from typing import Any
@@ -39,11 +48,10 @@ from agentteam.harness.events import EventMapper
 from agentteam.harness.opencode_client import OpenCodeClient, OpenCodeError
 from agentteam.runtime.trace import TraceWriter
 
-# Plan JSON schema：手写、TypeBox 兼容版。
-# 不能用 Plan.model_json_schema()：opencode 的格式校验（TypeBox）不接受
-# pydantic 为 `str | None` 生成的 {"type": ["string", "null"]} 联合类型与
-# $defs 引用，会导致整条消息 400（实测 v1.18.32）。语义与 runtime.nodes.Plan
-# 保持一致（worker/instruction/id/depends_on/condition/execution_mode）。
+# Plan JSON schema：v2 没有结构化输出通道（format=json_schema 是 v1 能力），
+# 它被序列化进 prompt 文本作为硬约束，由 translator.extract_json 容错提取。
+# 语义与 runtime.nodes.Plan 保持一致
+# （worker/instruction/id/depends_on/condition/execution_mode）。
 _PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -77,10 +85,6 @@ _PLAN_SCHEMA: dict[str, Any] = {
     "required": ["steps", "execution_mode"],
     "additionalProperties": False,
 }
-
-
-def _plan_json_schema() -> dict[str, Any]:
-    return _PLAN_SCHEMA
 
 
 def _policy_dict(policy: ApprovalPolicy | None) -> dict | None:
@@ -233,6 +237,8 @@ class HarnessRunner:
             "total_tokens": 0,
             "frames": [self._frame_from_agent(root, self._task)],
             "park": None,
+            # session_id → 人工已放行的工具名（事后审批不重复 park 同一工具）
+            "approved_tools": {},
         }
 
     def _frame_from_agent(self, agent: Agent, instruction: str) -> dict:
@@ -301,7 +307,7 @@ class HarnessRunner:
     # ================= resume =================
 
     def _apply_resume(self, st: dict, decision: dict) -> None:
-        """resolve 审批决策并推进断点状态机（tool 门还要向 opencode 回帖）。"""
+        """resolve 审批决策并推进断点状态机（tool 门还要向会话补发续跑 prompt）。"""
         park = st.get("park")
         if park is None:
             raise ValueError(f"Run {self._run_id}: resume without pending park")
@@ -329,14 +335,34 @@ class HarnessRunner:
             st["frames"][ctx["frame_idx"]]["stage"] = "dispatch_round"
             return
         if stage in ("tool", "round_tool"):
-            # 回帖后 stage 不变：seq 停在 frame["inflight"]/run，
-            # dag 停在 round_wait —— drive 循环重入等待即可。
-            self._client.respond_permission(
-                ctx["session_id"], gate["permission_id"],
-                "once" if approved else "reject",
+            # 回合已被引擎 interrupt 掉，必须补发一轮 prompt 才会继续产出；
+            # 已批准的同类工具记入快照，避免同一工具反复 park。
+            session_id = ctx["session_id"]
+            tool = gate.get("permission") or ""
+            granted = st.setdefault("approved_tools", {})
+            granted.setdefault(session_id, [])
+            if tool and tool not in granted[session_id]:
+                granted[session_id].append(tool)
+            resp = self._client.prompt_async(
+                session_id, translator.approved_resume_prompt(tool, gate.get("worker")),
+                delivery="queue",
             )
+            # stage 不变：seq 停在 frame["inflight"]/run，
+            # dag 停在 round_wait —— drive 循环重入继续等待即可；
+            # 但回合完成度的锚点要换成这一轮的用户消息 id。
+            info = self._parked_info(st, ctx)
+            if info is not None:
+                info["turn_id"] = self._client.turn_message_id(resp)
             return
         raise ValueError(f"unknown park stage: {stage}")
+
+    @staticmethod
+    def _parked_info(st: dict, ctx: dict) -> dict | None:
+        """park ctx → 在飞会话记录（seq 在 frame["inflight"]，dag 在 round[key]）。"""
+        frame = st["frames"][ctx["frame_idx"]]
+        if ctx["stage"] == "round_tool":
+            return (frame.get("round") or {}).get(ctx.get("key"))
+        return frame.get("inflight")
 
     # ================= 主驱动（断点状态机） =================
 
@@ -385,14 +411,11 @@ class HarnessRunner:
     # ---------- plan ----------
 
     def _do_plan(self, st: dict, frame: dict) -> None:
-        fmt = {"type": "json_schema", "schema": _PLAN_SCHEMA}
-        roster = ", ".join(c["name"] for c in frame["children"])
-        text = (
-            "请把以下任务拆解成可执行的步骤计划，每步指派一个 worker。\n"
-            f"可用的 worker（worker 字段必须从这个列表中选择，一字不差）：{roster}\n"
-            f"\n任务：\n{frame['instruction'] or st['task']}"
+        roster = [c["name"] for c in frame["children"]]
+        text = translator.plan_prompt(
+            _PLAN_SCHEMA, roster, frame["instruction"] or st["task"]
         )
-        answer = self._prompt_text(frame, text, fmt=fmt)
+        answer = self._one_shot(frame, text)
         plan_obj = self._parse_plan(answer)
         frame["plan"] = [
             {
@@ -417,12 +440,12 @@ class HarnessRunner:
     @staticmethod
     def _parse_plan(answer: str) -> dict:
         try:
-            obj = json.loads(answer)
+            obj = translator.extract_json(answer)
         except ValueError as e:
             raise ValueError(
                 f"Leader plan is not valid JSON: {e}; got: {answer[:200]}"
             ) from e
-        if not isinstance(obj, dict) or not isinstance(obj.get("steps"), list):
+        if not isinstance(obj.get("steps"), list):
             raise ValueError(f"Leader plan JSON must contain steps[]: {answer[:200]}")
         return obj
 
@@ -572,14 +595,15 @@ class HarnessRunner:
                     self._mapper.register_session(sess["id"], child["name"])
                     if self._trace is not None:
                         self._trace.emit(self._run_id, "worker_start", child["name"])
-                    self._client.prompt_async(
-                        sess["id"], step["instruction"],
-                        system=translator.worker_system_prompt(child),
-                        model=self._model_for(child),
+                    resp = self._client.prompt_async(
+                        sess["id"],
+                        translator.worker_user_prompt(child, step["instruction"]),
+                        delivery="queue",
                     )
                     frame["round"][step["id"]] = {
                         "worker": child["name"], "session_id": sess["id"],
                         "instruction": step["instruction"],
+                        "turn_id": self._client.turn_message_id(resp),
                     }
             frame["stage"] = "round_wait"
             return
@@ -662,14 +686,14 @@ class HarnessRunner:
     # ---------- worker 会话 ----------
 
     def _create_worker_session(self, child: dict) -> dict:
-        policy = _policy_from(child.get("policy"))
-        permission = translator.policy_to_permission_rules(
-            policy, child.get("tools") or []
-        )
+        """v2 会话只接受 model / agent —— 权限与工具白名单没有会话级入口（§8）。
+
+        `agent` 传 worker 名当标签用：v1.18.32 对未注册的 agent 名照单收下并
+        原样回显（实测），既方便在 opencode 侧按 worker 辨认会话，也是
+        「将来 v2 agent 配置生效时直接对上」的前置。
+        """
         return self._client.create_session(
-            title=f"{self._team.name}:{child['name']}",
-            model=self._model_for(child),
-            permission=permission,
+            model=self._model_for(child), agent=child["name"]
         )
 
     def _start_worker(
@@ -682,15 +706,16 @@ class HarnessRunner:
         self._mapper.register_session(sess["id"], child["name"])
         if self._trace is not None:
             self._trace.emit(self._run_id, "worker_start", child["name"])
-        self._client.prompt_async(
-            sess["id"], instruction,
-            system=translator.worker_system_prompt(child),
-            model=self._model_for(child),
+        resp = self._client.prompt_async(
+            sess["id"],
+            translator.worker_user_prompt(child, instruction),
+            delivery="queue",
         )
         info = {
             "session_id": sess["id"], "worker": child["name"],
             "instruction": instruction, "step_index": step_index,
             "step_id": step_id,
+            "turn_id": self._client.turn_message_id(resp),
         }
         frame["inflight"] = info
         self._persist(st)
@@ -714,69 +739,104 @@ class HarnessRunner:
         self, st: dict, frame: dict, idx: int, remaining: dict,
         park_stage: str,
     ) -> None:
-        """主线程轮询多会话直至全部完成；取消/权限/错误三路处理。
+        """主线程轮询多会话直至全部完成；取消/工具违规/错误三路处理。
 
         remaining: {key: info}，info 含 session_id/worker；完成的写 info["answer"]。
-        权限 park：targets 内的 pending permission → _raise_park（ctx 带 key）；
-        其余 pending permission 自动放行（防御，正常应已被规则集 allow）。
+        完成判定 = 最后一条 assistant 消息 finish=="stop"（v2 没有 session.idle
+        契约、/wait 返回 503，SSE 事件只用来少睡一轮）。
+        工具违规 = **事后中断**：观测到新工具调用 → broker 判定 → 需人工时
+        POST interrupt 掐断回合再 park（首个调用可能已执行完，见 approval.py）。
         """
         deadline = time.monotonic() + self._prompt_timeout
         while remaining:
             if self._rm is not None and self._rm.is_cancelled(self._run_id):
                 for info in remaining.values():
-                    try:
-                        self._client.abort_session(info["session_id"])
-                    except OpenCodeError:
-                        pass
+                    self._interrupt_quietly(info["session_id"])
                 raise RunCancelledError()
-            pending = self._client.pending_permissions()
             for key, info in list(remaining.items()):
                 session_id = info["session_id"]
-                child = self._find_child(frame, info["worker"])
-                policy = _policy_from(child.get("policy"))
-                for perm in pending:
-                    if perm.session_id != session_id:
-                        continue
-                    if self._broker.tool_needs_human(policy, perm):
-                        gate = {
-                            "gate": "tool", "worker": child["name"],
-                            "permission": perm.permission,
-                            "patterns": perm.patterns,
-                            "session_id": perm.session_id,
-                            "permission_id": perm.id,
-                        }
-                        self._raise_park(st, {
-                            "stage": park_stage, "frame_idx": idx,
-                            "session_id": session_id, "key": key,
-                        }, gate)
-                    self._client.respond_permission(session_id, perm.id, "once")
-                err = self._mapper.session_error(session_id)
+                # SSE 侧 session.error/step.failed 之外再走一条 REST 判定：
+                # 实测限流回合只落 assistant finish=="error"（见 turn_error docstring），
+                # 漏掉它会让 run 吊到 prompt 超时（默认 600s）而不是立刻失败。
+                err = (self._mapper.session_error(session_id)
+                       or self._client.turn_error(session_id, info.get("turn_id")))
                 if err:
                     raise OpenCodeError(
                         f"opencode session {session_id} failed: {err}"
                     )
-                if self._mapper.session_idle(session_id):
-                    self._accrue_tokens(session_id)
-                    info["answer"] = self._final_text(session_id)
-                    if self._trace is not None:
-                        self._trace.emit(
-                            self._run_id, "worker_end", info["worker"],
-                            {"answer_length": len(info["answer"])},
-                        )
-                    remaining.pop(key)
+                child = self._find_child(frame, info["worker"])
+                self._review_tool_calls(
+                    st, frame, idx, child, info, park_stage, key)
+                turn_id = info.get("turn_id")
+                if self._client.assistant_done(session_id, turn_id) is None:
+                    continue
+                # 收尾对账：REST 的完成信号可能领先于 SSE 观测，直接用 durable
+                # history 补一次再判违规，否则「事后中断+审计」会整批发漏
+                # （seq 去重保证不重复计 token / 不重复入观测队列）。
+                self._reconcile(session_id)
+                self._review_tool_calls(
+                    st, frame, idx, child, info, park_stage, key)
+                self._accrue_tokens(session_id)
+                info["answer"] = self._client.final_text(session_id, turn_id)
+                if self._trace is not None:
+                    self._trace.emit(
+                        self._run_id, "worker_end", info["worker"],
+                        {"answer_length": len(info["answer"])},
+                    )
+                remaining.pop(key)
             if not remaining:
                 return
             if time.monotonic() > deadline:
                 for info in remaining.values():
-                    try:
-                        self._client.abort_session(info["session_id"])
-                    except OpenCodeError:
-                        pass
+                    self._interrupt_quietly(info["session_id"])
                 raise OpenCodeError(
                     f"opencode sessions timed out after {self._prompt_timeout}s: "
                     f"{[i['session_id'] for i in remaining.values()]}"
                 )
             time.sleep(self._poll)
+
+    def _review_tool_calls(
+        self, st: dict, frame: dict, idx: int, child: dict, info: dict,
+        park_stage: str, key: str,
+    ) -> None:
+        """消费本会话新观测到的工具调用；命中违规即中断 + park。"""
+        session_id = info["session_id"]
+        new_calls = self._mapper.take_new_calls(session_id)
+        if not new_calls:
+            return
+        policy = _policy_from(child.get("policy"))
+        whitelist = translator.worker_tool_whitelist(child.get("tools") or [])
+        granted = st.get("approved_tools", {}).get(session_id, [])
+        for i, call in enumerate(new_calls):
+            if call.name in granted:
+                continue
+            try:
+                self._broker.review_tool_call(
+                    self._run_id, policy, child["name"], call, session_id, whitelist
+                )
+            except ApprovalInterrupt as intr:
+                # 本批尚未判定的调用退回队列，resume 后继续处理
+                self._mapper.requeue_calls(session_id, new_calls[i + 1:])
+                self._interrupt_quietly(session_id)
+                self._raise_park(st, {
+                    "stage": park_stage, "frame_idx": idx,
+                    "session_id": session_id, "key": key,
+                }, intr.gate)
+
+    def _interrupt_quietly(self, session_id: str) -> None:
+        """interrupt 失败不掩盖主因（取消/审批 park 已决定 run 走向）。"""
+        try:
+            self._client.interrupt_session(session_id)
+        except OpenCodeError:
+            pass
+
+    def _reconcile(self, session_id: str) -> None:
+        """用 durable history 补齐事件观测视图（尽力而为，不阻断收尾）。"""
+        try:
+            events = self._client.history(session_id)
+        except OpenCodeError:
+            return
+        self._mapper.ingest(session_id, events)
 
     def _raise_park(self, st: dict, ctx: dict, gate: dict) -> None:
         """组装 park 快照并抛 ApprovalInterrupt（由 _drive 捕获后 return）。"""
@@ -785,37 +845,20 @@ class HarnessRunner:
         raise ApprovalInterrupt(gate)
 
     def _accrue_tokens(self, session_id: str) -> None:
-        """把会话聚合 token 累进 run 总量（幂等：按会话记已累计值）。"""
+        """把会话逐消息 token 求和累进 run 总量（幂等：按会话记已累计值）。
+
+        v2 会话对象的 tokens 聚合恒为 0，用量只能从消息侧取。
+        """
         if not hasattr(self, "_accrued"):
             self._accrued: dict[str, int] = {}
         try:
-            sess = self._client.get_session(session_id)
+            total = self._client.message_tokens(session_id)
         except OpenCodeError:
             return
-        usage = sess.get("tokens") or {}
-        total = int(usage.get("input", 0) or 0) + int(usage.get("output", 0) or 0) \
-            + int(usage.get("reasoning", 0) or 0)
         prev = self._accrued.get(session_id, 0)
         if total > prev and self._state is not None:
             self._state["total_tokens"] = self._state.get("total_tokens", 0) + total - prev
             self._accrued[session_id] = total
-
-    def _final_text(self, session_id: str) -> str:
-        """取会话最后一个 assistant 消息的 text parts（结构化输出为 JSON 文本）。"""
-        try:
-            msgs = self._client.messages(session_id)
-        except OpenCodeError:
-            return ""
-        for m in reversed(msgs):
-            info = m.get("info", {})
-            if info.get("role") != "assistant":
-                continue
-            parts = [
-                p.get("text", "") for p in (m.get("parts") or [])
-                if p.get("type") == "text"
-            ]
-            return "\n".join(t for t in parts if t)
-        return ""
 
     # ---------- review ----------
 
@@ -825,7 +868,7 @@ class HarnessRunner:
         text = (
             f"Worker {recent} 完成了步骤，产出：{outputs.get(recent, '')}。请简要点评。"
         )
-        answer = self._prompt_text(frame, text)
+        answer = self._one_shot(frame, text)
         if self._trace is not None:
             self._trace.emit(self._run_id, "leader_review", frame["agent_name"])
         frame["result"] = answer  # 作为 subteam step 的产出回传父 frame
@@ -848,52 +891,51 @@ class HarnessRunner:
             _model_from(spec.get("model")), self._default_model
         )
 
-    def _prompt_text(self, frame: dict, text: str, fmt: dict | None = None) -> str:
-        """无工具的一次性 prompt（plan/review）：建临时会话，同步取回文本。
+    def _one_shot(self, spec: dict, text: str) -> str:
+        """控制平面一次性 prompt（plan/review）：临时会话 + 异步 prompt + 轮询取文本。
 
-        注意不传 per-request `tools` 参数：opencode v1.18.32 上该参数会
-        静默杀死回合（实测，见 docs/opencode-harness-design.md §7）；
-        工具约束走 system prompt 指令 + 会话 permission 规则集。
+        v2 没有同步 prompt，也没有 per-request system/tools —— 角色设定与
+        「不要用工具」的约束由 translator.supervisor_user_prompt 内联进文本；
+        这类会话不参与工具白名单执法（与 v1 路径一致：控制面会话无规则集）。
         """
+        full = translator.supervisor_user_prompt(spec, text)
+        answer = self._ask_once(spec, full)
+        if not answer.strip():
+            # 实测上游抖动（1.18.32 + 免费模型约 5% 回合）：回合以 finish=stop
+            # 正常结束，但只有 reasoning、没有任何 text part。重问必须换全新
+            # 会话 —— 同会话里上一段空回合（含其 reasoning）会进上下文，
+            # 实测连空两次的概率远高于独立事件。
+            answer = self._ask_once(spec, full)
+        return answer
+
+    def _ask_once(self, spec: dict, text: str) -> str:
+        """新建临时会话跑一轮 prompt，返回本回合文本。"""
         sess = self._client.create_session(
-            title=f"{self._team.name}:{frame['agent_name']}",
-            model=self._model_for(frame),
+            model=self._model_for(spec), agent=spec["agent_name"]
         )
-        self._mapper.register_session(sess["id"], frame["agent_name"])
-        # plan/review 是控制面 prompt：禁用工具（prompt 级约束，见 translator）
-        system = translator.system_prompt_for_spec(frame)
-        directive = translator.worker_tool_directive([])
-        try:
-            resp = self._client.prompt(
-                sess["id"], text,
-                system=f"{system}\n\n{directive}" if system else directive,
-                model=self._model_for(frame), fmt=fmt,
-                timeout=self._prompt_timeout,
-            )
-        except OpenCodeError:
-            err = self._mapper.session_error(sess["id"])
+        session_id = sess["id"]
+        self._mapper.register_session(session_id, spec["agent_name"])
+        resp = self._client.prompt_async(session_id, text, delivery="queue")
+        turn_id = self._client.turn_message_id(resp)
+        deadline = time.monotonic() + self._prompt_timeout
+        while True:
+            if self._rm is not None and self._rm.is_cancelled(self._run_id):
+                self._interrupt_quietly(session_id)
+                raise RunCancelledError()
+            err = self._mapper.session_error(session_id)
             if err:
-                raise OpenCodeError(f"opencode prompt failed: {err}") from None
-            raise
-        self._accrue_tokens(sess["id"])
-        parts = list(resp.get("parts") or [])
-        text = "\n".join(
-            p.get("text", "") for p in parts
-            if p.get("type") == "text" and p.get("text", "").strip()
-        )
-        if fmt and not text.strip():
-            # 真实 opencode 的结构化输出经 StructuredOutput 工具调用返回：
-            # JSON 在工具入参里，text part 近乎为空（实测 v1.18.32）
-            for p in parts:
-                if (p.get("type") == "tool"
-                        and p.get("tool") == "StructuredOutput"):
-                    state = p.get("state") or {}
-                    payload = state.get("input")
-                    if payload is not None:
-                        text = (payload if isinstance(payload, str)
-                                else json.dumps(payload, ensure_ascii=False))
-                        break
-        return text
+                raise OpenCodeError(f"opencode prompt failed: {err}")
+            if self._client.assistant_done(session_id, turn_id) is not None:
+                break
+            if time.monotonic() > deadline:
+                self._interrupt_quietly(session_id)
+                raise OpenCodeError(
+                    f"opencode one-shot prompt timed out after "
+                    f"{self._prompt_timeout}s: {session_id}"
+                )
+            time.sleep(self._poll)
+        self._accrue_tokens(session_id)
+        return self._client.final_text(session_id, turn_id)
 
     # ---------- 杂项 ----------
 

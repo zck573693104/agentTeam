@@ -15,7 +15,8 @@ from agentteam.api.events import EventBus
 from agentteam.api.run_manager import RunCancelledError
 from agentteam.domain.team import Team
 from agentteam.harness.engine import HarnessRunner
-from agentteam.harness.opencode_client import OpenCodeClient, OpenCodeConfig
+from agentteam.harness.opencode_client import (
+    OpenCodeClient, OpenCodeConfig, OpenCodeError)
 from agentteam.harness.runner import HarnessStateStore
 from agentteam.models.provider import ModelRef
 from agentteam.storage.audit import AuditRepo
@@ -196,6 +197,137 @@ def test_unknown_worker_fails(env_factory):
         env.runner.invoke({}, {})
 
 
+def test_resume_false_admits_but_never_schedules(env_factory):
+    """opencode 1.18.32 实测：prompt 带 resume=false 只 durable 入队，回合
+    永远不被调度、消息列表停在 user、且没有任何报错 —— 静默死锁。
+    fake server 忠实复现该语义，客户端默认为 True（引擎全链路依赖此语义）。
+    """
+    env = env_factory(Script())
+    sid = env.client.create_session(agent="w1")["id"]
+    env.client.prompt_async(sid, "做A", resume=False)
+    time.sleep(0.3)
+    assert [m["type"] for m in env.client.messages(sid)] == ["user"]
+    assert env.client.assistant_done(sid) is None
+    env.client.prompt_async(sid, "做A")  # 默认值必须真正调度
+    deadline = time.time() + 5
+    while time.time() < deadline and env.client.assistant_done(sid) is None:
+        time.sleep(0.05)
+    assert env.client.assistant_done(sid) is not None
+
+
+def test_history_default_limit_accepted(env_factory):
+    """真实 v2 的 history limit 上限是 100（200 → 400），客户端默认值必须合规。"""
+    env = env_factory(Script())
+    sid = env.client.create_session(agent="w1")["id"]
+    env.client.prompt_async(sid, "做A")
+    deadline = time.time() + 5
+    while time.time() < deadline and env.client.assistant_done(sid) is None:
+        time.sleep(0.05)
+    assert env.client.history(sid)  # 默认 limit 不触发 400
+    with pytest.raises(OpenCodeError, match="400"):
+        env.client.history(sid, limit=200)
+
+
+def test_control_plane_prompt_never_scheduled_times_out(env_factory):
+    """控制面回合永不被调度时必须按 timeout 失败，而不是吊死到 600s。
+
+    真实场景：上游限流后 opencode 只写 user 消息、不再产出 assistant 消息
+    （实测 §8），引擎唯一的出路就是超时判定。
+    """
+    from agentteam.harness.engine import HarnessRunner
+
+    env = env_factory(Script())
+    env.server.script.never_schedules = True
+    team = make_team()
+    runner = HarnessRunner(
+        client=env.client, run_id="run_test", team=team, task="随便",
+        trace_writer=None, audit_repo=env.audit, state_store=None,
+        default_model="opencode/test-model", prompt_timeout=0.3,
+        poll_interval=0.02,
+    )
+    with pytest.raises(OpenCodeError, match="timed out"):
+        runner._one_shot({"agent_name": "leader", "system_prompt": "主管",
+                          "role": "supervisor", "model": None, "tools": []},
+                         "拆解任务")
+
+
+def test_throttled_plan_turn_reports_provider_error(env_factory):
+    """上游限流的回合形状是 finish=="error"（没有 session.error）。
+
+    漏判的话引擎会把「模型压根没产出」当成「计划不是 JSON」报出去，
+    企业现场看到的会是一条完全指错方向的错误。
+    """
+    script = Script()
+    script.turn_errors = {
+        "leader": "Provider request failed with HTTP 429: FreeUsageLimitError"}
+    env = env_factory(script)
+    with pytest.raises(OpenCodeError, match="429"):
+        env.runner.invoke({}, {})
+
+
+def test_throttled_worker_turn_fails_fast_without_sse(env_factory):
+    """同一判定走 REST 兜底：SSE 全黑（blackhole）时也不能吊到 prompt 超时。"""
+    script = Script()
+    script.plan = {"steps": [{"worker": "w1", "instruction": "做A"}],
+                   "execution_mode": "sequential"}
+    script.turn_errors = {
+        "w1": "Provider request failed with HTTP 429: Rate limit exceeded"}
+    env = env_factory(script)
+    env.server.script.blackhole = True
+    with pytest.raises(OpenCodeError, match="429"):
+        env.runner.invoke({}, {})
+
+
+def test_empty_plan_turn_retried_once(env_factory):
+    """实测抖动：回合 finish=stop 但没有任何 text part → 控制面同会话重问一次。
+
+    真实免费模型约 5% 的回合只产出 reasoning（step.ended output=0、
+    content=[]），把它当「计划不是 JSON」直接失败会让 run 无谓地死掉。
+    """
+    script = Script()
+    script.plan = {"steps": [{"worker": "w1", "instruction": "做A"}],
+                   "execution_mode": "sequential"}
+    script.worker_steps["w1"] = [{"type": "final", "text": "A完成"}]
+    script.empty_turns = 1
+    env = env_factory(script)
+    out = env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ()
+    assert "leader_plan" in env.event_types()
+    assert out["total_tokens"] > 0
+
+
+def test_two_empty_plan_turns_fail_run(env_factory):
+    """重问只给一次机会：连续两次空回合仍是失败，但要报得清楚。"""
+    script = Script()
+    script.empty_turns = 2
+    env = env_factory(script)
+    with pytest.raises(ValueError, match="not valid JSON"):
+        env.runner.invoke({}, {})
+
+
+def test_plan_json_tolerant_extraction(env_factory):
+    """v2 无结构化输出通道：计划 JSON 从散文/围栏里挖。"""
+    script = Script()
+    script.plan_raw = (
+        '好的，计划如下：\n```json\n'
+        '{"steps":[{"worker":"w1","instruction":"做A"}],'
+        '"execution_mode":"sequential"}\n```\n以上。'
+    )
+    script.worker_steps["w1"] = [{"type": "final", "text": "A完成"}]
+    env = env_factory(script)
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ()
+    assert "leader_plan" in env.event_types()
+
+
+def test_plan_not_json_fails_clearly(env_factory):
+    script = Script()
+    script.plan_raw = "我需要更多信息才能拆解"
+    env = env_factory(script)
+    with pytest.raises(ValueError, match="not valid JSON"):
+        env.runner.invoke({}, {})
+
+
 # ================= step / worker 级审批 =================
 
 
@@ -292,10 +424,10 @@ def test_gate_timeout_auto_approves(env_factory):
     )
 
 
-# ================= tool 级审批（permission 桥） =================
+# ================= tool 级审批（事后中断 + 审计） =================
 
 
-def _tool_gate_env(env_factory, targets):
+def _tool_gate_env(env_factory, targets, timeout=None):
     from agentteam.domain.agent import Agent
     from agentteam.domain.approval import ApprovalPolicy
     from agentteam.models.provider import ModelRef
@@ -305,8 +437,9 @@ def _tool_gate_env(env_factory, targets):
                    children=[
                        Agent(name="w2", role="worker", system_prompt="w",
                              tools=["write_file"],
-                             approval_policy=ApprovalPolicy(level="tool",
-                                                            targets=targets)),
+                             approval_policy=ApprovalPolicy(
+                                 level="tool", targets=targets,
+                                 timeout_seconds=timeout)),
                    ]),
         engine="opencode",
     )
@@ -314,17 +447,21 @@ def _tool_gate_env(env_factory, targets):
     script.plan = {"steps": [{"worker": "w2", "instruction": "写文件"}],
                    "execution_mode": "sequential"}
     script.worker_steps["w2"] = [
-        {"type": "tool", "name": "write_file", "ask": True, "result": "written"},
+        {"type": "tool", "name": "write_file", "args": {"path": "a.txt"},
+         "result": "written"},
         {"type": "final", "text": "写完了"},
     ]
     return env_factory(script, team)
 
 
-def test_tool_permission_park_and_approve(env_factory):
+def test_tool_approval_park_and_approve(env_factory):
     env = _tool_gate_env(env_factory, ["write_file"])
     env.runner.invoke({}, {})
+    # 工具已被观测 → 引擎 interrupt + park（事后中断，非事前拦截）
     assert env.runner.get_state({}).next == ("parked",)
-    # fake server 收到回帖前应有一个 pending permission
+    evs = env.events()
+    denied = [e for e in evs if e["event_type"] == "tool_denied"]
+    assert denied and "requires_approval" in denied[0]["payload"]
     env.runner.invoke({"__resume__": {"approved": True}}, {})
     assert env.runner.get_state({}).next == ()
     types = env.event_types()
@@ -333,22 +470,124 @@ def test_tool_permission_park_and_approve(env_factory):
     assert approvals and approvals[0]["status"] == "approved"
 
 
-def test_tool_permission_reject_continues(env_factory):
+def test_tool_approval_reject_ends_step(env_factory):
     env = _tool_gate_env(env_factory, ["write_file"])
     env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ("parked",)
     env.runner.invoke({"__resume__": {"approved": False}}, {})
-    # 拒绝 → opencode 回帖 reject → 模型收到拒绝继续 → run 正常完成
+    # 拒绝 → 回合已中断，frame 置 rejected，run 正常收尾（LangGraph parity）
     assert env.runner.get_state({}).next == ()
     approvals = [dict(r) for r in env.audit.list_approvals("run_test")]
     assert approvals[0]["status"] == "rejected"
+    assert "worker_end" not in env.event_types()
 
 
-def test_tool_not_in_targets_auto_allows(env_factory):
-    # targets 只含 read_file → write_file 的 ask 不会被 park
+def test_tool_approval_not_parked_twice_for_same_tool(env_factory):
+    env = _tool_gate_env(env_factory, ["write_file"])
+    script_calls = [
+        {"type": "tool", "name": "write_file", "args": {"path": "a.txt"},
+         "result": "written", "settle": 0.05},
+        {"type": "tool", "name": "write_file", "args": {"path": "b.txt"},
+         "result": "written", "settle": 0.05},
+        {"type": "final", "text": "写完了"},
+    ]
+    env.server.script.worker_steps["w2"] = script_calls
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ("parked",)
+    env.runner.invoke({"__resume__": {"approved": True}}, {})
+    # 同一工具已放行 → 第二次调用不再 park，run 直达完成
+    assert env.runner.get_state({}).next == ()
+    assert env.event_types().count("approval_requested") == 1
+
+
+def test_tool_gate_parks_even_when_sse_lags(env_factory):
+    """回归：REST 完成信号可以领先于 SSE 观测（真实 server 上就是竞态源）。
+    收尾必须用 durable history 对账补齐观测，否则事后拦截/审计整批发漏。
+    """
+    env = _tool_gate_env(env_factory, ["write_file"])
+    env.server.script.blackhole = True  # 事件只进 history，不推 SSE
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ("parked",)
+    evs = env.events()
+    assert [e for e in evs if e["event_type"] == "tool_denied"]
+    env.runner.invoke({"__resume__": {"approved": True}}, {})
+    assert env.runner.get_state({}).next == ()
+    # 对账幂等：history 重放不得把 token 翻倍（一次 worker 回合 = 一份用量）
+    ends = [e for e in env.events() if e["event_type"] == "worker_end"]
+    assert len(ends) == 1
+
+
+def test_tool_not_in_targets_runs_freely(env_factory):
+    # targets 只含 read_file，而 write_file 在 worker 白名单内 → 无违规
     env = _tool_gate_env(env_factory, ["read_file"])
     env.runner.invoke({}, {})
     assert env.runner.get_state({}).next == ()
     assert "approval_requested" not in env.event_types()
+    assert "tool_call" in env.event_types()
+
+
+# ================= 工具白名单事后执法 =================
+
+
+def _whitelist_env(env_factory, tool_name):
+    from agentteam.domain.agent import Agent
+    from agentteam.models.provider import ModelRef
+    team = Team(
+        name="t", description="", default_model=ModelRef("qwen", "qwen-max"),
+        root=Agent(name="leader", role="supervisor", system_prompt="s",
+                   children=[
+                       Agent(name="w1", role="worker", system_prompt="w",
+                             tools=["read_file"]),
+                   ]),
+        engine="opencode",
+    )
+    script = Script()
+    script.plan = {"steps": [{"worker": "w1", "instruction": "读文件"}],
+                   "execution_mode": "sequential"}
+    script.worker_steps["w1"] = [
+        {"type": "tool", "name": tool_name, "args": {"path": "a.txt"},
+         "result": "r", "settle": 0.05},
+        {"type": "final", "text": "完成"},
+    ]
+    return env_factory(script, team)
+
+
+def test_unwhitelisted_tool_parks(env_factory):
+    env = _whitelist_env(env_factory, "bash")
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ("parked",)
+    denied = [e for e in env.events() if e["event_type"] == "tool_denied"]
+    assert denied and "not_whitelisted" in denied[0]["payload"]
+    env.runner.invoke({"__resume__": {"approved": True}}, {})
+    assert env.runner.get_state({}).next == ()
+
+
+def test_whitelisted_tool_never_parks(env_factory):
+    env = _whitelist_env(env_factory, "read")  # read_file → read
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ()
+    assert "tool_denied" not in env.event_types()
+
+
+def test_unwhitelisted_tool_audit_mode_continues(env_factory, monkeypatch):
+    monkeypatch.setenv("AGENTTEAM_OC_TOOL_GUARD", "audit")
+    env = _whitelist_env(env_factory, "bash")
+    env.runner.invoke({}, {})
+    # audit 模式：只记事实不 park
+    assert env.runner.get_state({}).next == ()
+    assert "approval_requested" not in env.event_types()
+    denied = [e for e in env.events() if e["event_type"] == "tool_denied"]
+    assert denied and '"action": "continued"' in denied[0]["payload"]
+
+
+def test_tool_gate_timeout_auto_allows(env_factory):
+    # targets=None → 全部工具都要审批；timeout_seconds → 不等人，自动放行
+    env = _tool_gate_env(env_factory, None, timeout=5)
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ()
+    assert "approval_requested" not in env.event_types()
+    assert any(e["event_type"] == "approval_decided" and e["actor"] == "timeout"
+               for e in env.events())
 
 
 # ================= 取消 =================

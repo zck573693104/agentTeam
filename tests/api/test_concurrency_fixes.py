@@ -251,6 +251,7 @@ def test_library_register_concurrent_returns_400_not_500():
     n = 20
     barrier = threading.Barrier(n)
     statuses: list[int] = []
+    bodies: list[str] = []
     errors: list[BaseException] = []
     lock = threading.Lock()
 
@@ -264,6 +265,8 @@ def test_library_register_concurrent_returns_400_not_500():
             )
             with lock:
                 statuses.append(resp.status_code)
+                if resp.status_code not in (200, 400):
+                    bodies.append(resp.text[:500])
         except BaseException as e:  # noqa: BLE001
             with lock:
                 errors.append(e)
@@ -276,7 +279,7 @@ def test_library_register_concurrent_returns_400_not_500():
 
     assert errors == [], f"threads crashed: {errors}"
     assert statuses.count(200) == 1, f"expected exactly one 200, got {statuses}"
-    assert 500 not in statuses, f"race produced 500: {statuses}"
+    assert 500 not in statuses, f"race produced 500: {statuses} bodies: {bodies}"
     assert all(c in (200, 400) for c in statuses), f"unexpected status: {statuses}"
     assert statuses.count(400) == n - 1
 

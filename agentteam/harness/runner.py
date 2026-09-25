@@ -16,7 +16,11 @@ import threading
 from typing import Any
 
 from agentteam.harness.engine import HarnessRunner
-from agentteam.harness.opencode_client import OpenCodeClient, OpenCodeConfig
+from agentteam.harness.opencode_client import (
+    OpenCodeClient,
+    OpenCodeConfig,
+    OpenCodeError,
+)
 
 
 class HarnessStateStore:
@@ -135,6 +139,7 @@ class HarnessEngineFactory:
 def ensure_backend(client: OpenCodeClient, team, default_model: str) -> None:
     """opencode 引导：provider 配置补丁 + MCP 注册（幂等，容忍 server 缺失）。
 
+    这两项**只能走 v1 配置面**：v2 `/api/*` 没有 config/mcp 写入端点（实测）。
     失败不抛异常由调用方决定？——否：连接失败必须在 run 提交时暴露
     （fail-fast），这里只吞「provider 已存在 / MCP 重名」类幂等冲突。
     """
