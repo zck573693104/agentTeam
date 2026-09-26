@@ -932,7 +932,13 @@ class HarnessRunner:
             if self._rm is not None and self._rm.is_cancelled(self._run_id):
                 self._interrupt_quietly(session_id)
                 raise RunCancelledError()
-            err = self._mapper.session_error(session_id)
+            # 与 _wait_sessions 同款双路判定：SSE 的 session.error 之外，
+            # REST 兜底 assistant finish=="error"（限流回合形状，见
+            # opencode_client.turn_error docstring）。漏掉 REST 路径时，
+            # SSE 事件若在订阅建立前发射（剧本线程竞态）就会吊到超时，
+            # 且报错信息被替换成"timed out"而非真实 429 原因。
+            err = (self._mapper.session_error(session_id)
+                   or self._client.turn_error(session_id, turn_id))
             if err:
                 raise OpenCodeError(f"opencode prompt failed: {err}")
             if self._client.assistant_done(session_id, turn_id) is not None:
