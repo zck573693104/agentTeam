@@ -1,5 +1,5 @@
 """SP6-P1 Plan DAG 测试。"""
-from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
 
 
 def test_plan_step_new_fields_default_values():
@@ -288,11 +288,10 @@ def test_leader_plan_dag_mode_detects_cycle_raises(fake_llm):
 
 def test_leader_review_dag_mode_does_not_advance_current_step(fake_llm):
     """leader_review dag 模式:不推进 current_step(completed_steps 已由 worker 通过 reducer 更新)。"""
-    from langchain_core.messages import AIMessage
     from agentteam.domain.team import Leader
     from agentteam.runtime.nodes import make_leader_review_node
 
-    fake_llm.set_invoke_responses([AIMessage(content="A done")])
+    fake_llm.set_structured_responses([ReviewVerdict(passed=True, reason="A done")])
     leader = Leader(system_prompt="你是主管")
     node = make_leader_review_node(leader, fake_llm)
 
@@ -325,11 +324,10 @@ def test_leader_review_dag_mode_does_not_advance_current_step(fake_llm):
 
 def test_leader_review_sequential_mode_advances_current_step(fake_llm):
     """leader_review sequential 模式:沿用 current_step += 1。"""
-    from langchain_core.messages import AIMessage
     from agentteam.domain.team import Leader
     from agentteam.runtime.nodes import make_leader_review_node
 
-    fake_llm.set_invoke_responses([AIMessage(content="good")])
+    fake_llm.set_structured_responses([ReviewVerdict(passed=True, reason="good")])
     leader = Leader(system_prompt="你是主管")
     node = make_leader_review_node(leader, fake_llm)
 
@@ -422,7 +420,7 @@ def test_finalize_dag_mode_returns_completed_steps(fake_llm):
     # dag 模式回传 completed_steps(set,经 set_union reducer 合并到父图)
     assert result["completed_steps"] == {"step_a"}
     # 仍有 worker_outputs 与 messages
-    assert result["worker_outputs"] == {"a": "result A"}
+    assert result["worker_outputs"]["a"]["artifact"] == "result A"
     assert len(result["messages"]) == 1
 
 
@@ -442,7 +440,7 @@ def test_finalize_sequential_mode_no_completed_steps(fake_llm):
     result = node(state)
     # sequential 模式不回传 completed_steps
     assert "completed_steps" not in result
-    assert result["worker_outputs"] == {"w1": "done"}
+    assert result["worker_outputs"]["w1"]["artifact"] == "done"
 
 
 def test_init_worker_dag_mode_raises_when_no_ready_step(fake_llm):
@@ -499,17 +497,19 @@ def test_plan_dag_parallel_execution_e2e():
     from tests.conftest import FakeLLM, FakeModelProvider
 
     leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "leader-model"))
+    # 各 worker 使用独立 model(独立 FakeLLM),避免并行触发时共享同一响应队列
+    # 导致 FakeLLM.invoke() 按序消费与并行执行顺序不确定冲突(flaky)。
     worker_a = Worker(
         name="a", role="r", description="", system_prompt="A",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-a"),
     )
     worker_b = Worker(
         name="b", role="r", description="", system_prompt="B",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-b"),
     )
     worker_c = Worker(
         name="c", role="r", description="", system_prompt="C",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-c"),
     )
     team = Team(
         name="dag_team", description="dag test",
@@ -518,32 +518,36 @@ def test_plan_dag_parallel_execution_e2e():
     )
 
     leader_llm = FakeLLM()
-    leader_llm.set_structured_responses([Plan(
-        execution_mode="dag",
-        steps=[
-            PlanStep(worker="a", instruction="do A", id="step_a"),
-            PlanStep(worker="b", instruction="do B", id="step_b"),
-            PlanStep(worker="c", instruction="do C", id="step_c",
-                     depends_on=["step_a", "step_b"]),
-        ],
-    )])
-    # 2 次 review(A+B 完成后, C 完成后)
-    leader_llm.set_invoke_responses([
-        AIMessage(content="A/B done"),
-        AIMessage(content="C done, all complete"),
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 2 个 ReviewVerdict
+    # (A+B 完成后, C 完成后)
+    leader_llm.set_structured_responses([
+        Plan(
+            execution_mode="dag",
+            steps=[
+                PlanStep(worker="a", instruction="do A", id="step_a"),
+                PlanStep(worker="b", instruction="do B", id="step_b"),
+                PlanStep(worker="c", instruction="do C", id="step_c",
+                         depends_on=["step_a", "step_b"]),
+            ],
+        ),
+        ReviewVerdict(passed=True, reason="A/B done"),
+        ReviewVerdict(passed=True, reason="C done, all complete"),
     ])
 
-    # worker LLM: A/B/C 各 1 次直接答案
-    worker_llm = FakeLLM()
-    worker_llm.set_invoke_responses([
-        AIMessage(content="result A"),
-        AIMessage(content="result B"),
-        AIMessage(content="result C"),
-    ])
+    # 每个 worker 独立 LLM,各自 1 次直接答案,并行触发互不影响
+    worker_llm_a = FakeLLM()
+    worker_llm_a.set_invoke_responses([AIMessage(content="result A")])
+    worker_llm_b = FakeLLM()
+    worker_llm_b.set_invoke_responses([AIMessage(content="result B")])
+    worker_llm_c = FakeLLM()
+    worker_llm_c.set_invoke_responses([AIMessage(content="result C")])
 
     provider = FakeModelProvider({
         "leader-model": leader_llm,
-        "worker-model": worker_llm,
+        "worker-model-a": worker_llm_a,
+        "worker-model-b": worker_llm_b,
+        "worker-model-c": worker_llm_c,
     })
     compiler = TeamCompiler(provider, ToolRegistry())
     graph = compiler.compile(team, checkpointer=MemorySaver())
@@ -560,9 +564,9 @@ def test_plan_dag_parallel_execution_e2e():
     assert "step_b" in result["completed_steps"]
     assert "step_c" in result["completed_steps"]
     # 3 个 worker 都有产出
-    assert result["worker_outputs"]["a"] == "result A"
-    assert result["worker_outputs"]["b"] == "result B"
-    assert result["worker_outputs"]["c"] == "result C"
+    assert result["worker_outputs"]["a"]["artifact"] == "result A"
+    assert result["worker_outputs"]["b"]["artifact"] == "result B"
+    assert result["worker_outputs"]["c"]["artifact"] == "result C"
 
 
 def test_plan_dag_condition_skip_e2e():
@@ -577,17 +581,19 @@ def test_plan_dag_condition_skip_e2e():
     from tests.conftest import FakeLLM, FakeModelProvider
 
     leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "leader-model"))
+    # A/C 使用独立 model(独立 FakeLLM),避免并行触发时共享同一响应队列
+    # 导致 FakeLLM.invoke() 按序消费与并行执行顺序不确定冲突(flaky)。
     worker_a = Worker(
         name="a", role="r", description="", system_prompt="A",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-a"),
     )
     worker_b = Worker(
         name="b", role="r", description="", system_prompt="B",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-b"),
     )
     worker_c = Worker(
         name="c", role="r", description="", system_prompt="C",
-        model=ModelRef("qwen", "worker-model"),
+        model=ModelRef("qwen", "worker-model-c"),
     )
     team = Team(
         name="dag_cond_team", description="dag condition test",
@@ -596,32 +602,37 @@ def test_plan_dag_condition_skip_e2e():
     )
 
     leader_llm = FakeLLM()
-    # B 的 condition 永远 False
-    leader_llm.set_structured_responses([Plan(
-        execution_mode="dag",
-        steps=[
-            PlanStep(worker="a", instruction="do A", id="step_a"),
-            PlanStep(worker="b", instruction="do B", id="step_b",
-                     condition="False"),
-            PlanStep(worker="c", instruction="do C", id="step_c",
-                     depends_on=["step_b"]),
-        ],
-    )])
-    # 2 次 review(A 完成后, C 完成后)
-    leader_llm.set_invoke_responses([
-        AIMessage(content="A done"),
-        AIMessage(content="C done"),
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 2 个 ReviewVerdict
+    # (A 完成后, C 完成后)。B 的 condition 永远 False
+    leader_llm.set_structured_responses([
+        Plan(
+            execution_mode="dag",
+            steps=[
+                PlanStep(worker="a", instruction="do A", id="step_a"),
+                PlanStep(worker="b", instruction="do B", id="step_b",
+                         condition="False"),
+                PlanStep(worker="c", instruction="do C", id="step_c",
+                         depends_on=["step_b"]),
+            ],
+        ),
+        ReviewVerdict(passed=True, reason="A done"),
+        ReviewVerdict(passed=True, reason="C done"),
     ])
 
-    worker_llm = FakeLLM()
-    worker_llm.set_invoke_responses([
-        AIMessage(content="result A"),
-        AIMessage(content="result C"),
-    ])
+    # A/C 各自独立 LLM,并行触发互不影响(B 被 skip 不执行,但仍需提供 LLM
+    # 供编译期解析 model)
+    worker_llm_a = FakeLLM()
+    worker_llm_a.set_invoke_responses([AIMessage(content="result A")])
+    worker_llm_b = FakeLLM()
+    worker_llm_c = FakeLLM()
+    worker_llm_c.set_invoke_responses([AIMessage(content="result C")])
 
     provider = FakeModelProvider({
         "leader-model": leader_llm,
-        "worker-model": worker_llm,
+        "worker-model-a": worker_llm_a,
+        "worker-model-b": worker_llm_b,
+        "worker-model-c": worker_llm_c,
     })
     compiler = TeamCompiler(provider, ToolRegistry())
     graph = compiler.compile(team, checkpointer=MemorySaver())
@@ -640,8 +651,8 @@ def test_plan_dag_condition_skip_e2e():
     # B 未执行(worker_outputs 无 b)
     assert "b" not in result.get("worker_outputs", {})
     # A 和 C 有产出
-    assert result["worker_outputs"]["a"] == "result A"
-    assert result["worker_outputs"]["c"] == "result C"
+    assert result["worker_outputs"]["a"]["artifact"] == "result A"
+    assert result["worker_outputs"]["c"]["artifact"] == "result C"
 
 
 def test_plan_sequential_backward_compat_e2e():
@@ -671,14 +682,16 @@ def test_plan_sequential_backward_compat_e2e():
     )
 
     leader_llm = FakeLLM()
-    # 默认 execution_mode="sequential"(不显式设置)
-    leader_llm.set_structured_responses([Plan(steps=[
-        PlanStep(worker="coder", instruction="写 hello world"),
-        PlanStep(worker="tester", instruction="写测试"),
-    ])])
-    leader_llm.set_invoke_responses([
-        AIMessage(content="coder 干得不错"),
-        AIMessage(content="tester 测试到位,全部完成"),
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 2 个 ReviewVerdict
+    # (coder / tester 完成后)。默认 execution_mode="sequential"(不显式设置)
+    leader_llm.set_structured_responses([
+        Plan(steps=[
+            PlanStep(worker="coder", instruction="写 hello world"),
+            PlanStep(worker="tester", instruction="写测试"),
+        ]),
+        ReviewVerdict(passed=True, reason="coder 干得不错"),
+        ReviewVerdict(passed=True, reason="tester 测试到位,全部完成"),
     ])
 
     worker_llm = FakeLLM()
@@ -707,7 +720,7 @@ def test_plan_sequential_backward_compat_e2e():
     assert result["plan"][0]["status"] == "done"
     assert result["plan"][1]["status"] == "done"
     # 两个 worker 都有产出
-    assert result["worker_outputs"]["coder"] == "print('hello world')"
-    assert result["worker_outputs"]["tester"] == "assert True"
+    assert result["worker_outputs"]["coder"]["artifact"] == "print('hello world')"
+    assert result["worker_outputs"]["tester"]["artifact"] == "assert True"
     # completed_steps 在 sequential 模式下不被写入(或为空)
     assert not result.get("completed_steps", set())

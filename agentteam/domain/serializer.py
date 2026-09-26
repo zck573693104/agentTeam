@@ -71,6 +71,11 @@ def _mcp_server_from_dict(d: dict) -> MCPServer:
         env=d.get("env", {}),
         transport=d.get("transport", "stdio"),
         url=d.get("url"),
+        namespace=d.get("namespace"),
+        # P-B6: MCP 鉴权字段(向后兼容:旧 schema 无这些字段时取默认值)
+        auth_type=d.get("auth_type", "none"),
+        auth_credential=d.get("auth_credential"),
+        auth_header_name=d.get("auth_header_name", "Authorization"),
     )
 
 
@@ -96,8 +101,11 @@ def _agent_from_dict(d: dict) -> Agent:
         max_iterations=d.get("max_iterations", 10),
         ref=d.get("ref"),
         mcp_servers=[_mcp_server_from_dict(s) for s in d.get("mcp_servers", [])],
-        version=d.get("version", 1),
         skills=d.get("skills", []),
+        version=d.get("version", 1),
+        # Graph Engineering P3: Maker/Checker 独立模型/工具(向后兼容:旧 schema 无此字段时取默认值)
+        review_model=_model_ref_from_dict(d.get("review_model")),
+        review_tools=d.get("review_tools", []),
     )
 
 
@@ -124,8 +132,11 @@ def _agent_to_dict(agent: Agent) -> dict:
         "max_iterations": agent.max_iterations,
         "ref": agent.ref,
         "mcp_servers": [asdict(s) for s in agent.mcp_servers],
-        "version": agent.version,
         "skills": list(agent.skills),
+        "version": agent.version,
+        # Graph Engineering P3: Maker/Checker 独立模型/工具
+        "review_model": asdict(agent.review_model) if agent.review_model else None,
+        "review_tools": list(agent.review_tools),
     }
 
 
@@ -138,6 +149,7 @@ def team_to_dict(team: Team) -> dict[str, Any]:
         "default_model": asdict(team.default_model),
         "skills": list(team.skills),
         "mcp_servers": [asdict(s) for s in team.mcp_servers],
+        "webhook_url": team.webhook_url,
     }
     # SP8: engine 字段仅在显式声明时输出（保持旧客户端兼容）
     if getattr(team, "engine", None):
@@ -161,6 +173,7 @@ def team_from_dict(data: dict[str, Any]) -> Team:
             skills=data.get("skills", []),
             mcp_servers=[_mcp_server_from_dict(s) for s in data.get("mcp_servers", [])],
             engine=engine,
+            webhook_url=data.get("webhook_url"),
         )
     # 旧 schema
     leader = _leader_from_dict(data["leader"])
@@ -174,4 +187,5 @@ def team_from_dict(data: dict[str, Any]) -> Team:
         skills=data.get("skills", []),
         mcp_servers=[_mcp_server_from_dict(s) for s in data.get("mcp_servers", [])],
         engine=engine,
+        webhook_url=data.get("webhook_url"),
     )

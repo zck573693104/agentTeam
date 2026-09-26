@@ -36,11 +36,14 @@ def oc_api(tmp_path, monkeypatch):
         # langgraph 路径的假 LLM（对照测试用；opencode 路径不经过它）
         llm = FakeLLM()
         from langchain_core.messages import AIMessage
-        llm.set_invoke_responses([AIMessage(content="done"), AIMessage(content="ok")])
-        from agentteam.runtime.nodes import Plan, PlanStep
-        llm.set_structured_responses([
-            Plan(steps=[PlanStep(worker="w1", instruction="do x")])
-        ])
+        # P0 后 leader_review 也走结构化输出（ReviewVerdict）：一个 run 会依次
+        # 消费 1 个 Plan + N 个 ReviewVerdict，按调用顺序备足
+        llm.set_invoke_responses([AIMessage(content="done"), AIMessage(content="ok")] * 8)
+        from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
+        llm.set_structured_responses(
+            [Plan(steps=[PlanStep(worker="w1", instruction="do x")])]
+            + [ReviewVerdict(passed=True, reason="ok")] * 8
+        )
         provider = FakeModelProvider({"qwen-max": llm})
         app = create_app(
             db_path=str(tmp_path / "h.db"),

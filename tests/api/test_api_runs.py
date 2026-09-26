@@ -117,28 +117,6 @@ def test_sse_replay_after_run_completes(make_client):
     assert "run_end" in text
 
 
-def test_sse_for_interrupted_run(make_client):
-    """有 step 审批的 run 中断后连 SSE，应收到 run_interrupted 事件。"""
-    from agentteam.runtime.nodes import Plan, PlanStep
-
-    llm = FakeLLM()
-    llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    provider = FakeModelProvider({"qwen-max": llm})
-
-    client = make_client(provider)
-    client.post("/api/teams", json=make_team_json(with_approval=True))
-
-    resp = client.post("/api/runs", json={"team_name": "dev", "task": "approval test"})
-    run_id = resp.json()["run_id"]
-    _wait_for_run(client, run_id)
-
-    # 连 SSE
-    resp = client.get(f"/api/runs/{run_id}/stream")
-    assert resp.status_code == 200
-    text = resp.text
-    assert "run_interrupted" in text
-
-
 def test_sse_connects_while_run_is_running(make_client):
     """客户端在 run 执行中连 SSE，应通过直播模式收到事件并在 run_end 后关闭。
 
@@ -164,20 +142,22 @@ def test_token_tracking_accumulates_usage_metadata(make_client):
     """LLM 响应带 usage_metadata 时，run 完成后 total_tokens 应累积写入 DB。"""
     from langchain_core.messages import AIMessage
 
-    from agentteam.runtime.nodes import Plan, PlanStep
+    from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
     from tests.conftest import FakeLLM, FakeModelProvider
 
     llm = FakeLLM()
-    llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    # agent_step 返回 30 tokens, leader_review 返回 50 tokens → 总计 80
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列。leader_review 改用结构化输出后不再携带
+    # usage_metadata,故 total_tokens 仅来自 worker 的 agent_step。
+    llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="w1", instruction="do x")]),
+        ReviewVerdict(passed=True, reason="ok"),
+    ])
+    # agent_step 返回 30 tokens → 累积写入 DB
     llm.set_invoke_responses([
         AIMessage(
             content="done",
             usage_metadata={"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
-        ),
-        AIMessage(
-            content="ok",
-            usage_metadata={"input_tokens": 20, "output_tokens": 30, "total_tokens": 50},
         ),
     ])
     provider = FakeModelProvider({"qwen-max": llm})
@@ -191,4 +171,4 @@ def test_token_tracking_accumulates_usage_metadata(make_client):
     assert status == "completed"
 
     run = client.get(f"/api/runs/{run_id}").json()
-    assert run["total_tokens"] == 80
+    assert run["total_tokens"] == 30

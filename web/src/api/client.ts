@@ -25,7 +25,14 @@ export interface Run {
   run_id: string;
   team_name: string;
   task: string;
-  status: "pending" | "running" | "completed" | "failed" | "interrupted";
+  status:
+    | "pending"
+    | "running"
+    | "completed"
+    | "failed"
+    | "interrupted"
+    | "cancelling"
+    | "cancelled";
   created_at: string;
   updated_at: string;
   ended_at: string | null;

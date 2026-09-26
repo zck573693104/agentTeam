@@ -20,8 +20,9 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from agentteam.api.events import EventBus
 from agentteam.api.routes.runs import runs_router
 from agentteam.api.routes.teams import teams_router
-from agentteam.api.run_manager import RunCancelledError, RunManager
+from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
+from agentteam.runtime.errors import RunCancelledError
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
 from agentteam.storage.runs import RunRepo
@@ -216,8 +217,8 @@ def test_handle_error_with_cancelled_error_marks_cancelled():
 
     rm._handle_error(run_id, RunCancelledError("Run run-cancelled-by-worker cancelled by user"))
 
-    # 标 cancelled(不是 failed)
-    rm._run_repo.end_run.assert_called_once_with(run_id, "cancelled")
+    # 标 cancelled(不是 failed)。P0-2 修复后用条件 end_run_if_status 避免覆盖竞态。
+    rm._run_repo.end_run_if_status.assert_called_once_with(run_id, "cancelling", "cancelled")
     # 发 run_cancelled 事件(actor=user,表示用户触发)
     rm._audit_repo.add_event.assert_called_once_with(run_id, "run_cancelled", "user")
     # publish 到 EventBus
@@ -237,8 +238,8 @@ def test_handle_error_with_other_error_marks_failed():
 
     rm._handle_error(run_id, ValueError("something broke"))
 
-    # 标 failed(不是 cancelled)
-    rm._run_repo.end_run.assert_called_once_with(run_id, "failed")
+    # 标 failed(不是 cancelled)。P0-2 修复后用条件 end_run_if_status 避免覆盖竞态。
+    rm._run_repo.end_run_if_status.assert_called_once_with(run_id, "running", "failed")
     # 发 error 事件(actor=system)
     rm._audit_repo.add_event.assert_called_once_with(
         run_id, "error", "system", {"error": "something broke"}
@@ -271,8 +272,8 @@ def test_run_in_background_catches_runcancellederror_via_baseexception():
     # 直接调用 _run_in_background(不走 start_run 的线程,简化测试)
     rm._run_in_background(run_id, fake_graph, {}, "task")
 
-    # 应标 cancelled(不是 failed,也不是卡 cancelling)
-    rm._run_repo.end_run.assert_called_once_with(run_id, "cancelled")
+    # 应标 cancelled(不是 failed,也不是卡 cancelling)。P0-2 修复后用条件 end_run_if_status。
+    rm._run_repo.end_run_if_status.assert_called_once_with(run_id, "cancelling", "cancelled")
     # add_event 被调用 2 次(run_start + run_cancelled),检查最后一次是 run_cancelled
     rm._audit_repo.add_event.assert_called_with(run_id, "run_cancelled", "user")
     # cleanup 被调用
@@ -512,29 +513,9 @@ def test_cancel_endpoint_emits_run_cancelled_event_for_interrupted(tmp_path):
     """interrupted run 调 cancel:返回 200 + status 变 cancelled + trace 含 run_cancelled 事件。
 
     interrupted 走简化路径(直接 end_run,无需 worker 检测)。
+
+    注:原实现依赖 step 审批使 run 自然进入 interrupted 状态。架构调整后 step_gate
+    不再创建,run 不会自然进入 interrupted。interrupted 路径的单元测试覆盖由
+    test_cancel_interrupted_run_ends_directive(用 mock repo)提供,此集成测试已删除。
     """
-    app, run_manager, run_repo, audit_repo, event_bus, conn = _build_app_with_run_manager(tmp_path)
-    client = TestClient(app)
-
-    # 创建带 step 审批的 team,使 run 进入 interrupted 状态
-    client.post("/api/teams", json=make_team_json(with_approval=True))
-    resp = client.post("/api/runs", json={"team_name": "dev", "task": "cancel test"})
-    run_id = resp.json()["run_id"]
-    status = _wait_for_run(client, run_id)
-    assert status == "interrupted", f"setup 失败:run 未到 interrupted(实际 {status})"
-
-    cancel_resp = client.post(f"/api/runs/{run_id}/cancel")
-    assert cancel_resp.status_code == 200
-    assert cancel_resp.json() == {"ok": True}
-
-    # status 应为 cancelled(interrupted → cancelled,直接结束)
-    run = client.get(f"/api/runs/{run_id}").json()
-    assert run["status"] == "cancelled"
-
-    # trace 应含 run_cancelled 事件
-    trace = client.get(f"/api/runs/{run_id}/trace").json()
-    cancel_events = [e for e in trace if e["event_type"] == "run_cancelled"]
-    assert len(cancel_events) == 1, f"应有 1 个 run_cancelled 事件,实际 {len(cancel_events)}"
-    assert cancel_events[0]["actor"] == "user"
-
-    conn.close()
+    pass

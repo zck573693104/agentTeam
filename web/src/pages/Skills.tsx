@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Card, Table, Tag } from "antd";
 import { useFetch } from "../hooks/useFetch";
 import { api, type SkillItem, type SkillDetail } from "../api/client";
+import { PageHeader } from "./Runs";
 
 export default function Skills() {
   const { data, loading, error, refetch } = useFetch<{ skills: SkillItem[] }>(
@@ -29,68 +29,163 @@ export default function Skills() {
     }
   };
 
-  if (error && !data) return <div>错误: {error}</div>;
-
   const skills = data?.skills || [];
 
   return (
     <div>
-      <Card title="Skills" extra={<a onClick={() => refetch()}>刷新</a>}>
-        <Table
-          dataSource={skills}
-          columns={[
-            {
-              title: "名称",
-              dataIndex: "name",
-              render: (name: string) => (
-                <a onClick={() => handleExpand(name)}>{name}</a>
-              ),
-            },
-            {
-              title: "类型",
-              key: "type",
-              render: (_: unknown, r: SkillItem) =>
-                r.name.startsWith("auto_") ? (
-                  <Tag color="orange">自动生成</Tag>
-                ) : (
-                  <Tag color="blue">预置</Tag>
-                ),
-            },
-          ]}
-          rowKey="name"
-          loading={loading}
-          pagination={false}
-          expandable={{
-            expandedRowKeys: expandedName ? [expandedName] : [],
-            onExpandedRowsChange: (keys) => {
-              if (keys.length === 0) {
-                setExpandedName(null);
-                setSkillContent(null);
-              }
-            },
-            expandedRowRender: () =>
-              contentLoading ? (
-                <div>加载中...</div>
-              ) : skillContent ? (
-                <pre
+      <PageHeader
+        index="03 · SKILLS"
+        title="技能库"
+        subtitle="Capability Library"
+        action={<button className="at-btn-amber" onClick={() => refetch()}>↻ Refresh</button>}
+      />
+
+      {error && !data && (
+        <div style={{ padding: 40, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+          ✕ SIGNAL ERROR: {error}
+        </div>
+      )}
+
+      {loading && !data && (
+        <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 12, textAlign: "center" }}>
+          <span style={{ color: "var(--at-amber)" }}>●</span> LOADING SKILLS...
+        </div>
+      )}
+
+      {data && skills.length === 0 && (
+        <div className="at-panel at-fade-in" style={{
+          padding: 56,
+          textAlign: "center",
+          color: "var(--at-text-faint)",
+          fontFamily: "var(--at-font-mono)",
+          fontSize: 12,
+        }}>
+          ◌ NO SKILLS · 暂无技能
+        </div>
+      )}
+
+      {skills.length > 0 && (
+        <div className="at-panel at-fade-in" style={{ padding: 0 }}>
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "60px 1fr 100px 80px",
+            gap: 16,
+            padding: "10px 20px",
+            background: "var(--at-bg-elev)",
+            fontFamily: "var(--at-font-mono)",
+            fontSize: 10,
+            color: "var(--at-text-faint)",
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+            borderBottom: "1px solid var(--at-border)",
+          }}>
+            <span>#</span>
+            <span>Name</span>
+            <span>Type</span>
+            <span style={{ textAlign: "right" }}>Action</span>
+          </div>
+          {skills.map((s, idx) => {
+            const isAuto = s.name.startsWith("auto_");
+            const expanded = expandedName === s.name;
+            return (
+              <div key={s.name}>
+                <div
+                  onClick={() => handleExpand(s.name)}
                   style={{
-                    background: "#f5f5f5",
-                    padding: 16,
-                    borderRadius: 8,
-                    fontSize: 13,
-                    maxHeight: 480,
-                    overflow: "auto",
-                    whiteSpace: "pre-wrap",
+                    display: "grid",
+                    gridTemplateColumns: "60px 1fr 100px 80px",
+                    gap: 16,
+                    padding: "12px 20px",
+                    borderBottom: expanded ? "none" : "1px solid var(--at-border-soft)",
+                    cursor: "pointer",
+                    transition: "background 0.12s ease, box-shadow 0.12s ease",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "var(--at-bg-hover)";
+                    e.currentTarget.style.boxShadow = "inset 2px 0 0 var(--at-amber)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = "transparent";
+                    e.currentTarget.style.boxShadow = "none";
                   }}
                 >
-                  {skillContent.content}
-                </pre>
-              ) : (
-                <div>无法加载内容</div>
-              ),
-          }}
-        />
-      </Card>
+                  <span style={{ fontFamily: "var(--at-font-mono)", fontSize: 11, color: "var(--at-text-faint)" }}>
+                    {String(idx + 1).padStart(2, "0")}
+                  </span>
+                  <span style={{
+                    fontFamily: "var(--at-font-mono)",
+                    fontSize: 13,
+                    color: expanded ? "var(--at-amber)" : "var(--at-text)",
+                    fontWeight: 500,
+                  }}>
+                    {s.name}
+                  </span>
+                  <span>
+                    <span
+                      className="at-tag"
+                      style={{
+                        color: isAuto ? "var(--at-amber)" : "var(--at-blue)",
+                      }}
+                    >
+                      {isAuto ? "AUTO" : "PRESET"}
+                    </span>
+                  </span>
+                  <span style={{
+                    fontFamily: "var(--at-font-mono)",
+                    fontSize: 10,
+                    color: expanded ? "var(--at-amber)" : "var(--at-text-faint)",
+                    textAlign: "right",
+                    letterSpacing: "0.1em",
+                  }}>
+                    {expanded ? "− HIDE" : "+ VIEW"}
+                  </span>
+                </div>
+                {expanded && (
+                  <div style={{
+                    padding: "0 20px 20px",
+                    background: "var(--at-bg-deep)",
+                    borderBottom: "1px solid var(--at-border-soft)",
+                  }}>
+                    <div style={{
+                      fontFamily: "var(--at-font-mono)",
+                      fontSize: 9,
+                      color: "var(--at-amber)",
+                      letterSpacing: "0.18em",
+                      textTransform: "uppercase",
+                      padding: "10px 0",
+                      borderBottom: "1px solid var(--at-border-soft)",
+                      marginBottom: 10,
+                    }}>
+                      ▸ SKILL CONTENT
+                    </div>
+                    {contentLoading ? (
+                      <div style={{ padding: 24, textAlign: "center", color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 11 }}>
+                        <span style={{ color: "var(--at-amber)" }}>●</span> LOADING...
+                      </div>
+                    ) : skillContent ? (
+                      <pre style={{
+                        margin: 0,
+                        fontSize: 12,
+                        lineHeight: 1.6,
+                        maxHeight: 480,
+                        overflow: "auto",
+                        whiteSpace: "pre-wrap",
+                        color: "var(--at-text-mono)",
+                      }}>
+                        {skillContent.content}
+                      </pre>
+                    ) : (
+                      <div style={{ color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 11 }}>
+                        ✕ FAILED TO LOAD
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

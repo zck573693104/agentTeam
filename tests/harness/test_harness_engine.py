@@ -55,12 +55,19 @@ class HarnessEnv:
         self.client = OpenCodeClient(
             OpenCodeConfig(base_url=self.base_url, timeout=10)
         )
-        import sqlite3
-        self.conn = sqlite3.connect(":memory:", check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
         from agentteam.storage.db import init_db
-        # 用 init_db 建 schema（内存库重新跑一遍脚本最简单）
-        self.conn.executescript(_SCHEMA_SQL)
+        # 直接用生产 init_db（含全部 migration），保证 schema 与线上永远一致
+        self.conn = init_db(":memory:")
+        # 新 schema 开启外键（run_events.run_id → runs.id）：引擎级测试
+        # 绕过 create_run，需先补 runs 行（与生产 create_run 的落库顺序一致）
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "INSERT INTO runs (id, team_name, task, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'pending', ?, ?)",
+            ("run_test", team.name, task, now, now),
+        )
+        self.conn.commit()
         self.audit = AuditRepo(self.conn)
         self.bus = EventBus()
         from agentteam.api.events import BroadcastTraceWriter

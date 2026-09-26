@@ -64,6 +64,9 @@ def test_handle_invoke_result_get_state_failure_doesnt_mark_failed(tmp_path):
     conn, run_repo, audit_repo, bus, rm = _setup(tmp_path)
 
     run_id = run_repo.create_run("t", "task")
+    # 模拟 start_run 已将 status 置为 running(生产路径:_handle_invoke_result
+    # 仅在 start_run/resume_run 后被调用,status 必为 running 或 cancelling)
+    run_repo.update_status(run_id, "running")
     config = {"configurable": {"thread_id": run_id}}
     # 订阅 EventBus 以捕获 run_interrupted 事件
     q = bus.subscribe(run_id)
@@ -92,6 +95,7 @@ def test_handle_invoke_result_state_next_marks_interrupted(tmp_path):
     conn, run_repo, audit_repo, bus, rm = _setup(tmp_path)
 
     run_id = run_repo.create_run("t", "task")
+    run_repo.update_status(run_id, "running")
     config = {"configurable": {"thread_id": run_id}}
 
     fake_graph = _FakeGraph(state_next=["step_gate"])
@@ -108,6 +112,7 @@ def test_handle_invoke_result_state_empty_marks_completed(tmp_path):
     conn, run_repo, audit_repo, bus, rm = _setup(tmp_path)
 
     run_id = run_repo.create_run("t", "task")
+    run_repo.update_status(run_id, "running")
     config = {"configurable": {"thread_id": run_id}}
 
     fake_graph = _FakeGraph(state_next=[], state_values={"total_tokens": 42})

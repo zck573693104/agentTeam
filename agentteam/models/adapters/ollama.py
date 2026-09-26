@@ -1,38 +1,24 @@
+"""Ollama 本地模型适配器(用 base_url,不需 api_key)。"""
 from __future__ import annotations
 
 import os
-from typing import Callable
 
-from langchain_core.language_models import BaseChatModel
-
-from .base import BaseAdapter
-from ..provider import ModelRef
-
-
-def _load_chat_class() -> Callable:
-    """懒加载 ChatOllama，缺失依赖时给清晰错误。"""
-    try:
-        from langchain_ollama import ChatOllama
-    except ImportError as e:  # pragma: no cover
-        raise ImportError(
-            "Ollama 适配器需要安装 langchain-ollama：pip install 'agentteam[ollama]'"
-        ) from e
-    return ChatOllama
+from agentteam.models.adapters.base import BaseAdapter
 
 
 class OllamaAdapter(BaseAdapter):
-    def __init__(self, api_keys: dict[str, str]) -> None:
-        # 复用 api_keys dict 承载 ollama_base_url 等本地配置
-        self._config = api_keys
+    provider_name = "ollama"
+    env_var = "OLLAMA_BASE_URL"  # 借用 env_var 字段表示配置环境变量
+    chat_class_path = "langchain_ollama.ChatOllama"
 
-    def build(self, ref: ModelRef) -> BaseChatModel:
-        ChatOllama = _load_chat_class()
-        base_url = self._config.get("ollama_base_url") or os.environ.get("OLLAMA_BASE_URL")
-        kwargs: dict[str, object] = {
+    def build(self, ref):
+        """Ollama 用 base_url,无 api_key 校验。"""
+        ChatClass = self._load_chat_class()
+        base_url = self._api_keys.get("ollama_base_url") or os.environ.get("OLLAMA_BASE_URL")
+        kwargs = {
             "model": ref.name,
             "temperature": ref.temperature,
             "streaming": ref.streaming,
+            "base_url": base_url,
         }
-        if base_url:
-            kwargs["base_url"] = base_url
-        return ChatOllama(**kwargs)
+        return ChatClass(**kwargs)

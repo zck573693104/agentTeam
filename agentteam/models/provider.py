@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Literal
 
@@ -23,6 +24,10 @@ class ModelProvider:
 
     适配器按需懒加载，缺失依赖时由适配器抛出清晰错误。
     Provider 通过 class-level _registry 注册，新增 provider 无需修改本类源码（开闭原则）。
+
+    LLM 客户端缓存:同一 ModelRef 多次 get_llm 调用返回同一实例,
+    避免每次 compile 都重建底层 HTTP 连接池 / 重新初始化 client。
+    ModelRef 是 frozen dataclass,可直接作 dict key。
     """
 
     _registry: dict[str, type] = {}
@@ -38,12 +43,23 @@ class ModelProvider:
         cls._registry[name] = adapter_cls
 
     @classmethod
+    def unregister(cls, name: str) -> None:
+        """反注册 adapter(用于热重载场景)。"""
+        cls._registry.pop(name, None)
+
+    @classmethod
     def list_providers(cls) -> list[str]:
         """返回所有已注册 provider name。"""
         return list(cls._registry.keys())
 
     def __init__(self, api_keys: dict[str, str] | None = None) -> None:
         self._api_keys = api_keys or {}
+        # LLM 客户端缓存:ModelRef → BaseChatModel 实例。
+        # 编译期 _compile_supervisor/_compile_worker 会为每个 agent 调用 get_llm,
+        # 同一团队多次跑 run 会重复构造 client(网络/内存开销)。
+        # 加缓存后只首次构造,后续命中缓存。
+        self._llm_cache: dict[ModelRef, BaseChatModel] = {}
+        self._cache_lock = threading.Lock()
         # 延迟 import adapters 包并显式注册内置 adapter。
         # 放在此处而非模块顶层，避免循环依赖（adapters/__init__.py 反向 import ModelProvider）。
         # register_builtins() 是幂等的：clean_registry fixture 清空 _registry 后，
@@ -52,10 +68,25 @@ class ModelProvider:
         adapters.register_builtins()
 
     def get_llm(self, ref: ModelRef) -> BaseChatModel:
+        # 命中缓存直接返回(无锁读:dict 读在 CPython GIL 下安全,
+        # 极小概率在首次写时与读竞争 → 仅触发一次重复构造,功能正确)
+        cached = self._llm_cache.get(ref)
+        if cached is not None:
+            return cached
         adapter_cls = self._registry.get(ref.provider)
         if adapter_cls is None:
             raise ValueError(
                 f"Unknown provider: {ref.provider}. "
                 f"Registered: {self.list_providers()}"
             )
-        return adapter_cls(self._api_keys).build(ref)
+        llm = adapter_cls(self._api_keys).build(ref)
+        with self._cache_lock:
+            # 双检锁:避免多个线程同时 miss 时重复构造
+            if ref not in self._llm_cache:
+                self._llm_cache[ref] = llm
+            return self._llm_cache[ref]
+
+    def clear_cache(self) -> None:
+        """清空 LLM 客户端缓存(配置/api_keys 变更后调用)。"""
+        with self._cache_lock:
+            self._llm_cache.clear()

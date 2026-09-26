@@ -69,3 +69,69 @@ def test_read_file_allows_subdirectory(tmp_path, monkeypatch):
 
     result = read_file.invoke({"path": "sub/test.txt"})
     assert "nested" in result
+
+
+def test_read_file_rejects_oversized_file(tmp_path, monkeypatch):
+    """read_file 拒绝超过 MAX_READ_SIZE 的文件。"""
+    import pytest
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    from agentteam.tools.skills import file_ops
+    from agentteam.tools.skills.file_ops import read_file
+
+    # 临时把阈值调小,避免真实写入 11MB 文件
+    monkeypatch.setattr(file_ops, "MAX_READ_SIZE", 100)
+    f = tmp_path / "big.txt"
+    f.write_text("a" * 200, encoding="utf-8")
+    result = read_file.invoke({"path": str(f)})
+    assert "文件过大" in result
+
+
+def test_read_file_rejects_binary_file(tmp_path, monkeypatch):
+    """read_file 拒绝包含 null 字节的二进制文件。"""
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    from agentteam.tools.skills.file_ops import read_file
+
+    f = tmp_path / "bin.dat"
+    with open(f, "wb") as fh:
+        fh.write(b"\x00\x01\x02")
+    result = read_file.invoke({"path": str(f)})
+    assert "二进制" in result
+
+
+def test_read_file_rejects_symlink(tmp_path, monkeypatch):
+    """read_file 拒绝指向 workspace 外的符号链接。"""
+    import os
+    import pytest
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    from agentteam.tools.skills.file_ops import read_file
+
+    # 在 workspace 外创建目标文件(用 tmp_path.name 保证唯一,避免并发污染)
+    outside = tmp_path.parent / f"{tmp_path.name}_outside_secret.txt"
+    try:
+        outside.write_text("secret", encoding="utf-8")
+    except OSError:
+        pytest.skip("无法在 workspace 外创建目标文件")
+
+    link_path = tmp_path / "link.txt"
+    try:
+        os.symlink(outside, link_path)
+    except OSError:
+        outside.unlink(missing_ok=True)
+        pytest.skip("当前环境不支持创建符号链接")
+
+    try:
+        try:
+            result = read_file.invoke({"path": str(link_path)})
+        except ValueError:
+            # 抛 ValueError 也符合预期(与 .. 穿越一致的错误模式)
+            return
+        # 若返回字符串而非抛异常,则必须是错误字符串
+        assert (
+            "symlink" in result.lower()
+            or "workspace" in result.lower()
+            or "错误" in result
+        ), f"应拒绝符号链接,实际返回: {result!r}"
+    finally:
+        outside.unlink(missing_ok=True)

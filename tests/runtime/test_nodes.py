@@ -6,6 +6,7 @@ from agentteam.models.provider import ModelRef
 from agentteam.runtime.nodes import (
     Plan,
     PlanStep,
+    ReviewVerdict,
     make_agent_step,
     make_finalize,
     make_init_worker,
@@ -67,7 +68,7 @@ def test_worker_node_direct_answer(fake_llm):
     }
     result = node(state)
 
-    assert result["worker_outputs"] == {"coder": "hello world"}
+    assert result["worker_outputs"]["coder"]["artifact"] == "hello world"
     assert len(result["messages"]) == 1
     assert "coder" in result["messages"][0].content
 
@@ -105,7 +106,7 @@ def test_worker_node_react_with_tool(fake_llm, tmp_path, monkeypatch):
     result = node(state)
 
     assert target.read_text(encoding="utf-8") == "hi"
-    assert result["worker_outputs"] == {"coder": "已写入文件"}
+    assert result["worker_outputs"]["coder"]["artifact"] == "已写入文件"
 
 
 def test_worker_node_respects_max_iterations(fake_llm):
@@ -133,7 +134,8 @@ def test_worker_node_respects_max_iterations(fake_llm):
 
 
 def test_leader_review_marks_step_done_and_advances(fake_llm):
-    fake_llm.set_invoke_responses([AIMessage(content="做得好")])
+    # P0: review 现在用 with_structured_output(ReviewVerdict),不再是 invoke
+    fake_llm.set_structured_responses([ReviewVerdict(passed=True, reason="合格")])
 
     leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
     node = make_leader_review_node(leader, fake_llm)
@@ -156,6 +158,183 @@ def test_leader_review_marks_step_done_and_advances(fake_llm):
     assert result["current_step"] == 1
     assert len(result["messages"]) == 1
     assert len(result["audit_events"]) == 1
+    # P0: 通过时不写 rejected
+    assert "rejected" not in result
+
+
+def test_leader_review_reject_writes_rejected_signal(fake_llm):
+    """P0: LLM verdict.passed=False 时,写 rejected=True,不推进 current_step。"""
+    fake_llm.set_structured_responses([
+        ReviewVerdict(passed=False, reason="代码没通过测试")
+    ])
+
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [
+            {"worker": "coder", "instruction": "写代码", "status": "running"},
+        ],
+        "current_step": 0,
+        "worker_outputs": {"coder": "broken code"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    # P0: reject 信号
+    assert result["rejected"] is True
+    assert result["rejection_reason"] == "代码没通过测试"
+    # P0: 不推进 current_step
+    assert "current_step" not in result
+
+
+def test_leader_review_worker_failure_auto_reject(fake_llm):
+    """P0: worker_output.failure 非空时,跳过 LLM 直接 reject。"""
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [{"worker": "coder", "instruction": "写代码", "status": "running"}],
+        "current_step": 0,
+        "worker_outputs": {
+            "coder": {"artifact": "", "failure": "工具调用异常: timeout"}
+        },
+        "audit_events": [],
+    }
+    result = node(state)
+
+    assert result["rejected"] is True
+    assert "timeout" in result["rejection_reason"]
+    # 不应调用 LLM(failure 短路)
+    assert "current_step" not in result
+
+
+def test_leader_review_machine_criteria_contains_pass(fake_llm):
+    """P1: contains 类型机器验证通过,跳过 LLM,推进 current_step。"""
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [{
+            "worker": "coder", "instruction": "写代码", "status": "running",
+            "acceptance_criteria": {
+                "type": "contains", "field": "artifact", "pattern": "def hello"
+            }
+        }],
+        "current_step": 0,
+        "worker_outputs": {"coder": "def hello(): pass"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    # 机器验证通过,推进 current_step,不调用 LLM
+    assert result["current_step"] == 1
+    assert "rejected" not in result
+
+
+def test_leader_review_machine_criteria_contains_fail(fake_llm):
+    """P1: contains 类型机器验证失败,直接 reject,不调用 LLM。"""
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [{
+            "worker": "coder", "instruction": "写代码", "status": "running",
+            "acceptance_criteria": {
+                "type": "contains", "field": "artifact", "pattern": "def hello"
+            }
+        }],
+        "current_step": 0,
+        "worker_outputs": {"coder": "print('no function')"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    assert result["rejected"] is True
+    assert "不包含" in result["rejection_reason"]
+
+
+def test_leader_review_machine_criteria_test_command(fake_llm):
+    """P1: test 类型跑 shell 命令,returncode==0 视为通过。"""
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [{
+            "worker": "coder", "instruction": "写代码", "status": "running",
+            "acceptance_criteria": {
+                "type": "test", "command": "test -n \"$AGENTTEAM_ARTIFACT\""
+            }
+        }],
+        "current_step": 0,
+        "worker_outputs": {"coder": "non-empty artifact"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    # 命令 exit 0 → 机器验证通过
+    assert result["current_step"] == 1
+    assert "rejected" not in result
+
+
+def test_leader_review_str_criteria_falls_back_to_llm(fake_llm):
+    """P1: 纯 str 形式 acceptance_criteria 仍走 LLM 判断(向后兼容)。"""
+    fake_llm.set_structured_responses([ReviewVerdict(passed=True, reason="合格")])
+
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "plan": [{
+            "worker": "coder", "instruction": "写代码", "status": "running",
+            "acceptance_criteria": "代码质量良好,无语法错误"
+        }],
+        "current_step": 0,
+        "worker_outputs": {"coder": "def hello(): pass"},
+        "audit_events": [],
+    }
+    result = node(state)
+
+    # str 形式 → 走 LLM,推进 current_step
+    assert result["current_step"] == 1
+    assert "rejected" not in result
+
+
+def test_leader_review_dag_mode_reject(fake_llm):
+    """P0: dag 模式下 reject 也写 rejected 信号。"""
+    fake_llm.set_structured_responses([
+        ReviewVerdict(passed=False, reason="产出不符合要求")
+    ])
+
+    leader = Leader(system_prompt="你是主管", model=ModelRef("qwen", "qwen-max"))
+    node = make_leader_review_node(leader, fake_llm)
+
+    state = {
+        "task": "开发",
+        "messages": [],
+        "execution_mode": "dag",
+        "plan": [{"id": "step1", "worker": "coder", "instruction": "写代码"}],
+        "worker_outputs": {"coder": "broken output"},
+        "completed_steps": set(),
+        "skipped_steps": set(),
+        "audit_events": [],
+    }
+    result = node(state)
+
+    assert result["rejected"] is True
+    assert result["rejection_reason"] == "产出不符合要求"
 
 
 def test_leader_plan_emits_trace_event(fake_llm, fake_trace_writer):
@@ -191,7 +370,8 @@ def test_worker_node_emits_start_and_end_events(fake_llm, fake_trace_writer):
 
 def test_leader_review_emits_trace_event(fake_llm, fake_trace_writer):
     """leader_review 节点 emit leader_review 轨迹事件。"""
-    fake_llm.set_invoke_responses([AIMessage(content="good job")])
+    # P0: 用 ReviewVerdict 替代 invoke
+    fake_llm.set_structured_responses([ReviewVerdict(passed=True, reason="good")])
     leader = Leader(name="leader", system_prompt="test")
     node = make_leader_review_node(leader, fake_llm, trace_writer=fake_trace_writer)
     state = {
@@ -320,7 +500,7 @@ def test_finalize_writes_worker_output(fake_llm):
         "run_id": "run-1",
     }
     result = node(state)
-    assert result["worker_outputs"] == {"coder": "print('hello')"}
+    assert result["worker_outputs"]["coder"]["artifact"] == "print('hello')"
     assert len(result["messages"]) == 1
     assert "coder" in result["messages"][0].content
     assert len(result["audit_events"]) == 1
@@ -341,7 +521,7 @@ def test_finalize_fallback_to_last_ai_message(fake_llm):
         "run_id": "run-1",
     }
     result = node(state)
-    assert result["worker_outputs"]["w1"] == "还在思考..."
+    assert result["worker_outputs"]["w1"]["artifact"] == "还在思考..."
 
 
 def test_finalize_emits_worker_end_trace(fake_llm, fake_trace_writer):
@@ -359,166 +539,22 @@ def test_finalize_emits_worker_end_trace(fake_llm, fake_trace_writer):
     assert fake_trace_writer.events[0]["actor"] == "w1"
 
 
-def test_tool_step_executes_tools(fake_llm, tmp_path, monkeypatch):
-    """tool_step 执行工具，回灌 ToolMessage，递增 iteration，清空 tool_calls。"""
-    from agentteam.tools.skills.file_ops import write_file
+def test_tool_step_executes_tools_via_pipeline():
+    """新签名 make_tool_step(agent, tools, trace_writer, pipeline=None) 通过 pipeline 执行工具。"""
+    from agentteam.runtime.nodes import make_tool_step
+    from agentteam.runtime.tool_pipeline import build_default_pipeline
+    from langchain_core.tools import StructuredTool
+    from agentteam.domain.agent import Agent
 
-    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
-    target = tmp_path / "out.txt"
-    worker = Worker(name="w1", role="r", description="", system_prompt="test")
-    tool_calls = [{"name": "write_file", "args": {"path": str(target), "content": "hi"}, "id": "tc1", "type": "tool_call"}]
-    node = make_tool_step(worker, [write_file], approval_policy=None)
-    state = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1"}
-    result = node(state)
-
-    assert target.read_text(encoding="utf-8") == "hi"
-    assert len(result["react_messages"]) == 1
+    def add(a: int, b: int) -> int:
+        return a + b
+    tool = StructuredTool.from_function(name="add", description="add", func=add)
+    agent = Agent(name="w", role="worker", system_prompt="w")
+    pipeline = build_default_pipeline({"add": tool})
+    step = make_tool_step(agent, [tool], pipeline=pipeline)
+    result = step({"run_id": "r1", "tool_calls": [{"name": "add", "args": {"a": 1, "b": 2}, "id": "tc1", "type": "tool_call"}], "iteration": 0})
+    assert "3" in result["react_messages"][0].content
     assert result["iteration"] == 1
-    assert result["tool_calls"] == []
-
-
-def test_tool_step_handles_missing_tool(fake_llm):
-    """工具不存在时回灌错误消息，不抛异常。"""
-    worker = Worker(name="w1", role="r", description="", system_prompt="test")
-    tool_calls = [{"name": "nope", "args": {}, "id": "tc1", "type": "tool_call"}]
-    node = make_tool_step(worker, [], approval_policy=None)
-    state = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1"}
-    result = node(state)
-    assert "不存在" in result["react_messages"][0].content
-
-
-def test_tool_step_handles_tool_exception(fake_llm):
-    """工具执行出错时回灌错误消息，不抛异常。"""
-    from langchain_core.tools import StructuredTool
-
-    def boom():
-        raise RuntimeError("boom")
-
-    bad_tool = StructuredTool.from_function(name="boom", description="fails", func=boom)
-    worker = Worker(name="w1", role="r", description="", system_prompt="test")
-    tool_calls = [{"name": "boom", "args": {}, "id": "tc1", "type": "tool_call"}]
-    node = make_tool_step(worker, [bad_tool], approval_policy=None)
-    state = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1"}
-    result = node(state)
-    assert "boom" in result["react_messages"][0].content
-
-
-def test_tool_step_approval_approved_executes_tool(fake_llm, tmp_path):
-    """工具级审批：interrupt → resume approved → 工具执行。"""
-    from langchain_core.tools import StructuredTool
-    from langgraph.checkpoint.memory import MemorySaver
-    from langgraph.graph import END, START, StateGraph
-    from langgraph.types import Command
-    from agentteam.domain.approval import ApprovalPolicy
-    from agentteam.runtime.state import WorkerState
-
-    executed = []
-
-    def dangerous_tool(x: str) -> str:
-        executed.append(x)
-        return f"executed: {x}"
-
-    tool = StructuredTool.from_function(name="dangerous", description="d", func=dangerous_tool)
-    worker = Worker(
-        name="w1", role="r", description="", system_prompt="test",
-        approval_policy=ApprovalPolicy(level="tool", targets=["dangerous"]),
-    )
-    tool_calls = [{"name": "dangerous", "args": {"x": "data"}, "id": "tc1", "type": "tool_call"}]
-
-    # 用最小子图测试 interrupt/resume
-    sg = StateGraph(WorkerState)
-    sg.add_node("tool_step", make_tool_step(worker, [tool], worker.approval_policy))
-    sg.add_edge(START, "tool_step")
-    sg.add_edge("tool_step", END)
-    compiled = sg.compile(checkpointer=MemorySaver())
-
-    config = {"configurable": {"thread_id": "t1"}}
-    initial = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1", "react_messages": []}
-
-    # 第一次 invoke：应 interrupt
-    compiled.invoke(initial, config)
-    state = compiled.get_state(config)
-    assert state.next, "应在 tool_step interrupt"
-
-    # Resume：批准
-    result = compiled.invoke(Command(resume={"approved": True, "decider": "user"}), config)
-    assert len(executed) == 1, "工具应被执行一次"
-    assert "executed: data" in result["react_messages"][-1].content
-
-
-def test_tool_step_approval_rejected_skips_tool(fake_llm):
-    """工具级审批：interrupt → resume rejected → 工具跳过，回灌拒绝消息。"""
-    from langchain_core.tools import StructuredTool
-    from langgraph.checkpoint.memory import MemorySaver
-    from langgraph.graph import END, START, StateGraph
-    from langgraph.types import Command
-    from agentteam.domain.approval import ApprovalPolicy
-    from agentteam.runtime.state import WorkerState
-
-    executed = []
-
-    def dangerous_tool(x: str) -> str:
-        executed.append(x)
-        return "should not reach"
-
-    tool = StructuredTool.from_function(name="dangerous", description="d", func=dangerous_tool)
-    worker = Worker(
-        name="w1", role="r", description="", system_prompt="test",
-        approval_policy=ApprovalPolicy(level="tool", targets=["dangerous"]),
-    )
-    tool_calls = [{"name": "dangerous", "args": {"x": "data"}, "id": "tc1", "type": "tool_call"}]
-
-    sg = StateGraph(WorkerState)
-    sg.add_node("tool_step", make_tool_step(worker, [tool], worker.approval_policy))
-    sg.add_edge(START, "tool_step")
-    sg.add_edge("tool_step", END)
-    compiled = sg.compile(checkpointer=MemorySaver())
-
-    config = {"configurable": {"thread_id": "t2"}}
-    initial = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1", "react_messages": []}
-
-    compiled.invoke(initial, config)
-    state = compiled.get_state(config)
-    assert state.next, "应 interrupt"
-
-    result = compiled.invoke(Command(resume={"approved": False, "decider": "user"}), config)
-    assert len(executed) == 0, "工具不应执行"
-    assert "拒绝" in result["react_messages"][-1].content
-    assert result["iteration"] == 1
-
-
-def test_tool_step_no_approval_for_unlisted_tool(fake_llm):
-    """工具不在 targets 列表中时不触发审批，直接执行。"""
-    from langchain_core.tools import StructuredTool
-    from langgraph.checkpoint.memory import MemorySaver
-    from langgraph.graph import END, START, StateGraph
-    from agentteam.domain.approval import ApprovalPolicy
-    from agentteam.runtime.state import WorkerState
-
-    executed = []
-
-    def safe_tool(x: str) -> str:
-        executed.append(x)
-        return "ok"
-
-    tool = StructuredTool.from_function(name="safe", description="s", func=safe_tool)
-    worker = Worker(
-        name="w1", role="r", description="", system_prompt="test",
-        approval_policy=ApprovalPolicy(level="tool", targets=["dangerous"]),
-    )
-    tool_calls = [{"name": "safe", "args": {"x": "data"}, "id": "tc1", "type": "tool_call"}]
-
-    sg = StateGraph(WorkerState)
-    sg.add_node("tool_step", make_tool_step(worker, [tool], worker.approval_policy))
-    sg.add_edge(START, "tool_step")
-    sg.add_edge("tool_step", END)
-    compiled = sg.compile(checkpointer=MemorySaver())
-
-    config = {"configurable": {"thread_id": "t3"}}
-    initial = {"tool_calls": tool_calls, "iteration": 0, "run_id": "r1", "react_messages": []}
-
-    result = compiled.invoke(initial, config)
-    assert len(executed) == 1, "工具应直接执行（无需审批）"
 
 
 # ── make_worker_subgraph 集成测试 ──
@@ -536,7 +572,7 @@ def test_worker_subgraph_direct_answer(fake_llm):
     }
     result = subgraph.invoke(state)
 
-    assert result["worker_outputs"] == {"coder": "hello world"}
+    assert result["worker_outputs"]["coder"]["artifact"] == "hello world"
     assert len(result["messages"]) == 1
     assert "coder" in result["messages"][0].content
 
@@ -564,7 +600,7 @@ def test_worker_subgraph_react_with_tool(fake_llm, tmp_path, monkeypatch):
     result = subgraph.invoke(state)
 
     assert target.read_text(encoding="utf-8") == "hi"
-    assert result["worker_outputs"]["coder"] == "已写入文件"
+    assert result["worker_outputs"]["coder"]["artifact"] == "已写入文件"
 
 
 def test_worker_subgraph_respects_max_iterations(fake_llm):

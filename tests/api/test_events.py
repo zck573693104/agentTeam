@@ -4,6 +4,7 @@ import time
 from agentteam.api.events import EventBus, BroadcastTraceWriter
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
+from agentteam.storage.runs import RunRepo
 
 
 # ---- EventBus 测试 ----
@@ -44,15 +45,17 @@ def test_event_bus_publish_to_no_subscribers_is_noop():
 
 def test_broadcast_trace_writer_writes_sqlite_and_publishes_event_bus():
     conn = init_db(":memory:")
+    # PRAGMA foreign_keys=ON 后,run_events.run_id 需要 runs.id 存在
+    run_id = RunRepo(conn).create_run(team_name="t", task="x")
     audit_repo = AuditRepo(conn)
     bus = EventBus()
-    q = bus.subscribe("run-1")
+    q = bus.subscribe(run_id)
     writer = BroadcastTraceWriter(audit_repo, bus)
 
-    writer.emit("run-1", "worker_start", "coder", {"step": 1})
+    writer.emit(run_id, "worker_start", "coder", {"step": 1})
 
     # SQLite 有记录
-    events = audit_repo.list_events("run-1")
+    events = audit_repo.list_events(run_id)
     assert len(events) == 1
     assert events[0]["event_type"] == "worker_start"
     assert events[0]["actor"] == "coder"
@@ -67,13 +70,15 @@ def test_broadcast_trace_writer_writes_sqlite_and_publishes_event_bus():
 
 def test_broadcast_trace_writer_publishes_to_multiple_subscribers():
     conn = init_db(":memory:")
+    # PRAGMA foreign_keys=ON 后,run_events.run_id 需要 runs.id 存在
+    run_id = RunRepo(conn).create_run(team_name="t", task="x")
     audit_repo = AuditRepo(conn)
     bus = EventBus()
-    q1 = bus.subscribe("run-1")
-    q2 = bus.subscribe("run-1")
+    q1 = bus.subscribe(run_id)
+    q2 = bus.subscribe(run_id)
     writer = BroadcastTraceWriter(audit_repo, bus)
 
-    writer.emit("run-1", "run_start", "system")
+    writer.emit(run_id, "run_start", "system")
 
     assert q1.get(timeout=1.0)["event_type"] == "run_start"
     assert q2.get(timeout=1.0)["event_type"] == "run_start"

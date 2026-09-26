@@ -10,7 +10,7 @@ def test_ollama_adapter_builds(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setattr(mod, "_load_chat_class", lambda: FakeChatOllama)
+    monkeypatch.setattr(mod.OllamaAdapter, "_load_chat_class", lambda self: FakeChatOllama)
 
     adapter = mod.OllamaAdapter({})
     ref = ModelRef(provider="ollama", name="llama3", temperature=0.8, streaming=False)
@@ -33,7 +33,7 @@ def test_ollama_adapter_custom_base_url(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setattr(mod, "_load_chat_class", lambda: FakeChatOllama)
+    monkeypatch.setattr(mod.OllamaAdapter, "_load_chat_class", lambda self: FakeChatOllama)
 
     adapter = mod.OllamaAdapter({"ollama_base_url": "http://host:11434"})
     adapter.build(ModelRef(provider="ollama", name="llama3"))

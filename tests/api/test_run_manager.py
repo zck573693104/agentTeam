@@ -5,12 +5,11 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from agentteam.api.events import EventBus
 from agentteam.api.run_manager import RunManager
-from agentteam.domain.approval import ApprovalPolicy
 from agentteam.domain.team import Leader, Team
 from agentteam.domain.worker import Worker
 from agentteam.models.provider import ModelRef
 from agentteam.runtime.graph import TeamCompiler
-from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
 from agentteam.storage.runs import RunRepo
@@ -43,19 +42,6 @@ def _get_event(q, event_type, timeout=5.0):
     return None
 
 
-def _make_team_with_approval() -> Team:
-    return Team(
-        name="t",
-        description="test",
-        leader=Leader(
-            system_prompt="test",
-            approval_policy=ApprovalPolicy(level="step"),
-        ),
-        workers=[Worker(name="w1", role="r", description="", system_prompt="test")],
-        default_model=ModelRef(provider="qwen", name="qwen-max"),
-    )
-
-
 def _make_team_no_approval() -> Team:
     return Team(
         name="t",
@@ -82,8 +68,11 @@ def test_start_run_completes_without_approval(tmp_path):
     rm = RunManager(run_repo, audit_repo, bus)
 
     fake_llm = FakeLLM()
-    fake_llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    fake_llm.set_invoke_responses([AIMessage(content="done"), AIMessage(content="ok")])
+    fake_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="w1", instruction="do x")]),
+        ReviewVerdict(passed=True, reason="ok"),
+    ])
+    fake_llm.set_invoke_responses([AIMessage(content="done")])
 
     team = _make_team_no_approval()
     graph = _compile_graph(team, fake_llm, conn)
@@ -91,59 +80,6 @@ def test_start_run_completes_without_approval(tmp_path):
     config = {"configurable": {"thread_id": run_id}}
 
     rm.start_run(run_id, graph, config, "test task")
-    status = _wait_for_status(run_repo, run_id)
-    assert status == "completed"
-    conn.close()
-
-
-def test_start_run_interrupts_with_step_approval(tmp_path):
-    conn = init_db(tmp_path / "test.db")
-    run_repo = RunRepo(conn)
-    audit_repo = AuditRepo(conn)
-    bus = EventBus()
-    rm = RunManager(run_repo, audit_repo, bus)
-
-    fake_llm = FakeLLM()
-    fake_llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-
-    team = _make_team_with_approval()
-    graph = _compile_graph(team, fake_llm, conn)
-    run_id = run_repo.create_run("t", "test task")
-    config = {"configurable": {"thread_id": run_id}}
-    q = bus.subscribe(run_id)  # 必须用实际 run_id 订阅
-
-    rm.start_run(run_id, graph, config, "test task")
-    status = _wait_for_status(run_repo, run_id)
-    assert status == "interrupted"
-
-    # run_interrupted 事件推到了 EventBus（跳过 run_start）
-    event = _get_event(q, "run_interrupted")
-    assert event is not None
-    assert event["event_type"] == "run_interrupted"
-    conn.close()
-
-
-def test_resume_run_completes_after_interrupt(tmp_path):
-    conn = init_db(tmp_path / "test.db")
-    run_repo = RunRepo(conn)
-    audit_repo = AuditRepo(conn)
-    bus = EventBus()
-    rm = RunManager(run_repo, audit_repo, bus)
-
-    fake_llm = FakeLLM()
-    fake_llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    fake_llm.set_invoke_responses([AIMessage(content="done"), AIMessage(content="ok")])
-
-    team = _make_team_with_approval()
-    graph = _compile_graph(team, fake_llm, conn)
-    run_id = run_repo.create_run("t", "test task")
-    config = {"configurable": {"thread_id": run_id}}
-
-    rm.start_run(run_id, graph, config, "test task")
-    _wait_for_status(run_repo, run_id)
-
-    # resume
-    rm.resume_run(run_id, approved=True, reason="ok")
     status = _wait_for_status(run_repo, run_id)
     assert status == "completed"
     conn.close()
@@ -184,8 +120,11 @@ def test_cleanup_after_run_completes(tmp_path):
     rm = RunManager(run_repo, audit_repo, bus)
 
     fake_llm = FakeLLM()
-    fake_llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-    fake_llm.set_invoke_responses([AIMessage(content="done"), AIMessage(content="ok")])
+    fake_llm.set_structured_responses([
+        Plan(steps=[PlanStep(worker="w1", instruction="do x")]),
+        ReviewVerdict(passed=True, reason="ok"),
+    ])
+    fake_llm.set_invoke_responses([AIMessage(content="done")])
 
     team = _make_team_no_approval()
     graph = _compile_graph(team, fake_llm, conn)
@@ -224,30 +163,4 @@ def test_cleanup_after_run_fails(tmp_path):
     assert run_id not in rm._graphs
     assert run_id not in rm._configs
     assert run_id not in rm._threads
-    conn.close()
-
-
-def test_no_cleanup_after_run_interrupted(tmp_path):
-    """run 中断后 _graphs/_configs 应保留，供 resume 使用。"""
-    conn = init_db(tmp_path / "test.db")
-    run_repo = RunRepo(conn)
-    audit_repo = AuditRepo(conn)
-    bus = EventBus()
-    rm = RunManager(run_repo, audit_repo, bus)
-
-    fake_llm = FakeLLM()
-    fake_llm.set_structured_responses([Plan(steps=[PlanStep(worker="w1", instruction="do x")])])
-
-    team = _make_team_with_approval()
-    graph = _compile_graph(team, fake_llm, conn)
-    run_id = run_repo.create_run("t", "test task")
-    config = {"configurable": {"thread_id": run_id}}
-
-    rm.start_run(run_id, graph, config, "test task")
-    _wait_for_status(run_repo, run_id, target_statuses={"interrupted"})
-
-    time.sleep(0.3)
-    # interrupted 的 run 不清理——resume 需要 graph/config
-    assert run_id in rm._graphs
-    assert run_id in rm._configs
     conn.close()

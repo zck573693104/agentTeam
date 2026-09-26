@@ -11,6 +11,9 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 
+MAX_READ_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
 def _workspace_root() -> Path:
     """获取工作区根目录(可通过 WORKSPACE_ROOT 环境变量自定义)。"""
     return Path(os.environ.get("WORKSPACE_ROOT", ".")).resolve()
@@ -22,12 +25,16 @@ def _validate_path(path: str) -> Path:
     - 相对路径: 相对 WORKSPACE_ROOT 解析
     - 绝对路径: 直接 resolve,然后检查是否在 workspace 内
     - 越界(如 ../secret、/etc/passwd): 抛 ValueError
+    - 符号链接: 一律拒绝(保守策略,防止 LLM 工具逃逸 workspace)
     """
     root = _workspace_root()
     if Path(path).is_absolute():
-        resolved = Path(path).resolve()
+        p = Path(path)
     else:
-        resolved = (root / path).resolve()
+        p = root / path
+    resolved = p.resolve()
+    if p.is_symlink():
+        raise ValueError("symlinks not allowed")
     try:
         resolved.relative_to(root)
     except ValueError:
@@ -41,6 +48,13 @@ def _validate_path(path: str) -> Path:
 def read_file(path: str) -> str:
     """读取指定路径文本文件的内容。路径必须在 workspace 内。"""
     p = _validate_path(path)
+    size = p.stat().st_size
+    if size > MAX_READ_SIZE:
+        return f"错误: 文件过大({size} bytes),最大支持 {MAX_READ_SIZE} bytes"
+    with open(p, "rb") as f:
+        chunk = f.read(8192)
+    if b"\x00" in chunk:
+        return "错误: 文件可能为二进制,无法以文本方式读取"
     return p.read_text(encoding="utf-8")
 
 

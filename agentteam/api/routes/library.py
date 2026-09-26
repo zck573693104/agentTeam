@@ -1,11 +1,16 @@
 """GET/POST /api/library/agents 端点：专家 Agent 库管理。"""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from agentteam.domain.agent import Agent
 from agentteam.domain.library import AgentLibrary
+
+if TYPE_CHECKING:
+    from agentteam.storage.admin_audit import AdminAuditRepo
 
 
 class AgentDict(BaseModel):
@@ -43,8 +48,12 @@ def _build_agent_from_dict(agent: AgentDict) -> Agent:
     return _agent_from_dict(agent.model_dump())
 
 
-def library_router(library: AgentLibrary) -> APIRouter:
+def library_router(library: AgentLibrary, admin_audit: AdminAuditRepo | None = None) -> APIRouter:
     router = APIRouter(prefix="/api/library", tags=["library"])
+
+    def _audit(event_type: str, agent_name: str, payload: dict | None = None) -> None:
+        if admin_audit is not None:
+            admin_audit.add_event(event_type, "library_agent", agent_name, payload=payload)
 
     @router.get("/agents")
     def list_agents():
@@ -63,6 +72,7 @@ def library_router(library: AgentLibrary) -> APIRouter:
                 status_code=400,
                 detail=f"Agent already exists: {agent.name}",
             )
+        _audit("library_agent_created", a.name, {"role": a.role})
         return {"name": a.name}
 
     @router.put("/agents/{name}")
@@ -76,12 +86,14 @@ def library_router(library: AgentLibrary) -> APIRouter:
                 detail=f"Name in body ({a.name}) must match URL ({name})",
             )
         library.update(a)
+        _audit("library_agent_updated", a.name, {"role": a.role})
         return {"name": a.name}
 
     @router.delete("/agents/{name}")
     def delete_agent(name: str):
         if not library.delete(name):
             raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+        _audit("library_agent_deleted", name)
         return {"ok": True}
 
     return router

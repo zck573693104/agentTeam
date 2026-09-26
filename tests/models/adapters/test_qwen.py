@@ -12,7 +12,7 @@ def test_qwen_adapter_builds_with_explicit_key(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setattr(qwen, "_load_chat_class", lambda: FakeChatTongyi)
+    monkeypatch.setattr(qwen.QwenAdapter, "_load_chat_class", lambda self: FakeChatTongyi)
 
     adapter = qwen.QwenAdapter({"dashscope": "fake-key"})
     ref = ModelRef(provider="qwen", name="qwen-max", temperature=0.5, streaming=False)
@@ -29,7 +29,7 @@ def test_qwen_adapter_uses_env_key(monkeypatch):
     import agentteam.models.adapters.qwen as qwen
 
     monkeypatch.setenv("DASHSCOPE_API_KEY", "env-key")
-    monkeypatch.setattr(qwen, "_load_chat_class", lambda: type("Fake", (), {"__init__": lambda self, **k: None}))
+    monkeypatch.setattr(qwen.QwenAdapter, "_load_chat_class", lambda self: type("Fake", (), {"__init__": lambda self, **k: None}))
 
     adapter = qwen.QwenAdapter({})
     ref = ModelRef(provider="qwen", name="qwen-max")
@@ -40,7 +40,7 @@ def test_qwen_adapter_missing_key_raises(monkeypatch):
     import agentteam.models.adapters.qwen as qwen
 
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
-    monkeypatch.setattr(qwen, "_load_chat_class", lambda: type("Fake", (), {"__init__": lambda self, **k: None}))
+    monkeypatch.setattr(qwen.QwenAdapter, "_load_chat_class", lambda self: type("Fake", (), {"__init__": lambda self, **k: None}))
 
     adapter = qwen.QwenAdapter({})
     with pytest.raises(ValueError, match="DASHSCOPE_API_KEY"):

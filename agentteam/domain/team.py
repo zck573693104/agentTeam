@@ -46,6 +46,8 @@ class Team:
 
     engine（SP8）：执行引擎选择，"langgraph"（默认，向后兼容）或
     "opencode"（harness 套壳引擎，见 agentteam/harness/）。
+    webhook_url(P-A5 对标阿里云 AgentTeams "IM 原生"):
+    审批请求触发时 POST 通知该 URL,支持接入钉钉/飞书/企业微信等 IM bot。
     """
 
     name: str
@@ -55,6 +57,7 @@ class Team:
     skills: list[str]
     mcp_servers: list[MCPServer]
     engine: str | None
+    webhook_url: str | None
 
     def __init__(
         self,
@@ -68,6 +71,7 @@ class Team:
         skills: list[str] | None = None,
         mcp_servers: list[MCPServer] | None = None,
         engine: str | None = None,
+        webhook_url: str | None = None,
     ):
         self.name = name
         self.description = description
@@ -75,6 +79,7 @@ class Team:
         self.skills = list(skills) if skills else []
         self.mcp_servers = list(mcp_servers) if mcp_servers else []
         self.engine = engine
+        self.webhook_url = webhook_url
         if root is not None:
             self.root = root
         elif leader is not None:
@@ -128,7 +133,7 @@ class Team:
     @classmethod
     def from_legacy(
         cls, *, name, description, leader, workers, default_model,
-        skills=None, mcp_servers=None, engine=None,
+        skills=None, mcp_servers=None, engine=None, webhook_url=None,
     ) -> "Team":
         root = leader.to_agent(children=[w.to_agent() for w in workers])
         return cls(
@@ -137,4 +142,5 @@ class Team:
             skills=list(skills) if skills else [],
             mcp_servers=list(mcp_servers) if mcp_servers else [],
             engine=engine,
+            webhook_url=webhook_url,
         )

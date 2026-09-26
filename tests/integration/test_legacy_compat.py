@@ -8,7 +8,7 @@ from agentteam.domain.team import Leader, Team
 from agentteam.domain.worker import Worker
 from agentteam.models.provider import ModelRef
 from agentteam.runtime.graph import TeamCompiler
-from agentteam.runtime.nodes import Plan, PlanStep
+from agentteam.runtime.nodes import Plan, PlanStep, ReviewVerdict
 from agentteam.tools.registry import ToolRegistry
 from tests.conftest import FakeLLM, FakeModelProvider
 
@@ -66,11 +66,15 @@ def test_legacy_team_compiles_and_runs():
         default_model=ModelRef("qwen", "qwen-max"),
     )
     # leader LLM：拆 1 步 + 1 次 review
+    # leader_plan(Plan) 与 leader_review(ReviewVerdict) 都走 with_structured_output,
+    # 共用 structured_responses 队列,按调用顺序排列: 先 Plan, 后 ReviewVerdict
     leader_llm = FakeLLM()
-    leader_llm.set_structured_responses([Plan(steps=[
-        PlanStep(worker="coder", instruction="写代码"),
-    ])])
-    leader_llm.set_invoke_responses([AIMessage(content="ok")])
+    leader_llm.set_structured_responses([
+        Plan(steps=[
+            PlanStep(worker="coder", instruction="写代码"),
+        ]),
+        ReviewVerdict(passed=True, reason="ok"),
+    ])
     # worker LLM
     worker_llm = FakeLLM()
     worker_llm.set_invoke_responses([AIMessage(content="print('hi')")])
@@ -89,7 +93,7 @@ def test_legacy_team_compiles_and_runs():
     graph.invoke(initial, config)
     state = graph.get_state(config)
     assert not state.next
-    assert state.values["worker_outputs"]["coder"] == "print('hi')"
+    assert state.values["worker_outputs"]["coder"]["artifact"] == "print('hi')"
 
 
 def test_legacy_serializer_roundtrip():
@@ -112,7 +116,6 @@ def test_existing_e2e_tests_still_pass():
     import subprocess
     result = subprocess.run(
         ["pytest", "tests/integration/test_e2e_normal.py",
-         "tests/integration/test_e2e_approval.py",
          "tests/integration/test_e2e_error.py", "-v"],
         capture_output=True, text=True,
     )
