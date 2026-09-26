@@ -65,6 +65,27 @@ def test_get_skill_no_skills_dir_returns_empty(tmp_path):
     assert resp.json() == {"skills": []}
 
 
+def test_create_app_skills_dir_from_env(tmp_path, monkeypatch):
+    """容器部署（uvicorn --factory 无法传参）走 AGENTTEAM_SKILLS_DIR。"""
+    from agentteam.api.server import create_app
+
+    (tmp_path / "code_review.md").write_text("CR", encoding="utf-8")
+    monkeypatch.setenv("AGENTTEAM_SKILLS_DIR", str(tmp_path))
+    app = create_app(db_path=str(tmp_path / "t.db"), web_dist=None)
+    with TestClient(app) as client:
+        assert client.get("/api/skills/").json() == {"skills": ["code_review"]}
+
+
+def test_create_app_without_skills_env_has_no_skills(tmp_path, monkeypatch):
+    """环境变量未设置时保持原行为：技能表为空。"""
+    from agentteam.api.server import create_app
+
+    monkeypatch.delenv("AGENTTEAM_SKILLS_DIR", raising=False)
+    app = create_app(db_path=str(tmp_path / "t.db"), web_dist=None)
+    with TestClient(app) as client:
+        assert client.get("/api/skills/").json() == {"skills": []}
+
+
 def test_runs_router_accepts_skill_loader_param(tmp_path):
     """runs_router 接受 skill_loader 参数,并透传到 create_run 中构造的 TeamCompiler。"""
     from unittest.mock import MagicMock

@@ -1,0 +1,49 @@
+name: agentteam
+
+services:
+  agentteam:
+    build:
+      context: .
+    image: agentteam:0.1.0
+    # 只绑宿主 loopback：控制台/API 由内网反向代理（或 SSH 隧道）对外提供。
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:?请在 .env 里设置 OPENCODE_SERVER_PASSWORD}
+      AGENTTEAM_OPENCODE_URL: ${AGENTTEAM_OPENCODE_URL:-http://127.0.0.1:4117}
+      AGENTTEAM_OC_MODEL: ${AGENTTEAM_OC_MODEL:-opencode/ling-3.0-flash-fin-free}
+      AGENTTEAM_DEFAULT_ENGINE: ${AGENTTEAM_DEFAULT_ENGINE:-langgraph}
+      AGENTTEAM_OC_TOOL_GUARD: ${AGENTTEAM_OC_TOOL_GUARD:-strict}
+      AGENTTEAM_OC_TIMEOUT: ${AGENTTEAM_OC_TIMEOUT:-600}
+    volumes:
+      - agentteam-data:/app/data
+    restart: unless-stopped
+
+  opencode:
+    build:
+      context: docker
+      dockerfile: opencode.Dockerfile
+      args:
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-1.18.32}
+    # 与 agentteam 共享 network namespace：底座只听容器内 127.0.0.1:4117，
+    # 宿主和同网段其他机器都连不上它，控制平面却能直连。
+    # 想复用宿主机已有的 opencode：`--scale opencode=0` 并把
+    # AGENTTEAM_OPENCODE_URL 指向宿主机地址。
+    network_mode: "service:agentteam"
+    environment:
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:?请在 .env 里设置 OPENCODE_SERVER_PASSWORD}
+      # provider 密钥只以环境变量透传，配置文件里用 {env:DEEPSEEK_API_KEY} 引用。
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - opencode-config:/home/opencode/.config/opencode
+      - opencode-data:/home/opencode/.local/share/opencode
+      # 被研发的目标仓库：worker 的 write_file/bash 都落在这里。
+      - ${AGENTTEAM_WORKSPACE:-./workspace}:/workspace
+    restart: unless-stopped
+
+volumes:
+  agentteam-data:
+  opencode-config:
+  opencode-data:

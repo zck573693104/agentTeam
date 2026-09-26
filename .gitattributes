@@ -1,0 +1,11 @@
+# Docker/compose 侧对换行符敏感：CRLF 会让 .env 里的口令带上不可见的 \r，
+# 并可能打断 Dockerfile 的续行。这些文件在任意平台都必须保持 LF。
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+docker-compose.yml text eol=lf
+.env.example text eol=lf
+docker/*.Dockerfile text eol=lf
+
+*.py text eol=lf
+*.md text
+*.sh text eol=lf

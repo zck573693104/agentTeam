@@ -85,6 +85,11 @@ def create_app(
     mp = model_provider or ModelProvider()
     tr = tool_registry or ToolRegistry()
     lib = agent_library or AgentLibrary(repo=library_repo)
+    # 容器/服务部署下 uvicorn --factory 没法传参，技能目录走环境变量；
+    # 未设置时保持 None（SP7 单测依赖「无 skills_dir → /api/skills 为空」）。
+    if skills_dir is None:
+        _skills_env = _os.environ.get("AGENTTEAM_SKILLS_DIR", "")
+        skills_dir = Path(_skills_env) if _skills_env else None
     skill_loader = SkillLoader(skills_dir)
 
     evolution_repo = EvolutionRepo(conn, lock=conn_lock)
@@ -124,6 +129,7 @@ def create_app(
             skill_loader=skill_loader,
             library=lib,
             state_store=HarnessStateStore(conn, lock=conn_lock),
+            prompt_timeout=float(_os.environ.get("AGENTTEAM_OC_TIMEOUT", "600")),
         )
 
     app.include_router(teams_router(team_store))

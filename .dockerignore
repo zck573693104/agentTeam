@@ -1,0 +1,38 @@
+# 构建上下文瘦身：镜像需要的东西在 Dockerfile 里逐条 COPY，其余一律不进上下文。
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 前端在镜像内重建
+web/node_modules/
+web/dist/
+
+# 运行期数据与本机产物：绝不进镜像
+data/
+logs/
+*.db
+*.db-journal
+.tmp_oc_smoke/
+novel-lab/
+docs/
+tests/
+skills/**/__pycache__/
+
+# 本地密钥/别名脚本
+.env
+.env.local
+*.secret
+*.ps1

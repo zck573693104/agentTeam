@@ -179,6 +179,7 @@ curl -X POST http://localhost:8000/api/runs \
 | `AGENTTEAM_DEFAULT_ENGINE` | Team 未声明 engine 时的默认引擎 | `langgraph` |
 | `AGENTTEAM_OC_TIMEOUT` | 单次 prompt 等待上限（秒） | `600` |
 | `AGENTTEAM_OC_TOOL_GUARD` | 白名单外工具调用的处置：`strict`（中断+审批）/ `audit`（只记账继续跑）/ `off` | `strict` |
+| `AGENTTEAM_SKILLS_DIR` | SP7 技能目录（`uvicorn --factory` 无法传参时的唯一入口） | 不设＝不加载技能 |
 | `AGENTTEAM_OC_SMOKE=0` | 关闭真实 opencode 冒烟测试 | 自动探测 |
 | `AGENTTEAM_HARNESS_DISABLED=1` | 完全禁用 harness 引擎 | 启用 |
 
@@ -188,6 +189,43 @@ curl -X POST http://localhost:8000/api/runs \
 python -m pytest tests -q          # 全量（新旧引擎 + 734 用例）
 python -m pytest tests/harness -q  # 仅套壳引擎（fake server，无外部依赖）
 # 真实 opencode 冒烟：先 `opencode serve --port 4117`，再跑 tests/harness/test_real_opencode.py
+```
+
+## 容器部署（内网一键起）
+
+仓库自带两个镜像定义与编排：`Dockerfile`（控制平面，React 控制台在镜像内构建后
+由 FastAPI 同源挂载）与 `docker/opencode.Dockerfile`（执行底座，版本钉死）。
+
+```bash
+cp .env.example .env               # 至少改 OPENCODE_SERVER_PASSWORD、AGENTTEAM_OC_MODEL
+docker compose build               # opencode 版本可用 --build-arg OPENCODE_VERSION=1.18.32
+docker compose up -d
+docker compose logs -f agentteam   # 控制台 http://127.0.0.1:8000（只绑宿主 loopback）
+```
+
+拓扑与安全边界：
+
+- **opencode 只监听容器 loopback**：它与控制平面共享 network namespace
+  （`network_mode: "service:agentteam"`），因此宿主和同网段机器都连不上 4117，
+  而 `AGENTTEAM_OPENCODE_URL=http://127.0.0.1:4117` 天然可用。宿主 `8000` 也只绑
+  `127.0.0.1`，对外访问交给内网反向代理或 SSH 隧道。
+- **两个非 root 用户**：控制平面 `agentteam`(uid 10001)、底座 `opencode`(uid 10001)，
+  worker 的 `write_file` / `bash` 都在 opencode 容器的 `/workspace` 内发生。
+- **代码不出域**：把目标仓库挂成 `AGENTTEAM_WORKSPACE`（默认 `./workspace`）。
+- **模型不出域**：provider 指向内网网关（vLLM / Ollama / 自托管 DeepSeek / LiteLLM），
+  密钥经环境变量透传，opencode 配置里用 `{env:DEEPSEEK_API_KEY}` 引用，
+  不要把明文写进 `opencode.jsonc` 或 Team JSON。
+- **持久化**：`agentteam-data`（SQLite：团队、run 快照、审批、审计、进化历史）、
+  `opencode-config` / `opencode-data`（opencode 自身配置与会话库）都是命名卷。
+- **升级底座版本**：改 `OPENCODE_VERSION` 前先在目标版本上跑
+  `tests/harness/test_real_opencode.py`；引擎的版本兼容门会对主版本偏离返回 502
+  并给出降级指引，小版本偏离记 `backend_warning` 事件。
+
+首次起完注册团队：
+
+```bash
+agentteam install-preset enterprise_dev --engine opencode   # 混跑：预设走套壳引擎
+# 或按上面「3. 注册 opencode 引擎团队」的 curl 自建
 ```
 
 ## 企业部署指引（opencode 路线）
@@ -208,7 +246,8 @@ python -m pytest tests/harness -q  # 仅套壳引擎（fake server，无外部�
    调用可能已经执行完毕**，需要「执行前拦住」语义的合规场景请把该 worker 的
    `engine` 留在 `langgraph`。生产建议给 opencode server 设置
    `OPENCODE_SERVER_PASSWORD`、用防火墙限制 127.0.0.1，并把 server 跑在
-   容器/独立用户下（worker 的文件操作与命令都在其工作目录内发生）。
+   容器/独立用户下（worker 的文件操作与命令都在其工作目录内发生）——
+   上面「容器部署」那套编排就是把这几条钉死的默认形态。
 4. **审计与合规**：所有审批决策、工具调用、token 消耗落在 SQLite（`run_events` /
    `approvals` / `evolution_history`），可对接企业日志管道；Web 控制台实时查看。
 5. **成本控制**：`GET /api/dashboard` 按团队/状态聚合 token 用量；模型侧用
