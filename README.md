@@ -21,6 +21,9 @@
 - [测试](#测试)
 - [模块索引](#模块索引)
 - [里程碑](#里程碑)
+- [SP8：opencode 套壳引擎（双引擎架构）](#sp8opencode-套壳引擎双引擎架构)
+- [容器部署（内网一键起）](#容器部署内网一键起)
+- [企业部署指引（opencode 路线）](#企业部署指引opencode-路线)
 
 ---
 
@@ -230,51 +233,68 @@ role → `RoleSpec` 注册表（class-level 单例），第三方可扩展新 ro
 
 ## 快速开始
 
-### 安装
+三种启动方式：**A. 本机开发模式**（双引擎，最快跑通）、**B. Docker 一键起**（内网部署）、**C. 测试脚本**。
+
+### 方式 A：本机开发模式
 
 ```bash
+# 0. 安装（首次执行一次；extras 可选 qwen/openai/anthropic/ollama/dev）
 pip install -e ".[qwen,dev]"
+
+# 1. 启动执行底座：opencode server（走 opencode 引擎时必需；纯 langgraph 引擎可跳过）
+npm i -g opencode-ai@1.18.32        # 版本钉在 1.18.x（引擎契约已验证线，见 SP8 §9）
+opencode serve --port 4117          # 建议在目标项目目录下运行，worker 的文件操作落在这里
+
+# 2. 启动控制平面：API + Web 控制台（同源托管）
+uvicorn agentteam.api.server:create_app --factory --port 8000
+#   - API 服务 / Web 控制台：http://localhost:8000
+#   - API 文档：http://localhost:8000/docs
+
+# 3. 注册团队（三选一）
+agentteam register-dev-team                                   # 研发小队（langgraph 引擎）
+agentteam install-preset enterprise_dev --engine opencode     # 企业预设（opencode 引擎）
+agentteam register-team path/to/team.py                       # 自定义 Team 配置文件
+
+# 4. 提交任务
+curl -X POST http://localhost:8000/api/runs   -H "Content-Type: application/json"   -d '{"team_name": "enterprise_dev", "task": "实现一个 hello world 程序"}'
+
+# 5. 查看实时轨迹
+curl -N http://localhost:8000/api/runs/{run_id}/stream   # SSE 事件流
+#   或浏览器打开 http://localhost:8000 进 Web 控制台（RunDetail 页可审批/取消）
 ```
 
-可选 extras：`qwen` / `openai` / `anthropic` / `ollama` / `dev`（pytest + ruff）
+要点：
 
-### 启动服务
+- 团队 JSON 里写 `"engine": "opencode"` 走套壳引擎，不写走原 LangGraph 引擎，二者可混跑。
+- 审批触发时 run 变 `interrupted`，在 Web 控制台点批准/拒绝即续跑（服务重启后仍可续）。
+
+### 方式 B：Docker 一键起（内网部署）
 
 ```bash
-uvicorn agentteam.api.server:create_app --factory
+# 1. 准备 .env（compose 强制要求底座密码）
+echo "OPENCODE_SERVER_PASSWORD=换一个强密码" > .env
+
+# 2. 一键起双容器：agentteam(控制平面) + opencode(底座，共享网络命名空间)
+docker compose up -d --build
+
+# 3. 访问 http://127.0.0.1:8000（只绑 loopback，对外走内网反代/SSH 隧道）
 ```
 
-启动后：
-- API 服务：http://localhost:8000
-- Web 控制台：http://localhost:8000（浏览器打开）
-- API 文档：http://localhost:8000/docs
+常用变体与卷挂载（目标仓库、模型密钥透传）见 [容器部署](#容器部署内网一键起)。
 
-### 注册团队
+### 方式 C：测试脚本
 
 ```bash
-# 注册预置团队
-agentteam register-team agentteam/presets/enterprise_dev.py
+python -m pytest tests -q                                 # 全量
+python -m pytest tests/harness -q                         # 仅套壳引擎（离线 fake，无外部依赖）
+python -m pytest tests/harness/test_real_opencode.py -q   # 真机冒烟（需 4117 端口 server；限流自动 skip）
 
-# 注册自定义 Team 配置文件
-agentteam register-team path/to/team.py
+cd web && npm install && npm run build && npx vitest run  # 前端构建 + 前端测试
 ```
 
-### 提交任务
-
-```bash
-curl -X POST http://localhost:8000/api/runs \
-  -H "Content-Type: application/json" \
-  -d '{"team_name": "enterprise_dev", "task": "实现一个 hello world 程序"}'
-```
-
-### 查看实时轨迹
-
-```bash
-# SSE 实时事件流
-curl -N http://localhost:8000/api/runs/{run_id}/stream
-```
-
-或浏览器打开 http://localhost:8000 进入 Web 控制台查看。
+opencode 引擎相关环境变量（`AGENTTEAM_OPENCODE_URL` / `AGENTTEAM_OC_MODEL` /
+`AGENTTEAM_OC_TIMEOUT` 等）见 [SP8 章节](#sp8opencode-套壳引擎双引擎架构)；
+平台配置（DB/日志/鉴权/配额）见 [配置](#配置)。
 
 ---
 
@@ -620,20 +640,7 @@ AgentTeam 保留**控制平面**（Team schema、三级审批策略、专家库�
 Web 控制台），opencode server 承担 **agent loop / 工具系统 / 模型接入 / MCP**。
 设计详见 [docs/opencode-harness-design.md](docs/opencode-harness-design.md)。
 
-### 1. 启动 opencode server（执行底座）
-
-```bash
-npm i -g opencode-ai        # 或 curl -fsSL https://opencode.ai/install | bash
-opencode serve --port 4117  # 在你的项目目录下运行（worker 的文件操作落在该目录）
-```
-
-### 2. 启动 AgentTeam API（控制平面）
-
-```bash
-uvicorn agentteam.api.server:create_app --factory
-```
-
-### 3. 注册 opencode 引擎团队并提交任务
+启动方式见上文[快速开始 · 方式 A](#方式-a本机开发模式)。注册 opencode 引擎团队并提交任务：
 
 ```bash
 curl -X POST http://localhost:8000/api/teams -H "Content-Type: application/json" -d '{
