@@ -49,7 +49,7 @@ class HarnessEnv:
     """一个测试 = 一个 fake server + 一个 runner 组装。"""
 
     def __init__(self, script: Script, team: Team, task="示例任务",
-                 run_manager=None, use_store=True):
+                 run_manager=None, use_store=True, team_registry=None):
         self.server = FakeOpenCodeServer(script)
         self.base_url = self.server.start()
         self.client = OpenCodeClient(
@@ -72,6 +72,7 @@ class HarnessEnv:
         self.runner = HarnessRunner(
             client=self.client, run_id="run_test", team=team, task=task,
             trace_writer=self.trace, audit_repo=self.audit,
+            team_registry=team_registry,
             run_manager=run_manager, state_store=self.store,
             default_model="opencode/test-model",
             prompt_timeout=10.0, poll_interval=0.02,
@@ -654,3 +655,195 @@ def test_state_survives_without_store_raises_clearly(env_factory):
     # 同实例 resume：内存态还在，可以续跑（不经过 store）
     env.runner.invoke({"__resume__": {"approved": True}}, {})
     assert env.runner.get_state({}).next == ()
+
+
+# ================= 嵌套团队（多级 supervisor / TeamRef） =================
+
+
+def _nested_team() -> Team:
+    """两级团队：root leader → sub(supervisor, 子 worker sw1) + 直属 w1。"""
+    from agentteam.domain.agent import Agent
+    from agentteam.models.provider import ModelRef
+    return Team(
+        name="nested", description="", default_model=ModelRef("qwen", "qwen-max"),
+        root=Agent(
+            name="leader", role="supervisor", system_prompt="你是主管",
+            children=[
+                Agent(
+                    name="sub", role="supervisor", system_prompt="你是子主管",
+                    children=[
+                        Agent(name="sw1", role="worker", system_prompt="子执行者",
+                              tools=[]),
+                    ],
+                ),
+                Agent(name="w1", role="worker", system_prompt="直属执行者",
+                      tools=[]),
+            ],
+        ),
+        engine="opencode",
+    )
+
+
+def test_nested_supervisor_two_levels(env_factory):
+    script = Script()
+    script.plans["leader"] = {"steps": [
+        {"worker": "sub", "instruction": "子团队任务A"},
+        {"worker": "w1", "instruction": "直属任务B"},
+    ], "execution_mode": "sequential"}
+    script.plans["sub"] = {"steps": [
+        {"worker": "sw1", "instruction": "孙子任务"},
+    ], "execution_mode": "sequential"}
+    script.worker_steps["sw1"] = [{"type": "final", "text": "孙子产出"}]
+    script.worker_steps["w1"] = [{"type": "final", "text": "直属产出"}]
+    env = env_factory(script, _nested_team())
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ()
+    evs = env.events()
+    # 两级 leader_plan（root + 子 supervisor）
+    plan_actors = [e["actor"] for e in evs if e["event_type"] == "leader_plan"]
+    assert plan_actors == ["leader", "sub"]
+    # 深度优先：sub 的孙子先完成，直属 w1 后启动
+    sw1_end = next(i for i, e in enumerate(evs)
+                   if e["event_type"] == "worker_end" and e["actor"] == "sw1")
+    w1_start = next(i for i, e in enumerate(evs)
+                    if e["event_type"] == "worker_start" and e["actor"] == "w1")
+    assert sw1_end < w1_start
+    assert env.event_types().count("worker_end") == 2
+
+
+def test_teamref_child_resolves_from_registry(env_factory):
+    from agentteam.domain.agent import Agent, TeamRef
+    from agentteam.models.provider import ModelRef
+    sub_team = Team(
+        name="sub_team", description="",
+        default_model=ModelRef("qwen", "qwen-max"),
+        root=Agent(name="sub_leader", role="supervisor",
+                   system_prompt="子团队主管",
+                   children=[Agent(name="sw1", role="worker",
+                                   system_prompt="子执行者", tools=[])]),
+        engine="opencode",
+    )
+    main = Team(
+        name="main", description="", default_model=ModelRef("qwen", "qwen-max"),
+        root=Agent(
+            name="leader", role="supervisor", system_prompt="你是主管",
+            children=[
+                TeamRef(name="sub_team", alias="subx"),
+                Agent(name="w1", role="worker", system_prompt="直属", tools=[]),
+            ],
+        ),
+        engine="opencode",
+    )
+    script = Script()
+    script.plans["leader"] = {"steps": [
+        {"worker": "subx", "instruction": "交给子团队"},
+        {"worker": "w1", "instruction": "直属任务"},
+    ], "execution_mode": "sequential"}
+    # alias 替换 frame agent_name → 子团队 plan 按别名分流
+    script.plans["subx"] = {"steps": [
+        {"worker": "sw1", "instruction": "子团队内部任务"},
+    ], "execution_mode": "sequential"}
+    script.worker_steps["sw1"] = [{"type": "final", "text": "子团队产出"}]
+    script.worker_steps["w1"] = [{"type": "final", "text": "直属产出"}]
+    env = env_factory(script, main, team_registry={"sub_team": sub_team})
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ()
+    plan_actors = [e["actor"] for e in env.events()
+                   if e["event_type"] == "leader_plan"]
+    assert plan_actors == ["leader", "subx"]
+
+
+def test_teamref_unregistered_fails_fast(env_factory):
+    from agentteam.domain.agent import Agent, TeamRef
+    from agentteam.models.provider import ModelRef
+    main = Team(
+        name="main", description="", default_model=ModelRef("qwen", "qwen-max"),
+        root=Agent(name="leader", role="supervisor", system_prompt="s",
+                   children=[TeamRef(name="ghost_team")]),
+        engine="opencode",
+    )
+    env = env_factory(Script(), main)
+    with pytest.raises(ValueError, match="ghost_team"):
+        env.runner.invoke({}, {})
+
+
+# ================= dag：condition 跳步 + 轮内工具审批 =================
+
+
+def test_dag_condition_skips_step(env_factory):
+    script = Script()
+    script.plan = {"steps": [
+        {"worker": "w1", "instruction": "前置", "id": "s1"},
+        {"worker": "w2", "instruction": "永不为真", "id": "s2",
+         "depends_on": ["s1"], "condition": "len(worker_outputs) >= 99"},
+        {"worker": "w1", "instruction": "收尾", "id": "s3",
+         "depends_on": ["s2"]},
+    ], "execution_mode": "dag"}
+    script.worker_steps["w1"] = [{"type": "final", "text": "w1完成"}]
+    env = env_factory(script)
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ()
+    # w2 从未启动；s2 被 in-place 跳过，s3 依赖 s2 仍可执行（跳过=满足）
+    types = env.event_types()
+    assert "worker_start" in types  # w1 跑了
+    starts = [e for e in env.events() if e["event_type"] == "worker_start"]
+    assert all(e["actor"] == "w1" for e in starts)
+
+
+def test_dag_round_tool_approval_park_and_resume(env_factory):
+    """dag 轮内工具审批：一轮两个并行 step，其一命中 targets → park 整轮，
+    resume 批准后该会话补发续跑 prompt，另一会话结果不丢。"""
+    from agentteam.domain.agent import Agent
+    from agentteam.domain.approval import ApprovalPolicy
+    from agentteam.models.provider import ModelRef
+    team = Team(
+        name="dagtool", description="",
+        default_model=ModelRef("qwen", "qwen-max"),
+        root=Agent(name="leader", role="supervisor", system_prompt="s",
+                   children=[
+                       Agent(name="w1", role="worker", system_prompt="并行者",
+                             tools=[]),
+                       Agent(name="w2", role="worker", system_prompt="写手",
+                             tools=["write_file"],
+                             approval_policy=ApprovalPolicy(
+                                 level="tool", targets=["write_file"])),
+                   ]),
+        engine="opencode",
+    )
+    script = Script()
+    script.plan = {"steps": [
+        {"worker": "w1", "instruction": "并行A", "id": "s1"},
+        {"worker": "w2", "instruction": "写文件", "id": "s2"},
+    ], "execution_mode": "dag"}
+    script.worker_steps["w1"] = [{"type": "final", "text": "A完成"}]
+    script.worker_steps["w2"] = [
+        {"type": "tool", "name": "write_file", "args": {"path": "x.txt"},
+         "result": "written"},
+        {"type": "final", "text": "写完了"},
+    ]
+    env = env_factory(script, team)
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ("parked",)
+    env.runner.invoke({"__resume__": {"approved": True}}, {})
+    assert env.runner.get_state({}).next == ()
+    evs = env.events()
+    # w1 产出已收集（A完成）且 w2 工具实际执行
+    assert any(e["event_type"] == "tool_call" and e["actor"] == "w2"
+               for e in evs)
+    approvals = [dict(r) for r in env.audit.list_approvals("run_test")]
+    assert approvals and approvals[0]["status"] == "approved"
+
+
+# ================= 引导（provider 补丁 + MCP 注册） =================
+
+
+def test_ensure_backend_registers_provider_and_mcp(env_factory):
+    from agentteam.domain.mcp_server import MCPServer
+    from agentteam.harness.runner import ensure_backend
+    env = env_factory(Script())
+    team = make_team()
+    team.mcp_servers = [MCPServer(name="git", command="npx",
+                                  args=["-y", "mcp-git"], env={"G": "1"})]
+    ensure_backend(env.client, team, "opencode/test-model")
+    # qwen provider 补丁走 v1 PATCH /config（env 引用，不落明文）
+    assert env.server.config["provider"]["qwen"]

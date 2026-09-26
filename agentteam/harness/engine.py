@@ -560,6 +560,11 @@ class HarnessRunner:
             stage = "round_gate"
         if stage == "round_gate":
             ready = self._ready_steps(st, frame)
+            if not ready["steps"]:
+                # LangGraph parity：路由空就绪集返回 [END]——剩余 step 的依赖
+                # 不可满足（或全部 done/skipped），终止而非空转
+                frame["phase"] = "done"
+                return
             self._broker.request_gate(
                 self._run_id, _policy_from(frame["policy"]), "step",
                 target=",".join(ready["ids"]),
@@ -617,14 +622,19 @@ class HarnessRunner:
         raise ValueError(f"unknown dag stage: {stage}")
 
     def _ready_steps(self, st: dict, frame: dict) -> dict:
-        """拓扑就绪集 + condition 求值（False → in-place skipped，parity）。"""
+        """拓扑就绪集 + condition 求值（False → in-place skipped，parity）。
+
+        依赖满足判定与 LangGraph 引擎对齐（graph.make_route_from_plan_dag）：
+        completed **或 skipped** 均视为满足，避免被跳过的 step 阻塞后继。
+        """
         completed = set(frame["completed"])
         skipped = set(frame["skipped"])
         ready: list[dict] = []
         for step in frame["plan"]:
             if step["status"] != "pending":
                 continue
-            if not all(d in completed for d in step["depends_on"]):
+            if not all(d in completed or d in skipped
+                       for d in step["depends_on"]):
                 continue
             if step.get("condition"):
                 from agentteam.runtime.graph import _eval_condition

@@ -226,3 +226,29 @@ def test_langgraph_default_untouched(oc_api):
     assert r["status"] == "completed"
     # fake opencode server 未被使用（没有会话创建）
     assert server.sessions == {}
+
+
+def test_example_opencode_team_e2e(oc_api):
+    """examples/opencode_dev_team.py 的团队定义可注册、可经套壳引擎跑完。"""
+    from examples.opencode_dev_team import OPENCODE_DEV_TEAM
+    client, server, script = oc_api()
+    team = json.loads(json.dumps(OPENCODE_DEV_TEAM))
+    team["name"] = "oc_example_e2e"  # 防重名
+    resp = client.post("/api/teams", json=team)
+    assert resp.status_code == 200, resp.text
+    # 剧本：主管拆 1 步给 coder（skill code_review 存在于 skills/ 目录）
+    script.plan = {"steps": [{"worker": "coder", "instruction": "实现 hello"}],
+                   "execution_mode": "sequential"}
+    script.worker_steps["coder"] = [{"type": "final", "text": "done"}]
+    run_id = client.post(
+        "/api/runs", json={"team_name": "oc_example_e2e", "task": "做一个小功能"}
+    ).json()["run_id"]
+    run = wait_run(client, run_id)
+    # step 级审批在先：interrupted → 批准 → 完成（skills 注入不破坏编译期校验）
+    assert run["status"] == "interrupted"
+    client.post(f"/api/runs/{run_id}/approve", json={"approved": True})
+    run = wait_run(client, run_id)
+    assert run["status"] == "completed"
+    types = [e["event_type"] for e in
+             client.get(f"/api/runs/{run_id}/trace").json()]
+    assert "worker_end" in types and "leader_review" in types

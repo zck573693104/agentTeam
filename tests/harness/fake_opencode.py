@@ -45,6 +45,9 @@ class Script:
 
     def __init__(self) -> None:
         self.plan: dict[str, Any] = {"steps": [], "execution_mode": "sequential"}
+        # 按 agent 名区分的 plan（嵌套团队/TeamRef 测试用）；缺省回退 self.plan。
+        # 引擎 _ask_once 建会话时 agent=<agent_name>，fake 据此分流。
+        self.plans: dict[str, dict[str, Any]] = {}
         # 非 None 时原样作为 plan 回答（测「计划不是 JSON」路径）
         self.plan_raw: str | None = None
         self.review_text = "LGTM"
@@ -300,8 +303,9 @@ class FakeOpenCodeServer:
             self._finish_turn(sess, "", blank=True)
             return
         if "步骤计划" in text:
+            plan = self.script.plans.get(sess.agent, self.script.plan)
             answer = (self.script.plan_raw if self.script.plan_raw is not None
-                      else json.dumps(self.script.plan, ensure_ascii=False))
+                      else json.dumps(plan, ensure_ascii=False))
         else:
             answer = self.script.review_text
         self._finish_turn(sess, answer)
@@ -312,6 +316,12 @@ class FakeOpenCodeServer:
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
+            # HTTP/1.1 keep-alive：引擎以 0.02s 轮询会话状态，1.0（无 keep-alive）
+            # 会在整套件里产生数千短连接，Windows 上耗尽临时端口报 10048。
+            # 前提：所有 JSON 响应必须带准确 Content-Length（_send 已保证）；
+            # SSE 流以连接关闭定界，无碍。
+            protocol_version = "HTTP/1.1"
+
             def log_message(self, *args):  # 静默
                 pass
 
