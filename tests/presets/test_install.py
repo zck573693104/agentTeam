@@ -91,3 +91,77 @@ def test_install_preset_post_5xx_raises_runtimeerror():
             assert "500" in str(e) or "server error" in str(e)
     # 不应回退 PUT
     assert mock_req.put.call_count == 0
+
+
+def test_install_preset_engine_override_applies_to_all_teams():
+    """SP8.1: engine="opencode" 覆盖主团队与 deps_teams 的执行引擎。"""
+    from agentteam.presets import install_preset_to_api
+    with patch("agentteam.presets.installer.requests") as mock_req:
+        mock_req.post.return_value = _fake_response(200, {"name": "x"})
+        mock_req.ConnectionError = Exception
+        result = install_preset_to_api("enterprise_dev", api="http://api",
+                                       engine="opencode")
+    team_posts = [
+        c[1]["json"] for c in mock_req.post.call_args_list
+        if c[0][0].endswith("/api/teams")
+    ]
+    assert len(team_posts) == 2  # sub-team + 主团队
+    assert all(t["engine"] == "opencode" for t in team_posts)
+    assert result["engine"] == "opencode"
+
+
+def test_install_preset_engine_none_keeps_preset_default():
+    """engine=None：payload 不含 engine 键（预设未声明 → langgraph 默认）。"""
+    from agentteam.presets import install_preset_to_api
+    with patch("agentteam.presets.installer.requests") as mock_req:
+        mock_req.post.return_value = _fake_response(200, {"name": "x"})
+        mock_req.ConnectionError = Exception
+        install_preset_to_api("customer_support", api="http://api")
+    payload = mock_req.post.call_args[1]["json"]
+    assert "engine" not in payload
+
+
+def test_install_preset_engine_override_roundtrip_via_api(tmp_path):
+    """端到端：engine 覆盖经 team_from_dict 落库，GET /api/teams 可见。"""
+    from fastapi.testclient import TestClient
+
+    from agentteam.api.server import create_app
+    from agentteam.presets import install_preset_to_api
+    from agentteam.tools.registry import ToolRegistry
+    from tests.conftest import FakeLLM, FakeModelProvider
+
+    app = create_app(
+        db_path=str(tmp_path / "preset.db"),
+        model_provider=FakeModelProvider({"qwen-max": FakeLLM()}),
+        tool_registry=ToolRegistry(),
+        web_dist=None,
+        harness_enabled=False,
+    )
+    client = TestClient(app)
+    with patch("agentteam.presets.installer.requests") as mock_req:
+        # 把 installer 的 HTTP 调用转到 TestClient（同进程，无需起服务）
+        import requests as real_requests
+
+        def _route(method, url, json=None, timeout=None):
+            path = url.split("http://api", 1)[1]
+            resp = MagicMock()
+            r = client.post(path, json=json) if method == "post" \
+                else client.put(path, json=json)
+            resp.status_code = r.status_code
+            resp.text = r.text
+            resp.json.return_value = r.json() if r.content else {}
+            return resp
+
+        mock_req.post.side_effect = lambda url, json=None, timeout=None: _route(
+            "post", url, json, timeout)
+        mock_req.put.side_effect = lambda url, json=None, timeout=None: _route(
+            "put", url, json, timeout)
+        mock_req.ConnectionError = Exception
+        result = install_preset_to_api("customer_support", api="http://api",
+                                       engine="opencode")
+    assert result["teams"] == ["customer_support"]
+    got = client.get("/api/teams/customer_support").json()
+    assert got["engine"] == "opencode"
+    # 引擎字段真实参与运行时解析（_team_engine 读 team.engine）
+    from agentteam.domain.serializer import team_from_dict
+    assert team_from_dict(got).engine == "opencode"

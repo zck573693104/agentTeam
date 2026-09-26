@@ -318,6 +318,20 @@ class OpenCodeClient:
     def health(self) -> Any:
         return self._request("GET", "/api/health")
 
+    def server_version(self) -> str | None:
+        """GET /global/health —— server 版本号（v1 端点，v2 面也有响应）。
+
+        用于兼容门（runner.check_backend_compatibility）：opencode 的
+        HTTP 契约按版本漂移（v2 线独立渠道、无兼容承诺），引擎只对
+        已验证的 1.18.x 线做功能保证。
+        """
+        data = self._request("GET", "/global/health")
+        if isinstance(data, dict):
+            data = data.get("data", data)
+        if isinstance(data, dict):
+            return data.get("version")
+        return None
+
     # ---------- SSE ----------
 
     def subscribe(self, callback: Callable[[dict], None]) -> None:

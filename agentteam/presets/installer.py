@@ -11,7 +11,11 @@ from agentteam.domain.serializer import team_to_dict
 from agentteam.presets import get_preset
 
 
-def install_preset_to_api(name: str, api: str = "http://localhost:8000") -> dict:
+def install_preset_to_api(
+    name: str,
+    api: str = "http://localhost:8000",
+    engine: str | None = None,
+) -> dict:
     """安装预置团队到 API 服务。
 
     安装顺序(确保依赖先就位):
@@ -20,14 +24,25 @@ def install_preset_to_api(name: str, api: str = "http://localhost:8000") -> dict
        sub-team 需在 preset 模块中定义为模块级变量(变量名 = team.name.upper() 优先)
     3. 注册 TEAM 到 /api/teams(POST 失败为 400 重复 → PUT 更新)
 
-    返回 {"library": [...], "teams": [...]} 记录每步注册结果。
+    engine (SP8.1): 覆盖预设的执行引擎（"opencode" | "langgraph" | None）。
+    None = 保留预设自身声明（未声明即 langgraph）。覆盖作用于主团队与
+    deps_teams —— TeamRef 引用时 sub-team 被内联进主团队引擎执行，
+    但作为独立团队运行时也保持同一引擎，避免混合舰队语义分裂。
+
+    返回 {"library": [...], "teams": [...], "engine": str|None}。
     幂等:重复安装时 POST→PUT 回退,不会因重复而失败。
     """
     from dataclasses import asdict
 
     mod = get_preset(name)
     meta = mod.METADATA
-    result: dict[str, list[str]] = {"library": [], "teams": []}
+    result: dict[str, list[str]] = {"library": [], "teams": [], "engine": engine}
+
+    def _team_payload(team) -> dict:
+        d = team_to_dict(team)
+        if engine:
+            d["engine"] = engine
+        return d
 
     def _post_or_put(url_post: str, url_put: str | None, payload: dict, label: str) -> None:
         resp = requests.post(url_post, json=payload, timeout=10)
@@ -78,14 +93,14 @@ def install_preset_to_api(name: str, api: str = "http://localhost:8000") -> dict
         _post_or_put(
             f"{api}/api/teams",
             f"{api}/api/teams/{team_name}",
-            team_to_dict(sub_team), "teams",
+            _team_payload(sub_team), "teams",
         )
 
     # 3. TEAM (主团队)
     _post_or_put(
         f"{api}/api/teams",
         f"{api}/api/teams/{mod.TEAM.name}",
-        team_to_dict(mod.TEAM), "teams",
+        _team_payload(mod.TEAM), "teams",
     )
 
     return result

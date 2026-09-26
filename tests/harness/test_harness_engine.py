@@ -847,3 +847,50 @@ def test_ensure_backend_registers_provider_and_mcp(env_factory):
     ensure_backend(env.client, team, "opencode/test-model")
     # qwen provider 补丁走 v1 PATCH /config（env 引用，不落明文）
     assert env.server.config["provider"]["qwen"]
+
+
+# ================= SP8.1: 版本兼容门 =================
+
+
+def test_backend_version_gate_four_states(env_factory):
+    """check_backend_compatibility：ok / warn(旧) / warn(新) / error(主版本)。"""
+    from agentteam.harness.runner import check_backend_compatibility
+
+    env = env_factory(Script())
+    cases = {
+        "1.18.32": "ok",
+        "1.18.5": "ok",      # 同 1.18.x 线
+        "1.17.9": "warn",    # 更旧：未经测试
+        "1.19.0": "warn",    # 更新：契约漂移风险
+        "2.0.18": "error",   # v2 独立渠道：契约不兼容
+    }
+    for version, expected in cases.items():
+        env.server.version_tag = version
+        info = check_backend_compatibility(env.client)
+        assert info["level"] == expected, (version, info)
+        assert info["version"] == version
+    # error 级必须给出可操作的指引
+    env.server.version_tag = "2.0.18"
+    info = check_backend_compatibility(env.client)
+    assert "1.18" in info["message"]
+
+
+def test_ensure_backend_fails_fast_on_major_mismatch(env_factory):
+    from agentteam.harness.runner import ensure_backend
+    env = env_factory(Script())
+    env.server.version_tag = "2.0.18"
+    with pytest.raises(OpenCodeError, match="主版本"):
+        ensure_backend(env.client, make_team(), "opencode/test-model")
+
+
+def test_ensure_backend_warn_recorded_in_run_audit(env_factory):
+    """warn 级不阻塞 run，但经 API 层记入 run_events（backend_warning）。"""
+    from agentteam.harness.runner import ensure_backend
+    env = env_factory(Script())
+    env.server.version_tag = "1.19.0"
+    import warnings as w
+    with w.catch_warnings(record=True):
+        w.simplefilter("always")
+        compat = ensure_backend(env.client, make_team(), "opencode/test-model")
+    assert compat["level"] == "warn"
+    assert "1.18" in compat["message"]

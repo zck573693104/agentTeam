@@ -136,13 +136,86 @@ class HarnessEngineFactory:
         return self.create(run_id, team, task, trace_writer, audit_repo, run_manager)
 
 
-def ensure_backend(client: OpenCodeClient, team, default_model: str) -> None:
-    """opencode 引导：provider 配置补丁 + MCP 注册（幂等，容忍 server 缺失）。
+# 已验证的 opencode 版本线。HTTP 契约按版本漂移（v2 /api/* 是 experimental
+# 独立渠道、无兼容承诺；v1 的 tools/deny/wait 缺陷在 1.18.32 均无修复），
+# 引擎的功能保证只覆盖 KNOWN_GOOD 所在线；偏离时按级别告警/拒绝。
+KNOWN_GOOD_VERSION = "1.18.32"
+_KNOWN_MAJOR = 1
+_KNOWN_MINOR = 18
 
-    这两项**只能走 v1 配置面**：v2 `/api/*` 没有 config/mcp 写入端点（实测）。
-    失败不抛异常由调用方决定？——否：连接失败必须在 run 提交时暴露
-    （fail-fast），这里只吞「provider 已存在 / MCP 重名」类幂等冲突。
+
+def check_backend_compatibility(client: OpenCodeClient) -> dict[str, Any]:
+    """探测 server 版本并给出兼容性判定。
+
+    返回 {"version", "level", "message"}；level ∈ ok / warn / error：
+    - error：主版本偏离（如 v2 独立渠道 / 未来 2.x）——契约不兼容，fail-fast
+    - warn ：小版本偏离（更旧=未经测试；更新=契约漂移风险，tools/deny/
+             structured-output 的行为可能在后续版本变化）——可继续，调用方
+             应把 warning 记入 run 审计
+    - ok   ：同 1.18.x 线
+    版本号缺失/不可解析按 warn 处理（server 可能是未按契约返回的变体）。
     """
+    version = client.server_version()
+    info: dict[str, Any] = {"version": version, "level": "ok", "message": ""}
+    if not version:
+        info["level"] = "warn"
+        info["message"] = (
+            "opencode server 未报告版本号（/global/health 无 version 字段），"
+            f"契约兼容性未知；已验证版本线为 {KNOWN_GOOD_VERSION}"
+        )
+        return info
+    try:
+        parts = [int(p) for p in version.split(".")[:3]]
+        major, minor = parts[0], parts[1]
+    except (ValueError, IndexError):
+        info["level"] = "warn"
+        info["message"] = (
+            f"opencode server 版本号不可解析: {version!r}；"
+            f"已验证版本线为 {KNOWN_GOOD_VERSION}"
+        )
+        return info
+    if major != _KNOWN_MAJOR:
+        info["level"] = "error"
+        info["message"] = (
+            f"opencode server 主版本 {major}.x 不受支持（引擎契约基于 "
+            f"{KNOWN_GOOD_VERSION}；v2/2.x 渠道为 experimental 且无兼容承诺）。"
+            f"请安装 1.18.x：npm i -g opencode-ai@1.18.32"
+        )
+        return info
+    if minor != _KNOWN_MINOR:
+        info["level"] = "warn"
+        if minor < _KNOWN_MINOR:
+            info["message"] = (
+                f"opencode server {version} 旧于已验证版本线 "
+                f"{KNOWN_GOOD_VERSION}，未经测试，建议升级"
+            )
+        else:
+            info["message"] = (
+                f"opencode server {version} 新于已验证版本线 "
+                f"{KNOWN_GOOD_VERSION}，HTTP 契约可能漂移"
+                "（tools/deny/structured-output 行为已知随版本变化），"
+                "建议钉住 1.18.x 或重跑 tests/harness/test_real_opencode.py"
+            )
+    return info
+
+
+def ensure_backend(
+    client: OpenCodeClient, team, default_model: str
+) -> dict[str, Any]:
+    """opencode 引导：版本兼容门 + provider 配置补丁 + MCP 注册（幂等）。
+
+    返回兼容性判定 dict（level/message），调用方决定是否记入 run 审计。
+    这两项配置**只能走 v1 面**：v2 `/api/*` 没有 config/mcp 写入端点（实测）。
+    连接失败/主版本不兼容在 run 提交时 fail-fast；只吞
+    「provider 已存在 / MCP 重名」类幂等冲突。
+    """
+    compat = check_backend_compatibility(client)
+    if compat["level"] == "error":
+        raise OpenCodeError(f"opencode 版本不兼容: {compat['message']}")
+    if compat["level"] == "warn":
+        import warnings as _w
+        _w.warn(f"opencode backend: {compat['message']}", stacklevel=2)
+
     from agentteam.harness import translator
 
     patch = translator.provider_patch_for(
@@ -171,6 +244,7 @@ def ensure_backend(client: OpenCodeClient, team, default_model: str) -> None:
         if server.name in existing:
             continue
         client.add_mcp(server.name, translator.mcp_to_opencode(server))
+    return compat
 
 
 def _walk_agents(root):

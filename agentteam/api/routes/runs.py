@@ -117,7 +117,9 @@ def runs_router(
                 )
             try:
                 from agentteam.harness.runner import ensure_backend
-                ensure_backend(harness_factory.client, team, harness_factory._default_model)
+                compat = ensure_backend(
+                    harness_factory.client, team, harness_factory._default_model
+                )
             except Exception as e:
                 run_repo.end_run(run_id, "failed")
                 eid = audit_repo.add_event(
@@ -131,6 +133,17 @@ def runs_router(
                     status_code=502,
                     detail=f"opencode backend unavailable: {e}",
                 )
+            # 版本兼容性 warn 记入 run 审计（error 已在 ensure_backend 内抛出）
+            if compat.get("level") == "warn":
+                eid = audit_repo.add_event(
+                    run_id, "backend_warning", "system",
+                    {"version": compat.get("version"), "message": compat.get("message")},
+                )
+                event_bus.publish(run_id, {
+                    "id": eid, "event_type": "backend_warning", "run_id": run_id,
+                    "payload": {"version": compat.get("version"),
+                                "message": compat.get("message")},
+                })
             # 注册所有已知 Team（TeamRef 解析 parity）
             harness_factory.set_teams(team_store.list_all())
             runner = harness_factory.create(

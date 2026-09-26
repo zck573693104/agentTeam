@@ -35,10 +35,22 @@ def test_cli_show_preset_nonexistent_returns_one(capsys):
 def test_cli_install_preset_calls_install_helper():
     """install-preset 调用 install_preset_to_api,成功返回 0。"""
     with patch("agentteam.cli.install_preset_to_api") as mock_install:
-        mock_install.return_value = {"library": ["code_engineer"], "teams": ["enterprise_dev"]}
+        mock_install.return_value = {"library": ["code_engineer"], "teams": ["enterprise_dev"],
+                                     "engine": None}
         rc = main(["install-preset", "enterprise_dev", "--api", "http://test"])
     assert rc == 0
-    mock_install.assert_called_once_with("enterprise_dev", api="http://test")
+    mock_install.assert_called_once_with("enterprise_dev", api="http://test", engine=None)
+
+
+def test_cli_install_preset_engine_passthrough():
+    """SP8.1: --engine 透传给 install_preset_to_api。"""
+    with patch("agentteam.cli.install_preset_to_api") as mock_install:
+        mock_install.return_value = {"library": [], "teams": ["customer_support"],
+                                     "engine": "opencode"}
+        rc = main(["install-preset", "customer_support", "--engine", "opencode"])
+    assert rc == 0
+    mock_install.assert_called_once_with("customer_support", api="http://localhost:8000",
+                                         engine="opencode")
 
 
 def test_cli_install_preset_keyerror_returns_one(capsys):

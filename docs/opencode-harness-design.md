@@ -288,3 +288,46 @@ Rate limit` 这类文本并按 skip 处理（离线 90+ 例才是功能保证）
 - 工具调用分阶段可见（`input.started` 就给出工具名，`input.ended` 给完整入参）
   → 事后拦截能在入参成形时判定，比 v1 的「part 完成后才知道」更早。
 - `agent` 字段接受任意标签 → 会话可按 worker 归因（真实 CLI/TUI 亦复用此面）。
+
+## 9. 上游跟踪：issue 观察清单与版本策略（2026-09-26 调研）
+
+### 9.1 缺陷 ↔ 上游 issue 对照（全部在 anomalyco/opencode）
+
+| 本引擎行为约束 | 上游 issue | 状态要点 | 对我们的含义 |
+|---|---|---|---|
+| 不用 per-request `tools` | #35647 | **官方 non-goal：不恢复 V1 行为**（tools map 被转成 permission 规则持久化到会话） | 白名单永不走该参数；prompt 指令 + 事后中断是终态方案 |
+| 不下发 `deny` 规则 | #42779（+ #51193/#51241/#51315/#48242） | serve 下 deny 家族回归区，2026-09 活跃重写（PR #50429） | AGENTTEAM_OC_STRICT_TOOLS=1 仅限未来已修复版本，默认禁用 |
+| `PATCH /config` 后需重启 | #43698 / #43033 | serve 进程生命周期内 config 只解析一次，无 HTTP reload | provider/MCP 补丁的生效边界；2.0 在做 hot-reload（#42478） |
+| 不用 `/api/session/{id}/wait` | #33605 / #38458 | `SessionV2.wait()` 是 stub，直接抛错；**assigned jlongster** | 最可能先修复的项；修复后可把轮询换成长等待 |
+| 结构化输出通道 | #46735（assigned）/ PR #44634 | **PR 合并后 JSON 返回通道将从 StructuredOutput 工具调用改为原生 text** | `extract_json` 已是文本优先 + 工具入参兜底，双向兼容；PR 合并后需真机回归 |
+| 不用 `resume:false` | #44807 / #46135 | 文档化语义 + 调度缺陷（僵尸会话致 inbox 永不投递） | 引擎统一 resume:true；补发续跑用「先 interrupt 再新 prompt」 |
+
+### 9.2 版本策略
+
+- **钉住 1.18.x（已知良好线 = 1.18.32）**。引擎启动时经 `/global/health` 做版本
+  兼容门（`runner.check_backend_compatibility`）：主版本偏离 → run 提交 fail-fast；
+  小版本偏离 → 告警并记入 run 审计（`backend_warning` 事件）。
+- v2 线（独立渠道，v2.0.18 起日更）官方定位 experimental、无兼容承诺——生产底座
+  不追 v2 API 面；staging 跟踪 #33605/#46735 两个已认领项。
+- 每次升级 opencode 后重跑 `tests/harness/test_real_opencode.py`（含限流 skip 逻辑）。
+
+## 10. 适配器扩展评估：DeepSeek Harness / ZCode（2026-09-26 结论：暂不做）
+
+调研结论（详见当期调研记录）：
+
+- **dsh（deepseek-ai/deepseek-harness，MIT，236k⭐）**：仍全部是 pre-release
+  （v0.1.7-rc.2），README 明示 breaking changes（一个月内 session 格式 V2→V3→V4）；
+  **无常驻 HTTP 控制平面**（只有子进程 stdin/--json NDJSON、Python SDK 子进程、
+  fire-and-forget webhook）；程序化审批是进程内 cordis `approval/request` waterfall，
+  非 HTTP 钩子。适配器需子进程池 + NDJSON 桥接 + 内嵌 TS 插件，维护成本约为
+  opencode 引擎的 2-3 倍。
+- **ZCode（zai-org，Apache-2.0，6.8k⭐）**：快照式开源（main 3 commits），有
+  packages/rpc/client/server 骨架但**零公开 API/SDK 文档**；hooks 的
+  PermissionRequest 是本地进程执行器，无法承载远程控制平面语义。
+- **触发信号（满足再评估，不满足不投入）**：
+  - dsh：① 首个 stable（非 pre-release）；② 官方 headless HTTP API/OpenAPI；
+    ③ session 格式连续一季度无破坏性变更；④ 社区出现 approval 桥接 HTTP 的成熟插件。
+  - ZCode：① 文档站出现 API/SDK 章节；② hooks/Bot Channel 开放为可编程 webhook；
+    ③ 企业版/私有化方案公布。
+- 模型侧不受影响：接 DeepSeek/GLM/自托管 vLLM 走 LiteLLM/OpenAI 兼容网关，
+  Team JSON 的 `default_model` 指向网关 provider 即可（与本引擎无关）。

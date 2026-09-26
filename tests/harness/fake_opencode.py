@@ -113,6 +113,8 @@ class FakeOpenCodeServer:
         self.sessions: dict[str, _Session] = {}
         self.config: dict = {}
         self.mcps: dict[str, Any] = {}
+        # /global/health 报告的版本号（版本兼容门测试旋钮）
+        self.version_tag: str = "1.18.32"
         self._events: list[dict] = []
         self._subscribers: list[queue.Queue] = []
         self._lock = threading.Lock()
@@ -346,6 +348,11 @@ class FakeOpenCodeServer:
                 path = self.path.split("?")[0]
                 if path == "/api/health":
                     self._send(200, {"data": {"healthy": True}})
+                    return
+                if path == "/global/health":
+                    # v1 端点（两代 server 面都有）：带 version 供兼容门判定
+                    self._send(200, {"healthy": True,
+                                     "version": outer.version_tag})
                     return
                 if path == "/api/event":
                     self._serve_sse()

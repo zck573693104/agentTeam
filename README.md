@@ -195,7 +195,13 @@ python -m pytest tests/harness -q  # 仅套壳引擎（fake server，无外部�
 1. **数据不出域**：AgentTeam 控制平面 + opencode server 全部内网部署；模型走
    内网网关（vLLM/Ollama/DeepSeek 自托管，或 LiteLLM 统一代理），Team JSON 里
    `default_model` 指向网关 provider 即可。
-2. **权限最小化**：Worker 的 `tools` 白名单 + `approval_policy(level="tool", targets=[...])`
+2. **版本钉住（重要）**：引擎契约只对 opencode **1.18.x（已验证 1.18.32）** 做
+   功能保证——上游 HTTP 面按版本漂移（v2 渠道 experimental 无兼容承诺，`tools`/
+   `deny`/`wait` 的行为随版本变化，issue 对照见设计文档 §9）。run 提交时引擎会
+   自动做版本兼容门：主版本偏离直接拒绝（502，附降级指引），小版本偏离告警并
+   记入 run 审计（`backend_warning` 事件）。升级 opencode 前先重跑
+   `tests/harness/test_real_opencode.py`。
+3. **权限最小化**：Worker 的 `tools` 白名单 + `approval_policy(level="tool", targets=[...])`
    把写文件/执行命令纳入人工审批。**注意 v2 底座上的语义是「事后中断 + 审计」**
    （opencode v2 无会话级权限规则集，见设计文档 §4/§8）：违规调用一旦被观测到即
    中断回合、写 `tool_denied` 并挂起等人工，放行后从断点续跑；但**首个被观测到的
@@ -203,14 +209,19 @@ python -m pytest tests/harness -q  # 仅套壳引擎（fake server，无外部�
    `engine` 留在 `langgraph`。生产建议给 opencode server 设置
    `OPENCODE_SERVER_PASSWORD`、用防火墙限制 127.0.0.1，并把 server 跑在
    容器/独立用户下（worker 的文件操作与命令都在其工作目录内发生）。
-3. **审计与合规**：所有审批决策、工具调用、token 消耗落在 SQLite（`run_events` /
+4. **审计与合规**：所有审批决策、工具调用、token 消耗落在 SQLite（`run_events` /
    `approvals` / `evolution_history`），可对接企业日志管道；Web 控制台实时查看。
-4. **成本控制**：`GET /api/dashboard` 按团队/状态聚合 token 用量；模型侧用
+5. **成本控制**：`GET /api/dashboard` 按团队/状态聚合 token 用量；模型侧用
    LiteLLM 配预算与限流。
-5. **高可用**：审批等待期间 run 快照持久化（`run_engine_state` 表），服务重启后
+6. **高可用**：审批等待期间 run 快照持久化（`run_engine_state` 表），服务重启后
    审批仍可续跑；进化引擎失败自动隔离，不影响主流程。
-6. **已知边界**：执行底座已迁到 opencode v2 `/api/*` 面（v1.18.32 实测）。v2 不提供
+7. **已知边界**：执行底座已迁到 opencode v2 `/api/*` 面（v1.18.32 实测）。v2 不提供
    per-request `system`/`format`/`tools`，也没有会话级 permission 规则集，因此
    system prompt 内联进用户文本、Plan JSON 靠 prompt + 宽容提取、工具管控靠
    「prompt 约束 + 事后中断审计」（逐项对策见设计文档 §8）。若 opencode 后续补齐
    事前权限门，只需替换 `approval.review_tool_call` 的处置分支，控制平面与审计词表不变。
+8. **预设舰队混跑**：企业预设默认 langgraph 引擎；`agentteam install-preset
+   enterprise_dev --engine opencode` 可把预设（含依赖 sub-team）安装为 opencode
+   引擎，与 langgraph 团队同 fleet 混跑，`AGENTTEAM_DEFAULT_ENGINE` 可设全站默认。
+   适配器扩展（DeepSeek Harness / ZCode）评估结论与触发信号见设计文档 §10：
+   当前均不建议投入，模型侧需求经 LiteLLM 网关解决。
