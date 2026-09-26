@@ -76,7 +76,7 @@ text.* → step.ended(finish:"stop")`。多步回合天然给出两次中断窗�
 | LangGraph 引擎 | Harness 引擎（v2） |
 |---|---|
 | `leader_plan`（`with_structured_output(Plan)`） | v2 无结构化输出通道：`translator.plan_prompt()` 把 JSON Schema 内联进 prompt + 硬约束「只输出一个 JSON 对象」，`translator.extract_json()` 宽容提取（整体→```围栏→首个平衡花括号）；dag 环检测/step id 去重重用 `graph.py` 纯函数 |
-| step 级审批门（interrupt per dispatch round） | seq：每步 dispatch 前 gate；dag：每轮 ready 批次 dispatch 前 gate（同一轮只门一次，语义一致） |
+| step 级审批门（interrupt per dispatch round） | seq：每步 dispatch 前 gate；dag：每轮 ready 批次 dispatch 前 gate（同一轮只门一次，语义一致）。dag 依赖满足与空轮 parity：**skipped 视为依赖满足**、空就绪集返回 END（对齐 `graph.make_route_from_plan_dag`），否则被跳过的 step 会阻塞后继造成 round_gate/review 空转 |
 | worker 级审批门 | worker 会话创建前 gate（targets 匹配才门） |
 | tool 级审批（interrupt in tool_step） | **事后中断 + 审计**（v2 无会话级规则集、不产生 pending permission）：观测到工具调用 → 判定 → `POST interrupt` 掐断回合 → `tool_denied` 审计 + park；放行则向同一会话补发 `approved_resume_prompt` 续跑，拒绝则整步 rejected。详见 §4 |
 | ReAct 循环 | opencode 原生 agent loop（`max_iterations` → agent `steps` 上限近似） |
@@ -160,8 +160,12 @@ api key 一律以 `{env:VAR}` 引用，不落盘明文。
    事件带 `durable.seq`、interrupt 后剩余步骤在下一次 prompt 继续 —— 都是真实 server
    实测行为被踩坑后回填进 fake 的。
 2. **单元/集成**：translator、client、events、approval（gate/事后中断/timeout/三种
-   guard 模式）、engine（seq/dag/三级审批/拒绝/取消/白名单/重启恢复）、runner、
-   API 层（engine=opencode 团队全流程）。
+   guard 模式）、engine（seq/dag/三级审批/拒绝/取消/白名单/重启恢复/嵌套 supervisor/
+   TeamRef 注册表解析与 fail-fast/dag condition 跳步/dag 轮内工具审批 park/resume）、
+   runner（ensure_backend 的 provider+MCP 幂等引导）、
+   API 层（engine=opencode 团队全流程 + 示例团队 E2E）。
+   fake server 用 HTTP/1.1 keep-alive：1.0 下引擎 0.02s 轮询会产生数千短连接，
+   Windows 上耗尽临时端口（WinError 10048），且整套件慢约 5 倍。
 3. **真实冒烟**（skip-if-unavailable，`tests/harness/test_real_opencode.py`）：
    建会话（未注册 agent 标签）→ prompt（turn 锚点）→ `finish:"stop"` → 逐消息 tokens →
    倒序消息 + history seq → SSE `data` 载荷 → v2 契约形状（`model.id`）→ 完整 API E2E。

@@ -185,7 +185,7 @@ curl -X POST http://localhost:8000/api/runs \
 ### 5. 测试
 
 ```bash
-python -m pytest tests -q          # 全量（新旧引擎 + 669 用例）
+python -m pytest tests -q          # 全量（新旧引擎 + 734 用例）
 python -m pytest tests/harness -q  # 仅套壳引擎（fake server，无外部依赖）
 # 真实 opencode 冒烟：先 `opencode serve --port 4117`，再跑 tests/harness/test_real_opencode.py
 ```
