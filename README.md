@@ -251,23 +251,37 @@ AGENTTEAM_SKILLS_DIR=./skills uvicorn agentteam.api.server:create_app --factory 
 #   - API 文档：http://localhost:8000/docs
 #   - AGENTTEAM_SKILLS_DIR 让 Web 控制台的 Skills 页有数据（默认空）
 
-# 3. 注册团队（三选一）
-agentteam register-dev-team                                   # 研发小队（langgraph 引擎）
-agentteam install-preset enterprise_dev --engine opencode     # 企业预设（opencode 引擎）
-agentteam register-team path/to/team.py                       # 自定义 Team 配置文件
+# 3. 注册团队（三选一；前提是你已在第 2 步把服务跑起来）
+python -m agentteam.cli install-preset enterprise_dev --engine opencode   # 企业预设（opencode 引擎，免费模型零 Key 开箱）
+python -m agentteam.cli register-dev-team                                 # 研发小队（langgraph 引擎，需 DASHSCOPE_API_KEY 等真实模型 Key）
+python -m agentteam.cli register-team path/to/team.py                     # 自定义 Team 配置文件
 
 # 4. 提交任务
 curl -X POST http://localhost:8000/api/runs   -H "Content-Type: application/json"   -d '{"team_name": "enterprise_dev", "task": "实现一个 hello world 程序"}'
 
 # 5. 查看实时轨迹
 curl -N http://localhost:8000/api/runs/{run_id}/stream   # SSE 事件流
-#   或浏览器打开 http://localhost:8000 进 Web 控制台（RunDetail 页可审批/取消）
+#   或浏览器打开 http://localhost:8000 进 Web 控制台（Runs → RunDetail 页可审批/取消）
 ```
 
 要点：
 
 - 团队 JSON 里写 `"engine": "opencode"` 走套壳引擎，不写走原 LangGraph 引擎，二者可混跑。
-- 审批触发时 run 变 `interrupted`，在 Web 控制台点批准/拒绝即续跑（服务重启后仍可续）。
+  opencode 引擎配默认免费模型即可开箱跑通（无任何模型 Key）；langgraph 引擎的 run 需要
+  对应供应商的 API Key（如 `DASHSCOPE_API_KEY`）。
+- 首跑提交后即可在 Web 控制台看到实时轨迹；**审批触发时 run 变 `interrupted`**，
+  在 Runs → RunDetail 页点批准/拒绝即续跑（服务重启后仍可续）。
+- 深层级预设（enterprise_dev 三级团队）在免费模型上首跑可能较慢或撞限流（见下表）。
+
+### 常见启动问题
+
+| 现象 | 原因与处理 |
+|---|---|
+| Web 控制台 Skills 页为空 / `GET /api/skills/{name}` 404 | 未设技能目录：启动 API 时带 `AGENTTEAM_SKILLS_DIR=./skills`（Docker 镜像已内置） |
+| 提交 run 返回 502 "opencode 版本不兼容" | opencode server 版本偏离契约线：`npm i -g opencode-ai@1.18.32` 钉回 1.18.x |
+| run failed，error 里含 429 / FreeUsageLimitError | 免费共享模型限流：等额度恢复，或换自有 Key（`DEEPSEEK_API_KEY` 等放 `.env`） |
+| run 卡在 `interrupted` | 正常——等待人工审批；到 Web 控制台 Runs → RunDetail 点批准/拒绝 |
+| Web 控制台 404 / 无样式 | 未构建前端：`cd web && npm install && npm run build`（dist 会由 API 同源托管） |
 
 ### 方式 B：Docker 一键起（内网部署）
 
