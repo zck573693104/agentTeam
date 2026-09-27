@@ -10,7 +10,9 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from starlette.staticfiles import StaticFiles
 
 from agentteam.api.events import EventBus
+from agentteam.api.routes.admin import admin_router
 from agentteam.api.routes.dashboard import dashboard_router
+from agentteam.api.routes.evolution import evolution_router
 from agentteam.api.routes.library import library_router
 from agentteam.api.routes.runs import runs_router
 from agentteam.api.routes.skills import skills_router
@@ -20,10 +22,12 @@ from agentteam.api.store import TeamStore
 from agentteam.config import get_settings
 from agentteam.domain.library import AgentLibrary
 from agentteam.logging_config import get_logger, init_logging
-from agentteam.models.provider import ModelProvider
+from agentteam.models.provider import ModelProvider, ModelRef
+from agentteam.runtime.evolution import EvolutionEngine
 from agentteam.runtime.skills import SkillLoader
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
+from agentteam.storage.evolution import EvolutionRepo
 from agentteam.storage.library import LibraryRepo
 from agentteam.storage.runs import RunRepo
 from agentteam.storage.teams import TeamRepo
@@ -122,9 +126,24 @@ def create_app(
         from agentteam.plugins import discover_all
         discover_all(tr)
 
+    # SP7b 自进化引擎（SP8 合并时被治理面重构误删，此处恢复接线）：
+    # run 终态后异步触发 4 维度进化（prompt/params/skill_gen/skill_select），
+    # 失败静默隔离，不影响主流程；前端 Teams 页 EvolutionHistory 消费其账本。
+    evolution_repo = EvolutionRepo(conn, lock=conn_lock)
+    evolution_engine = EvolutionEngine(
+        model_provider=mp,
+        agent_library=lib,
+        evolution_repo=evolution_repo,
+        run_repo=run_repo,
+        audit_repo=audit_repo,
+        default_model=ModelRef("qwen", "qwen-max"),
+        skill_loader=skill_loader,
+        skills_dir=skills_dir,
+    )
+
     run_manager = RunManager(
         run_repo, audit_repo, event_bus,
-        checkpointer=saver,
+        checkpointer=saver, evolution_engine=evolution_engine,
     )
 
     # SP8: harness（opencode 套壳）引擎组装。
@@ -161,6 +180,8 @@ def create_app(
     app.include_router(dashboard_router(run_repo, audit_repo))
     app.include_router(library_router(lib))
     app.include_router(skills_router(skill_loader))
+    app.include_router(evolution_router(evolution_repo, lib))
+    app.include_router(admin_router(team_store, lib))
 
     # 挂载前端静态文件(生产模式)。
     # - web_dist=_DEFAULT(默认): 使用 _DEFAULT_WEB_DIST,目录存在才挂载

@@ -246,9 +246,10 @@ npm i -g opencode-ai@1.18.32        # 版本钉在 1.18.x（引擎契约已验�
 opencode serve --port 4117          # 建议在目标项目目录下运行，worker 的文件操作落在这里
 
 # 2. 启动控制平面：API + Web 控制台（同源托管）
-uvicorn agentteam.api.server:create_app --factory --port 8000
+AGENTTEAM_SKILLS_DIR=./skills uvicorn agentteam.api.server:create_app --factory --port 8000
 #   - API 服务 / Web 控制台：http://localhost:8000
 #   - API 文档：http://localhost:8000/docs
+#   - AGENTTEAM_SKILLS_DIR 让 Web 控制台的 Skills 页有数据（默认空）
 
 # 3. 注册团队（三选一）
 agentteam register-dev-team                                   # 研发小队（langgraph 引擎）

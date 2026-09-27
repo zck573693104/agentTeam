@@ -44,11 +44,14 @@ class RunManager:
         event_bus: EventBus,
         checkpointer=None,
         max_run_workers: int = _MAX_RUN_WORKERS,
+        evolution_engine=None,
     ) -> None:
         self._run_repo = run_repo
         self._audit_repo = audit_repo
         self._bus = event_bus
         self._saver = checkpointer
+        # SP7b: 自进化引擎（run 终态后异步触发；None 静默跳过）
+        self._evolution = evolution_engine
         self._graphs: dict[str, Any] = {}
         self._configs: dict[str, dict] = {}
         # _threads 存储 Future(原为 threading.Thread)。
@@ -560,6 +563,8 @@ class RunManager:
                     run_id, {"id": eid, "event_type": "run_end", "run_id": run_id}
                 )
                 self._cleanup_run(run_id)
+                # SP7b: completed 后异步触发进化（失败静默隔离）
+                self._trigger_evolution_async(run_id)
             else:
                 # status 非 running(被 cancel 为 cancelling),推进到 cancelled
                 self._finalize_cancellation(run_id)
@@ -602,6 +607,24 @@ class RunManager:
         with self._lock:
             self._interrupted_at[run_id] = time.time()
 
+    def _trigger_evolution_async(self, run_id: str) -> None:
+        """异步触发 EvolutionEngine(SP7b)。
+
+        daemon thread：不阻塞 API 响应，失败不影响 run 结果。
+        evolution_engine=None 时静默跳过（向后兼容）。异常全部吞没——
+        daemon 线程异常静默死亡会让运维无感知，保持与主流程隔离。
+        """
+        if self._evolution is None:
+            return
+
+        def _safe_trigger() -> None:
+            try:
+                self._evolution.trigger(run_id)
+            except Exception:
+                pass
+
+        threading.Thread(target=_safe_trigger, daemon=True).start()
+
     def _handle_error(self, run_id: str, error: BaseException) -> None:
         """统一处理 run 执行中的异常,根据异常类型标记终态并发布事件。
 
@@ -616,7 +639,8 @@ class RunManager:
         cancelling 状态。RunCancelledError 时期望 status=cancelling;其他异常时期望
         status=running,若已被 cancel 为 cancelling 则标 cancelled(尊从 cancel 语义)。
         """
-        if isinstance(error, RunCancelledError):
+        cancelled = isinstance(error, RunCancelledError)
+        if cancelled:
             # 用户取消:标 cancelled + 发 run_cancelled 事件
             logger.info("run %s cancelled by user", run_id)
             # 条件 end_run:期望 cancelling(cancel_run 已转换);失败兜底 running
@@ -654,3 +678,7 @@ class RunManager:
                 },
             )
         self._cleanup_run(run_id)
+        # SP7b: failed 后异步触发进化（cancelled 不触发）；
+        # 触发顺序与 _handle_invoke_result 对称：cleanup 之后确保内存态已释放
+        if not cancelled:
+            self._trigger_evolution_async(run_id)

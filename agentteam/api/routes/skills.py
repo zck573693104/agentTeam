@@ -10,11 +10,14 @@ def skills_router(skill_loader: SkillLoader) -> APIRouter:
     """构造 /api/skills 路由。
 
     endpoints:
-    - GET /api/skills/        — 列出所有可用 skill 名(排序)
+    - GET /api/skills(和 /api/skills/) — 列出所有可用 skill 名(排序)。
+      双路径显式声明：前端调用无斜杠形式；仅定义 "/" 时无斜杠请求
+      依赖 redirect_slashes，实测返回 404（SP8.x 回归），故两者都注册。
     - GET /api/skills/{name}  — 返回指定 skill 的内容
     """
     router = APIRouter(prefix="/api/skills", tags=["skills"])
 
+    @router.get("")
     @router.get("/")
     def list_skills():
         return {"skills": skill_loader.list_available()}
