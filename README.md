@@ -251,13 +251,20 @@ role → `RoleSpec` 注册表（class-level 单例），第三方可扩展新 ro
 设 `AGENTTEAM_DEFAULT_ENGINE=opencode`。默认引擎下不安装 opencode 对 langgraph
 零影响（harness 仅在 opencode 团队提交 run 时才真正连接）。
 
+**既不装 opencode、也不用 Docker？** 完全可以——这就是默认 langgraph 模式：
+纯 Python 进程内执行，唯一前置是**任意一家模型的 API Key 环境变量**
+（`DASHSCOPE_API_KEY`（Qwen）/ `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`，或本地
+Ollama 免 Key）。按下方方式 A 跳过第 1 步即可，编排/三级审批/自进化/Web 控制台
+全部可用，且 tool 级审批是更强的「事前拦截」语义。
+
 ### 方式 A：本机开发模式
 
 ```bash
 # 0. 安装（首次执行一次；extras 可选 qwen/openai/anthropic/ollama/dev）
 pip install -e ".[qwen,dev]"
 
-# 1. 启动执行底座：opencode server（走 opencode 引擎时必需；纯 langgraph 引擎可跳过）
+# 1. 启动执行底座：opencode server —— 【可选】
+#    不想装 opencode / 不用 Docker：跳过本步，全程走 langgraph 引擎（见上文引擎怎么选）
 npm i -g opencode-ai@1.18.32        # 版本钉在 1.18.x（引擎契约已验证线，见 SP8 §9）
 opencode serve --port 4117          # 建议在目标项目目录下运行，worker 的文件操作落在这里
 
@@ -269,7 +276,9 @@ AGENTTEAM_SKILLS_DIR=./skills uvicorn agentteam.api.server:create_app --factory 
 
 # 3. 注册团队（三选一；前提是你已在第 2 步把服务跑起来）
 python -m agentteam.cli install-preset enterprise_dev --engine opencode   # 企业预设（opencode 引擎，免费模型零 Key 开箱）
-python -m agentteam.cli register-dev-team                                 # 研发小队（langgraph 引擎，需 DASHSCOPE_API_KEY 等真实模型 Key）
+python -m agentteam.cli register-dev-team                                 # 研发小队（langgraph 引擎）
+#   ↑ 不装 opencode 的主路径：先配任一家模型 Key，如 export DASHSCOPE_API_KEY=sk-xxx（Qwen）
+#   （OPENAI_API_KEY / ANTHROPIC_API_KEY / 本地 Ollama 亦可，见「配置」与模型适配器）
 python -m agentteam.cli register-team path/to/team.py                     # 自定义 Team 配置文件
 
 # 4. 提交任务
