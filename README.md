@@ -235,6 +235,22 @@ role → `RoleSpec` 注册表（class-level 单例），第三方可扩展新 ro
 
 三种启动方式：**A. 本机开发模式**（双引擎，最快跑通）、**B. Docker 一键起**（内网部署）、**C. 测试脚本**。
 
+### 引擎怎么选（只需要其一，不必同时存在）
+
+两个执行引擎是每团队二选一的关系（`Team.engine` 字段），按需取舍：
+
+| | langgraph 引擎（默认） | opencode 引擎 |
+|---|---|---|
+| 额外安装 | **无**（纯 Python 进程内） | opencode server：本机 CLI / Docker 容器 / 内网另一台机器，三选一 |
+| 模型接入 | 各供应商 API Key（`DASHSCOPE_API_KEY` 等） | opencode provider（免费模型零 Key 开箱 / 自有 Key / 自托管 vLLM） |
+| tool 级审批语义 | **事前拦截**（工具执行前 interrupt） | 事后中断 + 审计（v2 底座限制，首个调用可能已执行） |
+| 适合场景 | 合规要求执行前拦截、零外部依赖 | 要 opencode 生态（75+ provider）、免费模型开箱跑 |
+
+判断规则：**只选一个**。不想装 opencode → 全部团队不写 `engine` 字段（默认 langgraph），
+可另设 `AGENTTEAM_HARNESS_DISABLED=1` 彻底关闭 harness；反之全 fleet 走 opencode →
+设 `AGENTTEAM_DEFAULT_ENGINE=opencode`。默认引擎下不安装 opencode 对 langgraph
+零影响（harness 仅在 opencode 团队提交 run 时才真正连接）。
+
 ### 方式 A：本机开发模式
 
 ```bash
