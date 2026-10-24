@@ -32,7 +32,7 @@ def test_get_skills_lists_md_files(tmp_path):
     with TestClient(app) as client:
         resp = client.get("/api/skills/")
     assert resp.status_code == 200
-    assert resp.json() == {"skills": ["alpha", "code_review"]}
+    assert resp.json() == {"skills": [{"name": "alpha"}, {"name": "code_review"}]}
 
 
 def test_get_skill_by_name_returns_content(tmp_path):
@@ -73,7 +73,7 @@ def test_create_app_skills_dir_from_env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTTEAM_SKILLS_DIR", str(tmp_path))
     app = create_app(db_path=str(tmp_path / "t.db"), web_dist=None)
     with TestClient(app) as client:
-        assert client.get("/api/skills/").json() == {"skills": ["code_review"]}
+        assert client.get("/api/skills/").json() == {"skills": [{"name": "code_review"}]}
 
 
 def test_create_app_without_skills_env_has_no_skills(tmp_path, monkeypatch):

@@ -20,7 +20,9 @@ def skills_router(skill_loader: SkillLoader) -> APIRouter:
     @router.get("")
     @router.get("/")
     def list_skills():
-        return {"skills": skill_loader.list_available()}
+        # 契约：[{"name": stem}, ...]（前端 SkillItem 按对象消费，
+        # SP8.3 页面级验证修复——此前返回裸字符串导致 Skills 页崩溃）
+        return {"skills": [{"name": n} for n in skill_loader.list_available()]}
 
     @router.get("/{skill_name}")
     def get_skill(skill_name: str):

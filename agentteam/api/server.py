@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from langgraph.checkpoint.sqlite import SqliteSaver
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
 from agentteam.api.events import EventBus
@@ -194,7 +195,30 @@ def create_app(
     else:
         web_dist_path = web_dist  # type: ignore[assignment]
 
+    # SPA 回退：前端路由(/teams、/runs 等)刷新或直达时，StaticFiles 找不到
+    # 对应文件会 404，导致页面白屏（页面级交互验证发现）。非 API/非资产路径
+    # 的 404 回退到 index.html，交给 React Router 处理。
+    class _SPAStaticFiles(StaticFiles):
+        async def get_response(self, path: str, scope):
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as exc:
+                looks_like_asset = "." in path.rsplit("/", 1)[-1]
+                is_reserved = path.startswith(
+                    ("api", "docs", "openapi.json", "redoc")
+                )
+                if (
+                    exc.status_code == 404
+                    and not looks_like_asset
+                    and not is_reserved
+                ):
+                    return await super().get_response("index.html", scope)
+                raise
+
     if web_dist_path is not None and web_dist_path.is_dir():
-        app.mount("/", StaticFiles(directory=str(web_dist_path), html=True), name="web")
+        app.mount(
+            "/", _SPAStaticFiles(directory=str(web_dist_path), html=True),
+            name="web",
+        )
 
     return app
