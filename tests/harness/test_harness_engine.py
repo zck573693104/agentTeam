@@ -901,3 +901,98 @@ def test_ensure_backend_warn_recorded_in_run_audit(env_factory):
         compat = ensure_backend(env.client, make_team(), "opencode/test-model")
     assert compat["level"] == "warn"
     assert "1.18" in compat["message"]
+
+
+# ================= SP8.2: 验收标准/预算透传（领导管理下属契约） =================
+
+def _payload(e):
+    """audit 行的 payload 是 JSON 字符串，解析成 dict。"""
+    import json as _json
+    raw = e.get("payload")
+    return _json.loads(raw) if isinstance(raw, str) else (raw or {})
+
+
+
+
+def _criteria_env(env_factory):
+    """1 领导 + 1 程序员；plan 带验收标准（contains 机器可判）与预算。"""
+    script = Script()
+    script.plan = {"steps": [{"worker": "w1", "instruction": "写加法函数",
+                              "acceptance_criteria":
+                                  {"type": "contains", "field": "artifact",
+                                   "pattern": "def add"},
+                              "budget_tokens": 1}],
+                   "execution_mode": "sequential"}
+    script.worker_steps["w1"] = [{"type": "final",
+                                  "text": "def add(a,b):\n    return a+b"}]
+    return env_factory(script)
+
+
+def test_acceptance_criteria_reaches_worker_prompt(env_factory):
+    """验收标准在派活时就进下属的任务简报（领导管理下属核心语义）。"""
+    env = _criteria_env(env_factory)
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ()
+    # fake server 记录了 worker 会话的首条用户消息，应包含验收标准文本
+    worker_texts = [
+        m["content"][0]["text"]
+        for s in env.server.sessions.values()
+        for m in s.messages
+        if m.get("type") == "user" and "写加法函数" in m["content"][0]["text"]
+    ]
+    assert worker_texts, "worker prompt 未捕获"
+    assert any("验收标准" in t and "contains" in t for t in worker_texts), worker_texts
+
+
+def test_review_emits_criteria_check_event(env_factory):
+    """worker 交付后领导验收：contains 标准机器验证 → criteria_check 留痕。"""
+    env = _criteria_env(env_factory)
+    env.runner.invoke({}, {})
+    checks = [e for e in env.events() if e["event_type"] == "criteria_check"]
+    assert checks and _payload(checks[0])["worker"] == "w1"
+    assert _payload(checks[0])["passed"] is True  # 产出含 def add
+
+
+def test_criteria_check_fails_when_output_misses(env_factory):
+    """产出不满足 contains 标准 → criteria_check.passed=False。"""
+    script = Script()
+    script.plan = {"steps": [{"worker": "w1", "instruction": "写加法函数",
+                              "acceptance_criteria":
+                                  {"type": "contains", "field": "artifact",
+                                   "pattern": "def subtract"}}],
+                   "execution_mode": "sequential"}
+    script.worker_steps["w1"] = [{"type": "final", "text": "def add(a,b): return a+b"}]
+    env = env_factory(script)
+    env.runner.invoke({}, {})
+    checks = [e for e in env.events() if e["event_type"] == "criteria_check"]
+    assert checks and _payload(checks[0])["passed"] is False
+
+
+def test_budget_exceeded_warning_emitted(env_factory):
+    """预算 1（必超）→ budget_exceeded 警告事件，不硬停 run。"""
+    env = _criteria_env(env_factory)
+    env.runner.invoke({}, {})
+    assert env.runner.get_state({}).next == ()  # 警告不阻断
+    warns = [e for e in env.events() if e["event_type"] == "budget_exceeded"]
+    assert warns and _payload(warns[0])["budget_tokens"] == 1
+    assert _payload(warns[0])["actual_tokens"] > 1
+
+
+def test_step_brief_str_criteria_in_review_prompt(env_factory):
+    """str 验收标准进领导验收 prompt（LLM judge 路径）。"""
+    script = Script()
+    script.plan = {"steps": [{"worker": "w1", "instruction": "做A",
+                              "acceptance_criteria": "输出包含实现说明"}],
+                   "execution_mode": "sequential"}
+    script.worker_steps["w1"] = [{"type": "final", "text": "A完成"}]
+    env = env_factory(script)
+    # 从 fake 会话里找领导 review 会话的 prompt（含验收标准字样）
+    env.runner.invoke({}, {})
+    leader_prompts = [
+        m["content"][0]["text"]
+        for s in env.server.sessions.values()
+        for m in s.messages
+        if m.get("type") == "user" and "请简要点评" in m["content"][0]["text"]
+    ]
+    assert leader_prompts and any("验收标准" in t and "实现说明" in t
+                                  for t in leader_prompts), leader_prompts

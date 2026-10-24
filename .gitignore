@@ -42,3 +42,6 @@ Thumbs.db
 
 # opencode smoke sandbox
 .tmp_oc_smoke/
+
+# opencode 运行时副产物（serve 在仓库根运行时写出）
+config.json

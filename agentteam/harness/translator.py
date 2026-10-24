@@ -163,6 +163,27 @@ def worker_user_prompt(spec: dict, instruction: str) -> str:
     return prompt_with_system(worker_system_prompt(spec), instruction)
 
 
+def step_brief(step: dict) -> str:
+    """把 plan step 的指令与验收标准合成为下属可见的任务简报。
+
+    「领导管理下属」的核心语义：**派活时就告诉下属交付标准**，而不是等
+    领导验收时才披露。str 验收标准原样附加；dict 形式（contains/regex/test）
+    转 JSON 附上；budget_tokens 一并告知（超限会被警告，不硬停）。
+    """
+    instruction = step.get("instruction", "")
+    criteria = step.get("acceptance_criteria")
+    if not criteria:
+        return instruction
+    text = (criteria if isinstance(criteria, str)
+            else json.dumps(criteria, ensure_ascii=False))
+    lines = [instruction, "", f"验收标准（交付前必须自检满足）：{text}"]
+    budget = step.get("budget_tokens") or 0
+    if budget:
+        lines.append(f"本步 token 预算：约 {budget}（超限会被记录警告）")
+    return chr(10).join(lines)
+
+
+
 def supervisor_user_prompt(spec: dict, text: str) -> str:
     """控制平面一次性 prompt（plan/review）：角色设定 + 禁用工具 + 任务。"""
     base = system_prompt_for_spec(spec)

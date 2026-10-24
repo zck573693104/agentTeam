@@ -485,10 +485,11 @@ coder = Agent(
 
 ## 预置团队
 
-`agentteam/presets/` 提供 7 个开箱即用的团队模板：
+`agentteam/presets/` 提供 8 个开箱即用的团队模板：
 
 | Preset | 文件 | 适用场景 |
 |---|---|---|
+| `dev_lead` | `dev_lead_team.py` | **程序员领导管理小队**（技术主管 + 程序员 + 测试）：带验收标准的分派（派活即告知交付标准）、交付后机器验收（contains/regex/test → `criteria_check` 事件）、预算告警（`budget_exceeded`）、coder 进专家库参与自进化、写文件/执行命令需人工审批 |
 | `enterprise_dev` | `enterprise_dev.py` | 企业研发团队（leader + coder + tester + reviewer） |
 | `customer_support` | `customer_support.py` | 客户支持团队（triage + resolver + escalator） |
 | `data_analysis` | `data_analysis.py` | 数据分析团队（query + visualize + report） |

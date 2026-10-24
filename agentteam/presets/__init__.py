@@ -21,6 +21,7 @@ from typing import Any
 
 # Preset 注册表:name → 模块路径。后续 task 逐步填充。
 PRESET_REGISTRY: dict[str, str] = {
+    "dev_lead": "agentteam.presets.dev_lead_team",
     "enterprise_dev": "agentteam.presets.enterprise_dev",
     "customer_support": "agentteam.presets.customer_support",
     "data_analysis": "agentteam.presets.data_analysis",

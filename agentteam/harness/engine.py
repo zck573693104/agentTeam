@@ -71,6 +71,10 @@ _PLAN_SCHEMA: dict[str, Any] = {
                                    "description": "依赖的 step id 列表"},
                     "condition": {"type": "string",
                                   "description": "Python 表达式,求值 False 则跳过"},
+                    "acceptance_criteria": {"type": "string",
+                                            "description": "可验证的验收标准,交付必须满足;可省略"},
+                    "budget_tokens": {"type": "integer",
+                                      "description": "本步 token 预算上限,0=不限;可省略"},
                 },
                 "required": ["worker", "instruction"],
                 "additionalProperties": False,
@@ -425,6 +429,8 @@ class HarnessRunner:
                 "id": s.get("id") or s["worker"],
                 "depends_on": list(s.get("depends_on") or []),
                 "condition": s.get("condition"),
+                "acceptance_criteria": s.get("acceptance_criteria"),
+                "budget_tokens": int(s.get("budget_tokens") or 0),
             }
             for s in plan_obj["steps"]
         ]
@@ -510,8 +516,9 @@ class HarnessRunner:
             inflight = frame.get("inflight")
             if inflight is None:
                 answer = self._start_worker(
-                    st, frame, idx, child, step["instruction"],
+                    st, frame, idx, child, translator.step_brief(step),
                     park_stage="tool", step_index=frame["current"],
+                    step=step,
                 )
             else:
                 answer = self._wait_worker_session(
@@ -602,12 +609,15 @@ class HarnessRunner:
                         self._trace.emit(self._run_id, "worker_start", child["name"])
                     resp = self._client.prompt_async(
                         sess["id"],
-                        translator.worker_user_prompt(child, step["instruction"]),
+                        translator.worker_user_prompt(
+                            child, translator.step_brief(step)),
                         delivery="queue",
                     )
                     frame["round"][step["id"]] = {
                         "worker": child["name"], "session_id": sess["id"],
                         "instruction": step["instruction"],
+                        "acceptance_criteria": step.get("acceptance_criteria"),
+                        "budget_tokens": int(step.get("budget_tokens") or 0),
                         "turn_id": self._client.turn_message_id(resp),
                     }
             frame["stage"] = "round_wait"
@@ -709,7 +719,7 @@ class HarnessRunner:
     def _start_worker(
         self, st: dict, frame: dict, idx: int, child: dict,
         instruction: str, park_stage: str, step_index: int | None = None,
-        step_id: str | None = None,
+        step_id: str | None = None, step: dict | None = None,
     ) -> str:
         """创建会话 + 异步 prompt + 等待完成（seq 路径）。返回最终文本。"""
         sess = self._create_worker_session(child)
@@ -725,6 +735,7 @@ class HarnessRunner:
             "session_id": sess["id"], "worker": child["name"],
             "instruction": instruction, "step_index": step_index,
             "step_id": step_id,
+            "budget_tokens": int((step or {}).get("budget_tokens") or 0),
             "turn_id": self._client.turn_message_id(resp),
         }
         frame["inflight"] = info
@@ -788,6 +799,15 @@ class HarnessRunner:
                     st, frame, idx, child, info, park_stage, key)
                 self._accrue_tokens(session_id)
                 info["answer"] = self._client.final_text(session_id, turn_id)
+                # P 系列契约 parity：budget_tokens 超限触发警告事件（不硬停，
+                # 与 LangGraph 引擎「超限触发警告」语义一致）
+                budget = int(info.get("budget_tokens") or 0)
+                actual = getattr(self, "_accrued", {}).get(session_id, 0)
+                if budget and actual > budget and self._trace is not None:
+                    self._trace.emit(
+                        self._run_id, "budget_exceeded", info["worker"],
+                        {"budget_tokens": budget, "actual_tokens": actual},
+                    )
                 if self._trace is not None:
                     self._trace.emit(
                         self._run_id, "worker_end", info["worker"],
@@ -872,11 +892,70 @@ class HarnessRunner:
 
     # ---------- review ----------
 
+    def _machine_check(self, criteria: Any, output_text: str) -> Any:
+        """对纯文本产出做验收标准机器验证（复用 runtime/criteria 语义）。
+
+        用 SimpleNamespace shim 把纯文本伪装成 WorkerOutput（artifact 字段），
+        contains/regex/test 三类机器可判；str/llm_judge 返回 None 交 LLM 判断。
+        """
+        if not isinstance(criteria, dict):
+            return None
+        from types import SimpleNamespace
+        from agentteam.runtime.criteria import evaluate_criteria
+        shim = SimpleNamespace(artifact=output_text, failure="",
+                               evidence=None, state_delta=None)
+        try:
+            return evaluate_criteria(criteria, shim)
+        except Exception:
+            return None
+
+    def _emit_criteria_checks(self, st: dict, frame: dict) -> None:
+        """对刚完成的 step 发 criteria_check 事件（领导验收留痕，机器可判类）。"""
+        if self._trace is None:
+            return
+        pairs: list[tuple[dict, str, str]] = []
+        if frame["mode"] == "sequential":
+            idx = frame["current"] - 1
+            if 0 <= idx < len(frame["plan"]):
+                step = frame["plan"][idx]
+                pairs.append((step, step["worker"],
+                              st["worker_outputs"].get(step["worker"], "")))
+        else:
+            for step in frame["plan"]:
+                info = frame["round"].get(step["id"]) or {}
+                if info.get("answer") is not None:
+                    pairs.append((step, info["worker"], info["answer"]))
+        for step, worker, output in pairs:
+            verdict = self._machine_check(step.get("acceptance_criteria"), output)
+            if verdict is not None:
+                self._trace.emit(
+                    self._run_id, "criteria_check", "system",
+                    {"worker": worker, "passed": verdict.passed,
+                     "reason": verdict.reason},
+                )
+
+    def _review_criteria_text(self, st: dict, frame: dict) -> str:
+        """把刚完成步骤的 str 验收标准并入领导验收 prompt（LLM judge 路径）。"""
+        crits: list[str] = []
+        if frame["mode"] == "sequential" and 0 < frame["current"] <= len(frame["plan"]):
+            crit = frame["plan"][frame["current"] - 1].get("acceptance_criteria")
+            if isinstance(crit, str) and crit.strip():
+                crits.append(crit)
+        else:
+            crits = [s.get("acceptance_criteria") for s in frame["plan"]
+                     if s["id"] in frame.get("round", {})
+                     and isinstance(s.get("acceptance_criteria"), str)]
+        if not crits:
+            return ""
+        return "\n验收标准：" + "；".join(crits)
+
     def _do_review(self, st: dict, frame: dict) -> None:
+        self._emit_criteria_checks(st, frame)
         outputs = st["worker_outputs"]
         recent = next(reversed(list(outputs)), "")
         text = (
-            f"Worker {recent} 完成了步骤，产出：{outputs.get(recent, '')}。请简要点评。"
+            f"Worker {recent} 完成了步骤，产出：{outputs.get(recent, '')}。"
+            f"{self._review_criteria_text(st, frame)}请简要点评。"
         )
         answer = self._one_shot(frame, text)
         if self._trace is not None:
