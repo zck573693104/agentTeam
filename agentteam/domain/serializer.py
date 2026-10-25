@@ -106,6 +106,8 @@ def _agent_from_dict(d: dict) -> Agent:
         # Graph Engineering P3: Maker/Checker 独立模型/工具(向后兼容:旧 schema 无此字段时取默认值)
         review_model=_model_ref_from_dict(d.get("review_model")),
         review_tools=d.get("review_tools", []),
+        # 混编:Agent 级引擎选择(向后兼容:旧 schema 无此字段时 None)
+        engine=d.get("engine"),
     )
 
 
@@ -121,7 +123,7 @@ def _agent_to_dict(agent: Agent) -> dict:
             })
         else:
             children.append(_agent_to_dict(c))
-    return {
+    d = {
         "name": agent.name,
         "role": agent.role,
         "system_prompt": agent.system_prompt,
@@ -138,6 +140,10 @@ def _agent_to_dict(agent: Agent) -> dict:
         "review_model": asdict(agent.review_model) if agent.review_model else None,
         "review_tools": list(agent.review_tools),
     }
+    # 混编:engine 仅在显式声明时输出(与 Team.engine 同风格,保持旧客户端兼容)
+    if agent.engine:
+        d["engine"] = agent.engine
+    return d
 
 
 def team_to_dict(team: Team) -> dict[str, Any]:

@@ -73,6 +73,7 @@ class HarnessEngineFactory:
         state_store: HarnessStateStore | None = None,
         prompt_timeout: float = 600.0,
         poll_interval: float = 0.25,
+        model_provider=None,
     ) -> None:
         self._client = client
         self._default_model = default_model
@@ -81,6 +82,8 @@ class HarnessEngineFactory:
         self._state_store = state_store
         self._prompt_timeout = prompt_timeout
         self._poll_interval = poll_interval
+        # 混编通道:supervisor engine="langgraph" 的 plan/review 走进程内模型
+        self._model_provider = model_provider
         self._team_registry: dict[str, Any] = {}
         self._registry_lock = threading.Lock()
 
@@ -118,6 +121,7 @@ class HarnessEngineFactory:
             team_registry=dict(self._team_registry),
             run_manager=run_manager,
             state_store=self._state_store,
+            model_provider=self._model_provider,
             default_model=self._default_model,
             prompt_timeout=self._prompt_timeout,
             poll_interval=self._poll_interval,

@@ -73,3 +73,9 @@ class Agent:
     # review 时强制调用的工具集(如 ["run_tests","lint"]),让 Checker 用独立工具验证
     # 而非仅凭 LLM 自由判断。空 list 时 review 不调用额外工具。
     review_tools: list[str] = field(default_factory=list)
+
+    # 混编(AgentTeams 多运行时思想):Agent 级引擎选择。当前仅 harness 引擎消费:
+    # supervisor 角色显式 engine="langgraph" 时,plan/review 走进程内 LangChain
+    # 模型(确定性领导),worker 会话仍走 opencode(自主执行底座)。
+    # None 表示跟随 Team.engine 的默认语义(全 opencode 或全 langgraph)。
+    engine: str | None = None

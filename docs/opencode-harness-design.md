@@ -331,3 +331,39 @@ Rate limit` 这类文本并按 skip 处理（离线 90+ 例才是功能保证）
     ③ 企业版/私有化方案公布。
 - 模型侧不受影响：接 DeepSeek/GLM/自托管 vLLM 走 LiteLLM/OpenAI 兼容网关，
   Team JSON 的 `default_model` 指向网关 provider 即可（与本引擎无关）。
+
+## 11. AgentTeams 借鉴落地：IM 通知 + 混编（2026-10-25）
+
+对 agentscope-ai/AgentTeams（"协作式多智能体 OS"：Go controller + Matrix IM +
+MinIO + Higress 网关，Manager/Workers 多容器编排）完成调研后，确定"保留本项目
+编排语义优势，选择性吸收平台化思想"的路线。落地两批（P3 凭证网关化/共享
+workspace 暂缓）：
+
+### 11.1 P1 · IM 通知出口（P-A5 脚手架落地，对标其 "IM 原生"）
+
+- 模块 `agentteam/notify/`：`format_payload`（飞书/企微/钉钉/generic 四格式纯函数）
+  + `NotificationService`（run_repo 读 run 行、team_store 解析 webhook、daemon
+  线程 POST、异常全吞）。
+- webhook 解析优先级：`Team.webhook_url`（P-A5 已有字段，此前从未消费）>
+  `AGENTTEAM_NOTIFY_WEBHOOK_URL`；两者皆空静默跳过（零配置兼容）。
+- 挂钩点：`RunManager._notify`，触发于 interrupted（双引擎统一的"等待人工"信号，
+  harness park 与 langgraph interrupt 都汇到这里）×2 分支、completed、error。
+  cancelled 不打扰。
+- 消息含 团队/任务/run id/token 用量（完成时）/错误摘要（截 200），尾部链接
+  `{AGENTTEAM_CONSOLE_URL}/runs/{run_id}` 回控制台。
+
+### 11.2 P2 · engine 下沉到 Agent 级（对标其多运行时混编）
+
+- `Agent.engine: str | None`（None=跟随 Team 默认）；serializer 往返仅在显式
+  声明时输出。
+- `HarnessRunner` 新增 `model_provider` 注入（HarnessEngineFactory/server 透传
+  共享的 `mp` 实例）；frame 携带 `engine`，`_one_shot` 按 spec 分流：
+  - `engine == "langgraph"` → `_ask_once_local`：SystemMessage（角色+skills+
+    控制面约束）+ HumanMessage，走进程内 LangChain 模型；空回复重试一次
+    （opencode 路径 parity）；取消检查同样生效。
+  - 默认 → 原 opencode 临时会话路径，行为零变化。
+- 语义：**确定性领导（进程内模型做拆解/点评）+ 自主工人（opencode 会话）**。
+  worker 级 engine 在 harness 中无意义（worker 本就跑在 opencode），不消费。
+- 装配错误 fail-fast：显式 `engine="langgraph"` 但无 ModelProvider → run 启动
+  抛 ValueError（不静默降级违背混编意图）。
+- 快照兼容：旧快照无 `engine` 键 → `.get()` 得 None → 走 opencode，resume 安全。

@@ -161,6 +161,7 @@ class HarnessRunner:
         team_registry: dict[str, Any] | None = None,
         run_manager=None,
         state_store=None,
+        model_provider=None,
         default_model: str = "opencode/ling-3.0-flash-fin-free",
         prompt_timeout: float = 600.0,
         poll_interval: float = 0.25,
@@ -176,6 +177,9 @@ class HarnessRunner:
         self._teams = team_registry or {}
         self._rm = run_manager
         self._store = state_store
+        # 混编通道:supervisor engine="langgraph" 时 plan/review 用进程内
+        # LangChain 模型(见 _local_llm);None 表示未配置,显式混编声明将 fail-fast
+        self._mp_local = model_provider
         self._default_model = default_model
         self._prompt_timeout = prompt_timeout
         self._poll = poll_interval
@@ -252,6 +256,8 @@ class HarnessRunner:
             "system_prompt": agent.system_prompt,
             "skills_content": skills,
             "model": _model_dict(agent.model),
+            # 混编:supervisor 的 plan/review 通道选择(None=默认 opencode)
+            "engine": getattr(agent, "engine", None),
             "policy": _policy_dict(agent.approval_policy),
             "instruction": instruction,
             "children": [self._child_spec(c) for c in agent.children],
@@ -981,12 +987,20 @@ class HarnessRunner:
         )
 
     def _one_shot(self, spec: dict, text: str) -> str:
-        """控制平面一次性 prompt（plan/review）：临时会话 + 异步 prompt + 轮询取文本。
+        """控制平面一次性 prompt（plan/review）：本地 LLM 或 opencode 临时会话。
+
+        混编（AgentTeams 多运行时思想）：spec["engine"]=="langgraph" 时改走
+        进程内 LangChain 模型——确定性领导做拆解/点评，worker 会话仍走
+        opencode（自主执行底座）。默认（engine 为空/"opencode"）路径：
+        临时会话 + 异步 prompt + 轮询取文本。
 
         v2 没有同步 prompt，也没有 per-request system/tools —— 角色设定与
         「不要用工具」的约束由 translator.supervisor_user_prompt 内联进文本；
         这类会话不参与工具白名单执法（与 v1 路径一致：控制面会话无规则集）。
         """
+        llm = self._local_llm(spec)
+        if llm is not None:
+            return self._ask_once_local(llm, spec, text)
         full = translator.supervisor_user_prompt(spec, text)
         answer = self._ask_once(spec, full)
         if not answer.strip():
@@ -996,6 +1010,76 @@ class HarnessRunner:
             # 实测连空两次的概率远高于独立事件。
             answer = self._ask_once(spec, full)
         return answer
+
+    # ---------- 混编：本地 LLM 通道（supervisor engine="langgraph"） ----------
+
+    def _local_llm(self, spec: dict):
+        """engine=="langgraph" 的 supervisor → 进程内 LangChain 模型。
+
+        返回 None 表示走 opencode 路径。显式声明 langgraph 但工厂未注入
+        ModelProvider 属于装配错误，fail-fast（与 plan JSON 校验同风格），
+        避免静默降级到 opencode 违背使用者的混编意图。
+        """
+        if spec.get("engine") != "langgraph":
+            return None
+        if self._mp_local is None:
+            raise ValueError(
+                f"Agent '{spec.get('agent_name')}': engine=langgraph 但 harness "
+                f"工厂未注入 ModelProvider（混编需要进程内模型通道）"
+            )
+        ref = _model_from(spec.get("model"))
+        if ref is None:
+            ref = getattr(self._team, "default_model", None)
+        if ref is None:
+            raise ValueError(
+                f"Agent '{spec.get('agent_name')}': engine=langgraph 需要 "
+                f"Agent.model 或 Team.default_model 指定进程内模型"
+            )
+        return self._mp_local.get_llm(ref)
+
+    def _ask_once_local(self, llm, spec: dict, text: str) -> str:
+        """本地 LLM 一次性调用（plan/review 混编通道）。"""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        if self._rm is not None and self._rm.is_cancelled(self._run_id):
+            raise RunCancelledError()
+        system = self._local_system_prompt(spec)
+        messages: list = []
+        if system:
+            messages.append(SystemMessage(content=system))
+        messages.append(HumanMessage(content=text))
+        answer = self._content_of(llm.invoke(messages))
+        if not answer.strip():
+            # 与 opencode 路径 parity：空回复重试一次
+            answer = self._content_of(llm.invoke(messages))
+        return answer
+
+    @staticmethod
+    def _local_system_prompt(spec: dict) -> str:
+        """本地通道的 system prompt：角色设定 + 技能 + 控制面约束。"""
+        parts: list[str] = []
+        if spec.get("system_prompt"):
+            parts.append(str(spec["system_prompt"]))
+        for name, content in (spec.get("skills_content") or {}).items():
+            parts.append(f"# Skill: {name}\n{content}")
+        if parts:
+            parts.append(
+                "你是控制平面协调者：直接以文本回答，不要尝试调用任何工具。"
+            )
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _content_of(resp) -> str:
+        """LangChain 响应 → 文本（兼容 content 为字符串/块列表两种形态）。"""
+        content = getattr(resp, "content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                block.get("text", "") if isinstance(block, dict) else str(block)
+                for block in content
+            )
+        return str(content)
 
     def _ask_once(self, spec: dict, text: str) -> str:
         """新建临时会话跑一轮 prompt，返回本回合文本。"""

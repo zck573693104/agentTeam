@@ -45,6 +45,7 @@ class RunManager:
         checkpointer=None,
         max_run_workers: int = _MAX_RUN_WORKERS,
         evolution_engine=None,
+        notifier=None,
     ) -> None:
         self._run_repo = run_repo
         self._audit_repo = audit_repo
@@ -52,6 +53,8 @@ class RunManager:
         self._saver = checkpointer
         # SP7b: 自进化引擎（run 终态后异步触发；None 静默跳过）
         self._evolution = evolution_engine
+        # P-A5: IM 通知服务（等待审批/完成/失败推送 webhook；None 静默跳过）
+        self._notifier = notifier
         self._graphs: dict[str, Any] = {}
         self._configs: dict[str, dict] = {}
         # _threads 存储 Future(原为 threading.Thread)。
@@ -540,6 +543,7 @@ class RunManager:
                 self._bus.publish(
                     run_id, {"event_type": "run_interrupted", "run_id": run_id}
                 )
+                self._notify(run_id, "run_interrupted")
             else:
                 # status 非 running(被 cancel 为 cancelling),worker 已结束不会抛
                 # RunCancelledError,需此处推进到 cancelled
@@ -552,6 +556,7 @@ class RunManager:
             if self._run_repo.try_claim(run_id, "running", "interrupted"):
                 self._mark_interrupted(run_id)
                 self._bus.publish(run_id, {"event_type": "run_interrupted", "run_id": run_id})
+                self._notify(run_id, "run_interrupted")
             else:
                 self._finalize_cancellation(run_id)
         else:
@@ -562,6 +567,7 @@ class RunManager:
                 self._bus.publish(
                     run_id, {"id": eid, "event_type": "run_end", "run_id": run_id}
                 )
+                self._notify(run_id, "run_end")
                 self._cleanup_run(run_id)
                 # SP7b: completed 后异步触发进化（失败静默隔离）
                 self._trigger_evolution_async(run_id)
@@ -606,6 +612,19 @@ class RunManager:
         """
         with self._lock:
             self._interrupted_at[run_id] = time.time()
+
+    def _notify(self, run_id: str, event_type: str, payload: dict | None = None) -> None:
+        """P-A5: run 生命周期事件 → IM webhook 通知。
+
+        通知失败绝不影响 run 主流程：notifier 内部已吞异常,此处再兜一层
+        (notifier 实现不规范/被测试替换成 mock 时也不拖垮 run 线程)。
+        """
+        if self._notifier is None:
+            return
+        try:
+            self._notifier.on_run_event(run_id, event_type, payload)
+        except Exception:
+            logger.exception("notify %s failed for run %s", event_type, run_id)
 
     def _trigger_evolution_async(self, run_id: str) -> None:
         """异步触发 EvolutionEngine(SP7b)。
@@ -677,6 +696,7 @@ class RunManager:
                     "payload": {"error": str(error)},
                 },
             )
+            self._notify(run_id, "error", {"error": str(error)})
         self._cleanup_run(run_id)
         # SP7b: failed 后异步触发进化（cancelled 不触发）；
         # 触发顺序与 _handle_invoke_result 对称：cleanup 之后确保内存态已释放

@@ -355,6 +355,50 @@ opencode 引擎相关环境变量（`AGENTTEAM_OPENCODE_URL` / `AGENTTEAM_OC_MOD
 | `AGENTTEAM_AUTH_ENABLED` | `false` | 启用 API Key 鉴权 |
 | `AGENTTEAM_AUTH_API_KEYS` | `""` | 合法 API Key 列表，逗号分隔 |
 | `AGENTTEAM_SECRET_KEY` | `""` | 凭证加密主密钥（32 字节 hex/base64，空退化为明文） |
+| `AGENTTEAM_NOTIFY_WEBHOOK_URL` | `""` | 全局默认 IM webhook（飞书/企微/钉钉 bot）；Team 的 `webhook_url` 字段优先于它 |
+| `AGENTTEAM_NOTIFY_PROVIDER` | `generic` | 通知消息格式：`feishu` / `wecom` / `dingtalk` / `generic` |
+| `AGENTTEAM_CONSOLE_URL` | `http://127.0.0.1:8040` | 控制台外部可达地址（通知里的跳转链接基准） |
+| `AGENTTEAM_NOTIFY_TIMEOUT_SECONDS` | `5.0` | webhook POST 超时秒数 |
+
+### IM 通知（等待审批 / 完成 / 失败推送）
+
+run 生命周期关键事件会推送到 IM webhook——审批等待（interrupted）、正常完成、失败。
+两种配置方式：
+
+```jsonc
+// 方式一：全局（所有团队生效）—— 启动前设置环境变量
+AGENTTEAM_NOTIFY_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
+AGENTTEAM_NOTIFY_PROVIDER=feishu        // 消息体按飞书 bot 格式组装
+
+// 方式二：团队级 —— 注册 Team 时带 webhook_url（优先级高于全局）
+{"name": "dev_lead", ..., "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"}
+```
+
+`notify_provider` 决定请求体格式（飞书 `msg_type:text`、企微/钉钉 `msgtype:markdown`、
+`generic` 输出自解释 JSON 可对接自建接收端/Matrix 桥）。通知失败只记日志，
+绝不影响 run 主流程；取消（cancelled）不打扰。
+
+### 混编（确定性领导 + 自主工人）
+
+Agent 级 `engine` 字段（对标 AgentTeams 多运行时混编思想）：`Team.engine=opencode`
+时，给 supervisor 显式声明 `engine="langgraph"`，其 plan/review 改走**进程内
+LangChain 模型**（确定性、便宜、快），worker 会话仍走 opencode（自主执行底座）。
+TeamJSON 示例：
+
+```jsonc
+{
+  "name": "mixed_team", "engine": "opencode",
+  "root": {
+    "name": "leader", "role": "supervisor",
+    "engine": "langgraph",              // ← 混编开关：领导走进程内模型
+    "model": {"provider": "qwen", "name": "qwen-max"},
+    "children": [ ... ]                 // worker 不动，照走 opencode
+  }
+}
+```
+
+显式声明 `engine="langgraph"` 但 API 进程没配模型 Key 会在 run 启动时报错
+（fail-fast，不静默降级）。
 
 Python 代码内访问配置：
 

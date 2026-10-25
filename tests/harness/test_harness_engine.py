@@ -49,7 +49,8 @@ class HarnessEnv:
     """一个测试 = 一个 fake server + 一个 runner 组装。"""
 
     def __init__(self, script: Script, team: Team, task="示例任务",
-                 run_manager=None, use_store=True, team_registry=None):
+                 run_manager=None, use_store=True, team_registry=None,
+                 model_provider=None):
         self.server = FakeOpenCodeServer(script)
         self.base_url = self.server.start()
         self.client = OpenCodeClient(
@@ -81,6 +82,7 @@ class HarnessEnv:
             trace_writer=self.trace, audit_repo=self.audit,
             team_registry=team_registry,
             run_manager=run_manager, state_store=self.store,
+            model_provider=model_provider,
             default_model="opencode/test-model",
             prompt_timeout=10.0, poll_interval=0.02,
         )
@@ -996,3 +998,122 @@ def test_step_brief_str_criteria_in_review_prompt(env_factory):
     ]
     assert leader_prompts and any("验收标准" in t and "实现说明" in t
                                   for t in leader_prompts), leader_prompts
+
+
+# ================= 混编：supervisor engine="langgraph" =================
+
+
+def _mixed_team() -> Team:
+    """root 显式 engine="langgraph"（plan/review 走本地模型），worker 不变。"""
+    from agentteam.domain.agent import Agent
+    team = make_team()
+    team.root = Agent(
+        name="leader", role="supervisor", system_prompt="你是主管",
+        engine="langgraph",
+        children=[
+            Agent(name="w1", role="worker", system_prompt="执行者1",
+                  tools=[], max_iterations=3),
+            Agent(name="w2", role="worker", system_prompt="执行者2",
+                  tools=["write_file"], max_iterations=3),
+        ],
+    )
+    return team
+
+
+def test_leader_langgraph_uses_local_llm(env_factory):
+    """混编正路径：plan/review 走本地 FakeLLM，worker 仍走 opencode 会话。"""
+    import json as _json
+
+    from langchain_core.messages import AIMessage
+
+    from tests.conftest import FakeLLM, FakeModelProvider
+
+    script = Script()
+    plan = {"steps": [{"worker": "w1", "instruction": "做A"}],
+            "execution_mode": "sequential"}
+    script.worker_steps["w1"] = [{"type": "final", "text": "A完成"}]
+    llm = FakeLLM()
+    llm.set_invoke_responses([
+        AIMessage(content=_json.dumps(plan)),
+        AIMessage(content="领导点评:验收通过"),
+    ])
+    team = _mixed_team()
+    env = env_factory(script, team,
+                      model_provider=FakeModelProvider({"qwen-max": llm}))
+    env.runner.invoke({}, {"configurable": {"thread_id": "run_test"}})
+
+    assert env.runner.get_state({}).next == ()  # 正常跑完
+    assert llm._inv_idx == 2  # plan + review 各一次
+    types = env.event_types()
+    assert "leader_plan" in types and "leader_review" in types
+    # worker 会话仍然发生在 opencode 侧（fake server 有 w1 会话）
+    assert env.server.sessions, "worker 会话应发生在 opencode 侧"
+
+
+def test_local_system_prompt_composition():
+    """本地通道 system prompt：角色设定 + 技能内容 + 控制面约束；空 spec → 空串。"""
+    spec = {"system_prompt": "你是主管", "skills_content": {"s1": "技能内容"}}
+    p = HarnessRunner._local_system_prompt(spec)
+    assert "你是主管" in p
+    assert "# Skill: s1" in p and "技能内容" in p
+    assert "不要尝试调用任何工具" in p
+    assert HarnessRunner._local_system_prompt({}) == ""
+
+
+def test_leader_langgraph_empty_reply_retried(env_factory):
+    """本地通道空回复重试一次（与 opencode 路径 parity）。"""
+    import json as _json
+
+    from langchain_core.messages import AIMessage
+
+    from tests.conftest import FakeLLM, FakeModelProvider
+
+    script = Script()
+    plan = {"steps": [{"worker": "w1", "instruction": "做A"}],
+            "execution_mode": "sequential"}
+    script.worker_steps["w1"] = [{"type": "final", "text": "A完成"}]
+    llm = FakeLLM()
+    llm.set_invoke_responses([
+        AIMessage(content=""),                      # 第一次空
+        AIMessage(content=_json.dumps(plan)),       # 重试成功
+        AIMessage(content="ok"),
+    ])
+    team = _mixed_team()
+    env = env_factory(script, team,
+                      model_provider=FakeModelProvider({"qwen-max": llm}))
+    env.runner.invoke({}, {"configurable": {"thread_id": "run_test"}})
+    assert env.runner.get_state({}).next == ()
+    assert llm._inv_idx == 3
+
+
+def test_leader_langgraph_without_provider_fails_fast(env_factory):
+    """显式 engine=langgraph 但工厂未注入 ModelProvider → fail-fast。"""
+    team = _mixed_team()
+    env = env_factory(Script(), team)
+    with pytest.raises(ValueError, match="ModelProvider"):
+        env.runner.invoke({}, {"configurable": {"thread_id": "run_test"}})
+
+
+def test_engine_default_stays_opencode(env_factory):
+    """engine 未设置 → 即使注入了 model_provider 也走 opencode（不误触本地通道）。"""
+    from tests.conftest import FakeLLM, FakeModelProvider
+
+    script = Script()
+    script.plan = {"steps": [{"worker": "w1", "instruction": "做A"}],
+                   "execution_mode": "sequential"}
+    script.worker_steps["w1"] = [{"type": "final", "text": "A完成"}]
+    # 空 invoke_responses：若误走本地通道会 IndexError 直接挂
+    provider = FakeModelProvider({"qwen-max": FakeLLM()})
+    env = env_factory(script, make_team(), model_provider=provider)
+    env.runner.invoke({}, {"configurable": {"thread_id": "run_test"}})
+    assert env.runner.get_state({}).next == ()
+
+
+def test_frame_engine_field_in_snapshot(env_factory):
+    """frame 携带 engine 字段且可快照/恢复（JSON 可序列化）。"""
+    team = _mixed_team()
+    env = env_factory(Script(), team)
+    st = env.runner._initial_state()
+    assert st["frames"][0]["engine"] == "langgraph"
+    env.runner._persist(st)  # JSON dump 不抛即通过
+    assert env.runner._load_state() == st

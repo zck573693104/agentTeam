@@ -24,6 +24,7 @@ from agentteam.config import get_settings
 from agentteam.domain.library import AgentLibrary
 from agentteam.logging_config import get_logger, init_logging
 from agentteam.models.provider import ModelProvider, ModelRef
+from agentteam.notify import NotificationService
 from agentteam.runtime.evolution import EvolutionEngine
 from agentteam.runtime.skills import SkillLoader
 from agentteam.storage.audit import AuditRepo
@@ -145,6 +146,7 @@ def create_app(
     run_manager = RunManager(
         run_repo, audit_repo, event_bus,
         checkpointer=saver, evolution_engine=evolution_engine,
+        notifier=NotificationService(run_repo, team_store),
     )
 
     # SP8: harness（opencode 套壳）引擎组装。
@@ -168,6 +170,7 @@ def create_app(
             library=lib,
             state_store=HarnessStateStore(conn, lock=conn_lock),
             prompt_timeout=float(_os.environ.get("AGENTTEAM_OC_TIMEOUT", "600")),
+            model_provider=mp,
         )
 
     app.include_router(teams_router(team_store))

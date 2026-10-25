@@ -106,6 +106,25 @@ class Settings(BaseSettings):
         description="凭证加密主密钥(32 字节 hex/base64);空则退化为明文模式(开发态兼容)",
     )
 
+    # IM 通知(P-A5 落地,对标 AgentTeams "IM 原生")
+    notify_webhook_url: str = Field(
+        default="",
+        description="全局默认 IM webhook 地址(飞书/企业微信/钉钉 bot);Team.webhook_url 优先于它",
+    )
+    notify_provider: str = Field(
+        default="generic",
+        description="webhook 消息格式:feishu / wecom / dingtalk / generic",
+    )
+    console_url: str = Field(
+        default="http://127.0.0.1:8040",
+        description="控制台外部可达地址,通知消息里的跳转链接以它为基准",
+    )
+    notify_timeout_seconds: float = Field(
+        default=5.0,
+        ge=0,
+        description="webhook POST 超时秒数",
+    )
+
 
 _settings_instance: Settings | None = None
 
