@@ -6,7 +6,8 @@ import {
   message,
 } from "antd";
 import { useFetch } from "../hooks/useFetch";
-import { api, type Approval, type Run } from "../api/client";
+import { api, type Approval, type PendingApproval, type Run } from "../api/client";
+import ApprovalPreview from "../components/ApprovalPreview";
 import StatusBadge from "../components/StatusBadge";
 import SSEViewer from "../components/SSEViewer";
 import { PageHeader } from "./Runs";
@@ -19,6 +20,11 @@ export default function RunDetail() {
   );
   const { data: approvals, refetch: refetchApprovals } = useFetch<Approval[]>(
     runId ? `/api/runs/${runId}/approvals` : null
+  );
+  // 审批 diff 预览:仅中断时拉取(pending-approval 端点)
+  const interruptedEarly = run?.status === "interrupted";
+  const { data: pendingApproval } = useFetch<PendingApproval>(
+    runId && interruptedEarly ? `/api/runs/${runId}/pending-approval` : null
   );
   const [sseKey, setSseKey] = useState(0);
   const [activeTab, setActiveTab] = useState<"trace" | "approvals">("trace");
@@ -118,7 +124,7 @@ export default function RunDetail() {
         }
       />
 
-      {/* 中断态警示条 */}
+      {/* 中断态警示条 + 待审批预览(diff/命令) */}
       {isInterrupted && (
         <div className="at-fade-in" style={{
           background: "rgba(255, 181, 71, 0.08)",
@@ -126,37 +132,48 @@ export default function RunDetail() {
           borderLeft: "3px solid var(--at-amber)",
           padding: "12px 18px",
           marginBottom: 16,
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
           fontFamily: "var(--at-font-mono)",
-          fontSize: 12,
         }}>
-          <div>
-            <span style={{ color: "var(--at-amber)", fontWeight: 600, letterSpacing: "0.1em" }}>
-              ⚠ APPROVAL REQUIRED
-            </span>
-            <span style={{ color: "var(--at-text-dim)", marginLeft: 12 }}>
-              该 Run 等待审批决策
-            </span>
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            fontSize: 12,
+          }}>
+            <div>
+              <span style={{ color: "var(--at-amber)", fontWeight: 600, letterSpacing: "0.1em" }}>
+                ⚠ APPROVAL REQUIRED
+              </span>
+              <span style={{ color: "var(--at-text-dim)", marginLeft: 12 }}>
+                {pendingApproval?.gate
+                  ? `${pendingApproval.gate.worker ?? ""} 调用了 ${pendingApproval.gate.permission ?? "工具"}，等待审批决策`
+                  : "该 Run 等待审批决策"}
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="at-btn-amber"
+                disabled={submitting}
+                onClick={() => handleApprove(true)}
+              >
+                ✓ Approve
+              </button>
+              <button
+                className="at-btn-amber"
+                style={{ borderColor: "var(--at-red)", color: "var(--at-red)" }}
+                disabled={submitting}
+                onClick={() => setRejectModalOpen(true)}
+              >
+                ✕ Reject
+              </button>
+            </div>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              className="at-btn-amber"
-              disabled={submitting}
-              onClick={() => handleApprove(true)}
-            >
-              ✓ Approve
-            </button>
-            <button
-              className="at-btn-amber"
-              style={{ borderColor: "var(--at-red)", color: "var(--at-red)" }}
-              disabled={submitting}
-              onClick={() => setRejectModalOpen(true)}
-            >
-              ✕ Reject
-            </button>
-          </div>
+          {pendingApproval?.preview && (
+            <ApprovalPreview
+              preview={pendingApproval.preview}
+              gate={pendingApproval.gate}
+            />
+          )}
         </div>
       )}
 
@@ -279,7 +296,7 @@ export default function RunDetail() {
                       key={a.id}
                       style={{
                         display: "grid",
-                        gridTemplateColumns: "100px 120px 1fr 140px 100px",
+                        gridTemplateColumns: "100px 120px 110px 1fr 140px 100px",
                         gap: 12,
                         padding: "12px 8px",
                         borderBottom: idx === (approvals || []).length - 1 ? "none" : "1px solid var(--at-border-soft)",
@@ -300,7 +317,13 @@ export default function RunDetail() {
                           {a.status?.toUpperCase() || "PENDING"}
                         </span>
                       </span>
-                      <span style={{ color: "var(--at-text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <span style={{ color: "var(--at-text)" }}>
+                        {a.tool_name ? `[${a.tool_name}]` : "—"}
+                      </span>
+                      <span
+                        style={{ color: "var(--at-text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        title={a.args_preview || undefined}
+                      >
                         {a.reason || "—"}
                       </span>
                       <span style={{ color: "var(--at-text-faint)" }}>

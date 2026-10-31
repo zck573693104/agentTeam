@@ -359,6 +359,9 @@ opencode 引擎相关环境变量（`AGENTTEAM_OPENCODE_URL` / `AGENTTEAM_OC_MOD
 | `AGENTTEAM_NOTIFY_PROVIDER` | `generic` | 通知消息格式：`feishu` / `wecom` / `dingtalk` / `generic` |
 | `AGENTTEAM_CONSOLE_URL` | `http://127.0.0.1:8040` | 控制台外部可达地址（通知里的跳转链接基准） |
 | `AGENTTEAM_NOTIFY_TIMEOUT_SECONDS` | `5.0` | webhook POST 超时秒数 |
+| `AGENTTEAM_MEMORY_ENABLED` | `true` | 跨 run 记忆层：run 终态后蒸馏团队记忆，并在后续 run 注入 leader 上下文 |
+| `AGENTTEAM_MEMORY_MAX_ENTRIES` | `8` | 每次注入 leader 上下文的最近记忆条数上限 |
+| `AGENTTEAM_MEMORY_INJECT_BUDGET_TOKENS` | `600` | 记忆注入的 token 预算（chars/4 估算）；`0` 禁用注入（蒸馏仍进行） |
 
 ### IM 通知（等待审批 / 完成 / 失败推送）
 
@@ -377,6 +380,29 @@ AGENTTEAM_NOTIFY_PROVIDER=feishu        // 消息体按飞书 bot 格式组装
 `notify_provider` 决定请求体格式（飞书 `msg_type:text`、企微/钉钉 `msgtype:markdown`、
 `generic` 输出自解释 JSON 可对接自建接收端/Matrix 桥）。通知失败只记日志，
 绝不影响 run 主流程；取消（cancelled）不打扰。
+
+### 跨 run 记忆层（团队经验蒸馏与注入）
+
+run 终态（completed / failed）后，`MemoryEngine` 在后台线程用 LLM 把本次执行
+trace 蒸馏成一条团队记忆（结果要点 / 踩坑 / 涉及文件），存入 SQLite `run_memories`
+表；下一次同团队 run 启动时，最近 N 条记忆按 token 预算裁剪后注入 leader 的
+plan 上下文（`<memory>` 块），团队因此「记得」上次做过什么、踩过什么坑。
+双引擎统一生效（langgraph 注入 leader_plan 消息，opencode 引擎前置拼进 plan 指令）。
+
+```jsonc
+// 全部可关：
+AGENTTEAM_MEMORY_ENABLED=0                    // 关闭蒸馏 + 注入
+AGENTTEAM_MEMORY_INJECT_BUDGET_TOKENS=0       // 只关注入（仍蒸馏，供 Teams 页查看）
+```
+
+记忆查看与清理：Web 控制台 Teams 页每张卡片的「Team Memory」折叠面板，或 API：
+
+```bash
+curl http://localhost:8000/api/teams/dev_lead/memories       # 列表（新→旧）
+curl -X DELETE http://localhost:8000/api/teams/dev_lead/memories/3   # 删除（记忆卫生）
+```
+
+蒸馏失败只记日志，绝不影响 run 主流程；记忆按 team 隔离，跨队不可见。
 
 ### 混编（确定性领导 + 自主工人）
 
@@ -432,6 +458,8 @@ with override_settings(max_run_workers=2) as s:
 | GET | `/api/teams/{name}` | 查看团队详情 |
 | PUT | `/api/teams/{name}` | 更新团队配置 |
 | DELETE | `/api/teams/{name}` | 删除团队 |
+| GET | `/api/teams/{name}/memories` | 团队跨 run 记忆列表（记忆层） |
+| DELETE | `/api/teams/{name}/memories/{memory_id}` | 删除一条团队记忆 |
 
 ### Runs 任务执行
 
@@ -444,6 +472,7 @@ with override_settings(max_run_workers=2) as s:
 | GET | `/api/runs/{run_id}/stream` | SSE 实时事件流 |
 | POST | `/api/runs/{run_id}/cancel` | 取消正在执行的 run |
 | GET | `/api/runs/{run_id}/approvals` | 列出 run 的所有审批节点 |
+| GET | `/api/runs/{run_id}/pending-approval` | 待审批预览（工具级审批返回 write_file diff / bash 命令等） |
 
 ### Library Agent 库
 
@@ -564,9 +593,9 @@ install_preset_to_api("enterprise_dev", api_url="http://localhost:8000")
 `web/` 目录提供 React + antd + Vite 构建的控制台：
 
 - **Dashboard** — 用量统计、趋势图、最近 run 列表
-- **Teams** — 团队 CRUD、配置编辑
+- **Teams** — 团队 CRUD、配置编辑、Team Memory 记忆面板（查看/删除团队记忆）
 - **Runs** — run 列表、状态过滤
-- **RunDetail** — run 详情、SSE 实时轨迹
+- **RunDetail** — run 详情、SSE 实时轨迹、审批 diff 预览（write_file 变更 diff / bash 命令在批准前直接可见）
 - **Skills** — Skill 列表、内容查看
 
 ### 开发

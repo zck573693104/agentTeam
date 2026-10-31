@@ -40,6 +40,24 @@ TOOL_GUARD_OFF = "off"
 VIOLATION_NOT_WHITELISTED = "not_whitelisted"
 VIOLATION_REQUIRES_APPROVAL = "requires_approval"
 
+# gate["input"] 中单个字符串参数的截断上限。gate 会随 run_engine_state
+# 快照持久化并在审批预览接口返回，不封顶会被大文件写入撑到 MB 级。
+_INPUT_VALUE_CAP = 64_000
+
+
+def _cap_tool_input(input_dict: dict[str, Any] | None) -> dict[str, Any]:
+    """复制工具入参并截断超长字符串值（审批 diff 预览用）。"""
+    capped: dict[str, Any] = {}
+    for key, value in (input_dict or {}).items():
+        if isinstance(value, str) and len(value) > _INPUT_VALUE_CAP:
+            capped[key] = (
+                value[:_INPUT_VALUE_CAP]
+                + f"...[truncated {len(value) - _INPUT_VALUE_CAP} chars]"
+            )
+        else:
+            capped[key] = value
+    return capped
+
 
 def tool_guard_mode() -> str:
     mode = (os.environ.get("AGENTTEAM_OC_TOOL_GUARD") or TOOL_GUARD_STRICT).strip()
@@ -78,9 +96,17 @@ class ApprovalBroker:
         decider: str = "api-user",
         reason: str | None = None,
     ) -> bool:
-        """落 approvals 审计 + 发 approval_decided，返回决策值。"""
+        """落 approvals 审计 + 发 approval_decided，返回决策值。
+
+        tool 级 gate 顺带落 tool_name/args_preview，历史 Approvals 列表
+        从此可展示「动了什么」（审批 diff 预览的历史侧）。
+        """
         if self._audit is not None:
-            approval_id = self._audit.add_approval(run_id)
+            approval_id = self._audit.add_approval(
+                run_id,
+                tool_name=gate.get("permission"),
+                args_preview=gate.get("args"),
+            )
             self._audit.decide_approval(
                 approval_id, "approved" if approved else "rejected", decider, reason
             )
@@ -175,9 +201,17 @@ class ApprovalBroker:
             "session_id": session_id,
             "message": f"Worker {worker_name} 调用了 {call.name}"
                        f"（{violation}），已中断该回合，是否放行？",
+            # 完整入参（截断后）：随 park 快照持久化，供待审批预览
+            # （write_file diff / bash 命令）与审批决策落账使用。
+            "input": _cap_tool_input(call.input),
         }
         if self._trace is not None:
-            self._trace.emit(run_id, "approval_requested", "system", gate)
+            # approval_requested 事件 payload 不带完整 input（SSE 回放/历史轻量），
+            # 预览统一走 run_engine_state 快照 + pending-approval 端点
+            self._trace.emit(
+                run_id, "approval_requested", "system",
+                {k: v for k, v in gate.items() if k != "input"},
+            )
         raise ApprovalInterrupt(gate)
 
     def auto_allow_tool_call(

@@ -7,7 +7,7 @@ from agentteam.domain.serializer import team_from_dict, team_to_dict
 from agentteam.api.store import TeamStore
 
 
-def teams_router(store: TeamStore) -> APIRouter:
+def teams_router(store: TeamStore, memory_repo=None) -> APIRouter:
     router = APIRouter(prefix="/api/teams", tags=["teams"])
 
     @router.get("")
@@ -57,5 +57,25 @@ def teams_router(store: TeamStore) -> APIRouter:
             )
         store.update(team)
         return {"name": team.name}
+
+    # —— 记忆层: 团队跨 run 记忆的查看与清理 ——
+
+    @router.get("/{name}/memories")
+    def list_memories(name: str, limit: int = 20):
+        if store.get(name) is None:
+            raise HTTPException(status_code=404, detail=f"Team '{name}' not found")
+        if memory_repo is None:
+            return []
+        return memory_repo.list_for_team(name, limit=max(1, min(limit, 200)))
+
+    @router.delete("/{name}/memories/{memory_id}")
+    def delete_memory(name: str, memory_id: int):
+        if memory_repo is None:
+            raise HTTPException(status_code=404, detail="Memory layer not configured")
+        if not memory_repo.delete_memory(name, memory_id):
+            raise HTTPException(
+                status_code=404, detail=f"Memory {memory_id} not found for team '{name}'"
+            )
+        return {"ok": True}
 
     return router

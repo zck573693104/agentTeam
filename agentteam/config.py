@@ -125,6 +125,22 @@ class Settings(BaseSettings):
         description="webhook POST 超时秒数",
     )
 
+    # 跨 run 记忆层(蒸馏 + 注入)
+    memory_enabled: bool = Field(
+        default=True,
+        description="启用跨 run 记忆层(run 终态后 LLM 蒸馏团队记忆,并在后续 run 注入 leader 上下文)",
+    )
+    memory_max_entries: int = Field(
+        default=8,
+        ge=1,
+        description="每次注入 leader 上下文的最近记忆条数上限",
+    )
+    memory_inject_budget_tokens: int = Field(
+        default=600,
+        ge=0,
+        description="记忆注入的 token 预算(chars/4 估算);0 禁用注入(蒸馏仍进行)",
+    )
+
 
 _settings_instance: Settings | None = None
 

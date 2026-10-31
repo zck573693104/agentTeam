@@ -106,11 +106,22 @@ class AuditRepo(BaseSqliteRepo):
         )
         return (row["m"] if row and row["m"] is not None else 0)
 
-    def add_approval(self, run_id: str) -> str:
+    def add_approval(
+        self,
+        run_id: str,
+        tool_name: str | None = None,
+        args_preview: str | None = None,
+    ) -> str:
+        """写入一条 pending 审批记录。
+
+        tool 级审批在决策落账时顺带记录 tool_name / args_preview（取自 gate），
+        供历史 Approvals 列表展示「动了什么」；step/worker 级 gate 两列为 None。
+        """
         approval_id = uuid.uuid4().hex
         self._execute(
-            "INSERT INTO approvals (id, run_id, status, requested_at) VALUES (?, ?, 'pending', ?)",
-            (approval_id, run_id, _now()),
+            "INSERT INTO approvals (id, run_id, status, requested_at, tool_name, args_preview) "
+            "VALUES (?, ?, 'pending', ?, ?, ?)",
+            (approval_id, run_id, _now(), tool_name, args_preview),
         )
         return approval_id
 

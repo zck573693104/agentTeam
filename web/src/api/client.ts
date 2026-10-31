@@ -76,6 +76,68 @@ export interface Approval {
   decided_at: string | null;
   decider: string | null;
   reason: string | null;
+  // 审批 diff 预览: tool 级审批决策落账时由 gate 带入(step/worker 级为 null)
+  tool_name?: string | null;
+  args_preview?: string | null;
+}
+
+// ---- 审批 diff 预览(GET /api/runs/{id}/pending-approval) ----
+
+/** write_file 类审批的预览:能读到现文件时给 unified diff,否则给新内容全文 */
+export interface WritePreview {
+  kind: "diff" | "content";
+  tool: string;
+  path: string;
+  diff?: string;
+  content?: string;
+  total_lines?: number;
+  truncated: boolean;
+}
+
+export interface CommandPreview {
+  kind: "command";
+  tool: string;
+  command: string;
+  truncated: boolean;
+}
+
+export interface PathPreview {
+  kind: "path";
+  tool: string;
+  path: string;
+  truncated: boolean;
+}
+
+export interface ArgsPreview {
+  kind: "args";
+  tool: string;
+  truncated: boolean;
+}
+
+export type ApprovalPreviewData =
+  | WritePreview
+  | CommandPreview
+  | PathPreview
+  | ArgsPreview;
+
+export interface PendingApproval {
+  pending: boolean;
+  /** park 快照里的审批门(tool 级含 input;无快照如 langgraph interrupt 为 null) */
+  gate: Record<string, unknown> | null;
+  preview: ApprovalPreviewData | null;
+}
+
+// ---- 记忆层(GET /api/teams/{name}/memories) ----
+
+export interface TeamMemory {
+  id: number;
+  team_name: string;
+  run_id: string;
+  outcome: string;
+  summary: string;
+  meta: { key_points?: string[]; files?: string[] } | null;
+  tokens: number;
+  created_at: string;
 }
 
 export interface AgentNode {

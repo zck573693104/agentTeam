@@ -10,6 +10,7 @@ from agentteam.api.events import BroadcastTraceWriter, EventBus
 from agentteam.config import get_settings
 from agentteam.logging_config import get_logger
 from agentteam.runtime.errors import RunCancelledError
+from agentteam.runtime.memory import build_memory_context
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.runs import RunRepo
 
@@ -45,6 +46,7 @@ class RunManager:
         checkpointer=None,
         max_run_workers: int = _MAX_RUN_WORKERS,
         evolution_engine=None,
+        memory_engine=None,
         notifier=None,
     ) -> None:
         self._run_repo = run_repo
@@ -53,6 +55,9 @@ class RunManager:
         self._saver = checkpointer
         # SP7b: 自进化引擎（run 终态后异步触发；None 静默跳过）
         self._evolution = evolution_engine
+        # 记忆层: run 终态后蒸馏团队记忆 + 新 run 启动时注入 leader 上下文
+        # （None 静默跳过,双引擎经此处统一生效）
+        self._memory = memory_engine
         # P-A5: IM 通知服务（等待审批/完成/失败推送 webhook；None 静默跳过）
         self._notifier = notifier
         self._graphs: dict[str, Any] = {}
@@ -510,6 +515,11 @@ class RunManager:
                 "run_id": run_id,
                 "pending_approval": None,
             }
+            # 记忆层: 团队历史记忆注入 leader 上下文（双引擎都消费 initial,
+            # langgraph 走 TeamState.memory_context,harness 前置拼进 plan 指令）
+            memory_context = self._build_memory_context(run_id)
+            if memory_context:
+                initial["memory_context"] = memory_context
             graph.invoke(initial, config)
             self._handle_invoke_result(run_id, graph, config)
         except BaseException as e:
@@ -571,6 +581,8 @@ class RunManager:
                 self._cleanup_run(run_id)
                 # SP7b: completed 后异步触发进化（失败静默隔离）
                 self._trigger_evolution_async(run_id)
+                # 记忆层: completed 后异步蒸馏团队记忆（失败静默隔离）
+                self._trigger_memory_async(run_id)
             else:
                 # status 非 running(被 cancel 为 cancelling),推进到 cancelled
                 self._finalize_cancellation(run_id)
@@ -644,6 +656,46 @@ class RunManager:
 
         threading.Thread(target=_safe_trigger, daemon=True).start()
 
+    def _trigger_memory_async(self, run_id: str) -> None:
+        """异步触发 MemoryEngine(记忆层):run 终态后蒸馏团队记忆。
+
+        与 _trigger_evolution_async 同模式：daemon thread、异常吞没、
+        memory_engine=None 时静默跳过（向后兼容）。
+        """
+        if self._memory is None:
+            return
+
+        def _safe_trigger() -> None:
+            try:
+                self._memory.trigger(run_id)
+            except Exception:
+                pass
+
+        threading.Thread(target=_safe_trigger, daemon=True).start()
+
+    def _build_memory_context(self, run_id: str) -> str:
+        """取团队最近记忆,格式化为 leader 注入块(记忆层)。
+
+        在构造初始 state 时调用（langgraph 与 harness 引擎都经过这里）。
+        失败静默返回空串——注入是增值能力,不阻塞 run 启动。
+        """
+        if self._memory is None:
+            return ""
+        try:
+            settings = get_settings()
+            if not settings.memory_enabled or settings.memory_inject_budget_tokens <= 0:
+                return ""
+            run = self._run_repo.get_run(run_id)
+            if run is None:
+                return ""
+            memories = self._memory.recent_memories(
+                run["team_name"], limit=settings.memory_max_entries
+            )
+            return build_memory_context(memories, settings.memory_inject_budget_tokens)
+        except Exception:
+            logger.exception("build memory context failed for run %s", run_id)
+            return ""
+
     def _handle_error(self, run_id: str, error: BaseException) -> None:
         """统一处理 run 执行中的异常,根据异常类型标记终态并发布事件。
 
@@ -702,3 +754,5 @@ class RunManager:
         # 触发顺序与 _handle_invoke_result 对称：cleanup 之后确保内存态已释放
         if not cancelled:
             self._trigger_evolution_async(run_id)
+            # 记忆层: failed 后同样蒸馏（踩坑记忆对后续 run 更有价值）
+            self._trigger_memory_async(run_id)

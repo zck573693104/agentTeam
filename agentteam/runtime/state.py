@@ -52,6 +52,9 @@ class TeamState(TypedDict):
     audit_events: Annotated[list, operator.add]
     run_id: str
     pending_approval: dict | None
+    # 记忆层: 团队历史记忆注入块(RunManager._build_memory_context 构造,
+    # leader_plan 读取;空则不设键)。经 state 传递而非节点闭包,编译缓存安全。
+    memory_context: str
     total_tokens: Annotated[int, operator.add]
     # 跨层执行路径追踪，如 "team:dev.ceo.cto"
     path: str

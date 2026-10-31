@@ -85,6 +85,7 @@ def runs_router(
     agent_library: AgentLibrary | None = None,
     skill_loader=None,
     harness_factory=None,
+    harness_state_store=None,
     quota_repo: QuotaRepo | None = None,
     admin_audit_repo: AdminAuditRepo | None = None,
     pep_repo=None,
@@ -281,6 +282,35 @@ def runs_router(
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
         rows = audit_repo.list_approvals(run_id, limit=limit, offset=offset)
         return [dict(r) for r in rows]
+
+    @router.get("/{run_id}/pending-approval")
+    def get_pending_approval(run_id: str):
+        """待审批预览(审批 diff 预览):中断 run 的 park gate + 结构化预览。
+
+        - run 非 interrupted → {"pending": false}
+        - harness 引擎有 park 快照 → gate(含截断后的完整入参) + preview
+          (write_file → unified diff / 新内容全文,bash → 命令,见
+          harness/approval_preview.py)
+        - 无快照(langgraph interrupt 等场景) → pending=true 但 gate/preview 为
+          null,前端回退到现有横幅
+        """
+        from agentteam.harness.approval_preview import build_approval_preview
+
+        run = run_repo.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+        if run["status"] != "interrupted":
+            return {"pending": False}
+        gate = None
+        if harness_state_store is not None:
+            snapshot = harness_state_store.load(run_id)
+            if snapshot:
+                gate = (snapshot.get("park") or {}).get("gate")
+        return {
+            "pending": True,
+            "gate": gate,
+            "preview": build_approval_preview(gate),
+        }
 
     @router.get("/{run_id}/stream")
     async def stream_run(run_id: str, request: Request):

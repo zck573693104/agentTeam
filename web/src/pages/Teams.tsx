@@ -9,6 +9,7 @@ import {
 import { useFetch } from "../hooks/useFetch";
 import { api, type AgentNode, type Team, type TeamRefNode } from "../api/client";
 import EvolutionHistory from "../components/EvolutionHistory";
+import TeamMemory from "../components/TeamMemory";
 import { PageHeader } from "./Runs";
 
 /** 收集 Agent 树中所有 worker 节点（叶子）。 */
@@ -295,6 +296,23 @@ export default function Teams() {
                   </div>
                 </details>
               )}
+
+              {/* 记忆层: 团队跨 run 记忆 */}
+              <details style={{ marginTop: 10 }}>
+                <summary style={{
+                  cursor: "pointer",
+                  fontFamily: "var(--at-font-mono)",
+                  fontSize: 10,
+                  color: "var(--at-amber)",
+                  letterSpacing: "0.12em",
+                  textTransform: "uppercase",
+                }}>
+                  ▾ Team Memory
+                </summary>
+                <div style={{ marginTop: 10 }}>
+                  <TeamMemory teamName={team.name} />
+                </div>
+              </details>
             </div>
           );
         })}

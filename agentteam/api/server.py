@@ -26,11 +26,13 @@ from agentteam.logging_config import get_logger, init_logging
 from agentteam.models.provider import ModelProvider, ModelRef
 from agentteam.notify import NotificationService
 from agentteam.runtime.evolution import EvolutionEngine
+from agentteam.runtime.memory import MemoryEngine
 from agentteam.runtime.skills import SkillLoader
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
 from agentteam.storage.evolution import EvolutionRepo
 from agentteam.storage.library import LibraryRepo
+from agentteam.storage.memory import MemoryRepo
 from agentteam.storage.runs import RunRepo
 from agentteam.storage.teams import TeamRepo
 from agentteam.tools.registry import ToolRegistry
@@ -143,9 +145,22 @@ def create_app(
         skills_dir=skills_dir,
     )
 
+    # 记忆层: run 终态后蒸馏团队记忆(MemoryEngine),新 run 启动时注入
+    # leader 上下文(RunManager._build_memory_context)。失败静默隔离,
+    # 不影响主流程;与 evolution 同一个收敛点,双引擎统一生效。
+    memory_repo = MemoryRepo(conn, lock=conn_lock)
+    memory_engine = MemoryEngine(
+        model_provider=mp,
+        memory_repo=memory_repo,
+        run_repo=run_repo,
+        audit_repo=audit_repo,
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+
     run_manager = RunManager(
         run_repo, audit_repo, event_bus,
         checkpointer=saver, evolution_engine=evolution_engine,
+        memory_engine=memory_engine,
         notifier=NotificationService(run_repo, team_store),
     )
 
@@ -160,25 +175,28 @@ def create_app(
     )
 
     harness_factory: HarnessEngineFactory | None = None
+    harness_state_store = None
     if harness_enabled:
         oc_cfg, oc_default_model = default_oc_config_from_env()
         oc_client = OpenCodeClient(oc_cfg)
+        harness_state_store = HarnessStateStore(conn, lock=conn_lock)
         harness_factory = HarnessEngineFactory(
             client=oc_client,
             default_model=oc_default_model,
             skill_loader=skill_loader,
             library=lib,
-            state_store=HarnessStateStore(conn, lock=conn_lock),
+            state_store=harness_state_store,
             prompt_timeout=float(_os.environ.get("AGENTTEAM_OC_TIMEOUT", "600")),
             model_provider=mp,
         )
 
-    app.include_router(teams_router(team_store))
+    app.include_router(teams_router(team_store, memory_repo))
     app.include_router(
         runs_router(
             run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,
             checkpointer=saver, agent_library=lib, skill_loader=skill_loader,
             harness_factory=harness_factory,
+            harness_state_store=harness_state_store,
         )
     )
     app.include_router(dashboard_router(run_repo, audit_repo))

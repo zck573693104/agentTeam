@@ -143,6 +143,11 @@ def make_leader_plan_node(
                 content=f"请把以下任务拆解成可执行的步骤计划，每步指派一个 worker：\n\n{task}"
             ),
         ]
+        # 记忆层: 团队历史记忆置于 system_prompt 之后、task 之前
+        # (与 init_worker 的 skill 注入位置同风格)
+        memory_context = state.get("memory_context") or ""
+        if memory_context:
+            messages.insert(1, SystemMessage(content=memory_context))
         structured = llm.with_structured_output(Plan)
         plan_obj = structured.invoke(messages)
         execution_mode = plan_obj.execution_mode

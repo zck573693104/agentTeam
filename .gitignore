@@ -29,7 +29,12 @@ htmlcov/
 # Project data (SQLite db, logs)
 data/*.db
 data/*.db-journal
+data/*.db-shm
+data/*.db-wal
 logs/
+
+# 会话期临时脚本/输出(.tmp-xxx.py/.tmp-xxx.json 等)
+.tmp-*
 
 # OS
 .DS_Store

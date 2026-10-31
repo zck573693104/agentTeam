@@ -190,6 +190,31 @@ CREATE TABLE IF NOT EXISTS run_engine_state (
 );
 """
 
+# 跨 run 记忆层:run 终态后由 MemoryEngine 蒸馏的团队级经验条目
+_MIGRATION_V12 = """
+CREATE TABLE IF NOT EXISTS run_memories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_name  TEXT NOT NULL,
+    run_id     TEXT NOT NULL,
+    outcome    TEXT NOT NULL,
+    summary    TEXT NOT NULL,
+    meta       TEXT,
+    tokens     INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_run_memories_team ON run_memories(team_name, id);
+"""
+
+# 审批预览:approvals 表补工具名与参数摘要(决策时由 gate 落入,
+# 使历史 Approvals 列表可展示「动了什么」)
+def _migration_v13_alters(conn: sqlite3.Connection) -> None:
+    for column in ("tool_name", "args_preview"):
+        try:
+            conn.execute(f"ALTER TABLE approvals ADD COLUMN {column} TEXT")
+        except sqlite3.OperationalError:
+            pass  # 幂等:列已存在(旧库重跑迁移)
+
+
 MIGRATIONS: list[tuple[int, str, object]] = [
     (1, "base tables (runs/run_events/approvals/teams/library_agents)", _MIGRATION_V1),
     (2, "evolution_history table (SP7b)", _MIGRATION_V2),
@@ -198,6 +223,8 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (8, "ALTER runs/run_events for v6 columns (triggered_by_user/trace_id/parent_span_id/chain)", _migration_v6_alters),
     (10, "ALTER run_events.state_bucket for v8 (Graph Engineering P5)", _migration_v8_alters),
     (11, "run_engine_state table (SP8 harness snapshot, 对等 SqliteSaver checkpoint)", _MIGRATION_V11),
+    (12, "run_memories table (跨 run 记忆层)", _MIGRATION_V12),
+    (13, "ALTER approvals for v12 columns (tool_name/args_preview, 审批 diff 预览)", _migration_v13_alters),
 ]
 
 

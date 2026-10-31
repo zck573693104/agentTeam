@@ -186,6 +186,9 @@ class HarnessRunner:
         self._broker = ApprovalBroker(trace_writer, audit_repo)
         self._mapper = EventMapper(run_id, trace_writer, client)
         self._state: dict[str, Any] | None = None
+        # 记忆层: RunManager 构造的团队历史记忆块,invoke 时从 initial 读入,
+        # 前置拼进 root frame 的 plan 指令(translator 零改动)
+        self._memory_context = ""
 
     # ================= graph 协议 =================
 
@@ -204,6 +207,10 @@ class HarnessRunner:
                     )
                 self._apply_resume(self._state, resume)
             else:
+                self._memory_context = (
+                    initial.get("memory_context") or ""
+                    if isinstance(initial, dict) else ""
+                )
                 self._state = self._initial_state()
                 self._persist(self._state)
             self._drive(self._state)
@@ -239,11 +246,15 @@ class HarnessRunner:
                 f"Team '{self._team.name}': harness engine requires "
                 f"a supervisor root with children"
             )
+        instruction = self._task
+        if self._memory_context:
+            # 记忆层: 历史记忆置于 plan 指令最前,leader 拆解时可见团队过往经验
+            instruction = f"{self._memory_context}\n\n---\n\n{self._task}"
         return {
             "task": self._task,
             "worker_outputs": {},
             "total_tokens": 0,
-            "frames": [self._frame_from_agent(root, self._task)],
+            "frames": [self._frame_from_agent(root, instruction)],
             "park": None,
             # session_id → 人工已放行的工具名（事后审批不重复 park 同一工具）
             "approved_tools": {},
