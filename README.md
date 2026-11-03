@@ -364,6 +364,7 @@ opencode 引擎相关环境变量（`AGENTTEAM_OPENCODE_URL` / `AGENTTEAM_OC_MOD
 | `AGENTTEAM_MEMORY_ENABLED` | `true` | 跨 run 记忆层：run 终态后蒸馏团队记忆，并在后续 run 注入 leader 上下文 |
 | `AGENTTEAM_MEMORY_MAX_ENTRIES` | `8` | 每次注入 leader 上下文的最近记忆条数上限 |
 | `AGENTTEAM_MEMORY_INJECT_BUDGET_TOKENS` | `600` | 记忆注入的 token 预算（chars/4 估算）；`0` 禁用注入（蒸馏仍进行） |
+| `AGENTTEAM_TRIGGERS_SLOW_PATH_ENABLED` | `true` | 事件驱动 Trigger 允许 Slow Path（LLM 语义判定）；`false` 只走 Fast Path 确定性条件 |
 
 ### IM 通知（等待审批 / 完成 / 失败推送）
 
@@ -402,6 +403,49 @@ AGENTTEAM_NOTIFY_PROVIDER=feishu        // 消息体按飞书 bot 格式组装
   `project_management` 预设已内置此声明）；
 - worker 若必须向人提问，回复末尾用单独一行 `QUESTION: <问题>`（一次最多一个），
   轨迹中表现为 `worker_attention` 事件。
+
+### 事件驱动 Trigger（SP12c：入站 webhook + 两级过滤）
+
+对标 DeepSeek Super-agent 的事件驱动设计（第 3 节 Trigger）：Agent 不再只能等人
+`POST /api/runs`，任何能发 JSON 的系统（GitHub webhook、IM bot、cron、自建巡检）
+都可以成为事件源。规则存 SQLite（`trigger_rules` 表），命中后走与人工提交
+**完全相同**的 run 流程（配额/审计/引擎选择），`triggered_by_user` 记
+`trigger:<规则名>` 以区分人工触发。
+
+**两级过滤**（Fast/Slow Path，规则里二选一或组合）：
+
+- **Fast Path（确定性条件）**：`conditions` 全部命中才行动，程序求值零模型成本。
+  算子 `eq/ne/contains/in/exists/regex`，字段是事件的点路径（`payload.title`、
+  `headers.x-github-event`…）。
+- **Slow Path（LLM 语义判定）**：开了 `slow_path` 的规则，conditions 退化为
+  「候选预过滤」，候选事件交给 LLM 按 `slow_path.prompt` 的自然语言策略判定
+  是否行动（拿不准倾向不行动）。无模型 Key / 全局关闭 / 判定异常时静默跳过。
+
+```bash
+# 1. 注册规则:GitHub push 事件 → 自动派活
+curl -X POST http://localhost:8000/api/triggers -H "Content-Type: application/json" -d '{
+  "name": "gh_push", "team_name": "dev_lead", "secret": "s3cret",
+  "conditions": [{"field": "headers.x-github-event", "op": "eq", "value": "push"}],
+  "task_template": "仓库有新 push（{payload.head_commit.message}），请 review 该次提交并修复发现的问题"
+}'
+
+# 2. 外部系统 POST 事件(命中即自动创建 run)
+curl -X POST http://localhost:8000/api/triggers/webhook/gh_push \
+  -H "Content-Type: application/json" -H "X-Trigger-Secret: s3cret" \
+  -d '{"head_commit": {"message": "fix: 登录崩溃"}}'
+# → {"matched": true, "run_id": "...", "via": "fast_path"}
+
+# 3. Slow Path 规则:群里讨论 bug → LLM 判定是否值得派活(静默复现式策略)
+curl -X POST http://localhost:8000/api/triggers -H "Content-Type: application/json" -d '{
+  "name": "im_triage", "team_name": "dev_lead",
+  "slow_path": {"enabled": true, "prompt": "只在消息明确报告了可复现缺陷且无人认领时行动"},
+  "task_template": "群里反馈：{payload.text}。请先复现，确认后修复并汇报"
+}'
+```
+
+规则管理：`GET /api/triggers`（secret 打码）/ `GET|PUT|DELETE /api/triggers/{name}`。
+命中但提交失败（配额 429 / 底座 502-503）会透传对应状态码；任务文本从事件字段
+提取时单值截断 2000 字符、总长 4000 字符，防外部事件撑爆 prompt。
 
 ### 跨 run 记忆层（团队经验蒸馏与注入）
 
@@ -495,6 +539,17 @@ with override_settings(max_run_workers=2) as s:
 | POST | `/api/runs/{run_id}/cancel` | 取消正在执行的 run |
 | GET | `/api/runs/{run_id}/approvals` | 列出 run 的所有审批节点 |
 | GET | `/api/runs/{run_id}/pending-approval` | 待审批预览（工具级审批返回 write_file diff / bash 命令等） |
+
+### Triggers 事件驱动（SP12c）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/triggers` | 注册触发规则（name 唯一；条件/任务模板/Slow Path 策略） |
+| GET | `/api/triggers` | 列出规则（可 `?team_name=` 过滤；secret 打码） |
+| GET | `/api/triggers/{name}` | 查看规则详情 |
+| PUT | `/api/triggers/{name}` | 更新规则 |
+| DELETE | `/api/triggers/{name}` | 删除规则 |
+| POST | `/api/triggers/webhook/{name}` | **入站事件端点**：两级过滤命中即自动创建 run（配了 secret 需带 `X-Trigger-Secret` 头） |
 
 ### Library Agent 库
 

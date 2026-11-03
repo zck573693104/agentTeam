@@ -217,6 +217,41 @@ def create_app(
             notify_outbox_repo=notify_outbox_repo,
         )
     )
+
+    # SP12c: 事件驱动 Trigger(对标 DeepSeek Super-agent 事件驱动设计)。
+    # 入站 webhook 经 Fast/Slow Path 两级过滤命中规则后,走与人工提交
+    # 完全相同的 submit_run 流程(配额/审计/引擎选择),triggered_by_user
+    # 记 "trigger:<规则名>"。Slow Path 需要模型 Key,无 Key 静默跳过。
+    from agentteam.api.routes.runs import RunSubmitError, submit_run
+    from agentteam.api.routes.triggers import triggers_router
+    from agentteam.storage.triggers import TriggerRepo
+    from agentteam.triggers import TriggerEngine
+
+    trigger_repo = TriggerRepo(conn, lock=conn_lock)
+
+    def _trigger_run_starter(team_name: str, task: str, triggered_by_user: str) -> str:
+        team = team_store.get(team_name)
+        if team is None:
+            raise RunSubmitError(404, f"Team '{team_name}' not found")
+        return submit_run(
+            team=team, task=task, triggered_by_user=triggered_by_user,
+            team_store=team_store,
+            run_repo=run_repo, audit_repo=audit_repo, event_bus=event_bus,
+            run_manager=run_manager,
+            model_provider=mp, tool_registry=tr,
+            checkpointer=saver, agent_library=lib,
+            skill_loader=skill_loader, harness_factory=harness_factory,
+        )
+
+    trigger_engine = TriggerEngine(
+        trigger_repo=trigger_repo,
+        model_provider=mp,
+        run_starter=_trigger_run_starter,
+        audit_repo=audit_repo,
+        default_model=ModelRef("qwen", "qwen-max"),
+    )
+    app.include_router(triggers_router(trigger_repo, trigger_engine, team_store))
+
     app.include_router(dashboard_router(run_repo, audit_repo))
     app.include_router(library_router(lib))
     app.include_router(skills_router(skill_loader))
