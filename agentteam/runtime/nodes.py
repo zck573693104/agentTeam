@@ -9,6 +9,11 @@ from pydantic import BaseModel, Field
 
 from agentteam.domain.agent import Agent
 from agentteam.logging_config import get_logger
+from agentteam.runtime.discipline import (
+    LEADER_DISCIPLINE,
+    WORKER_DISCIPLINE,
+    extract_question,
+)
 from agentteam.runtime.errors import RunCancelledError
 from agentteam.runtime.state import TeamState
 from agentteam.runtime.trace import TraceWriter
@@ -76,14 +81,22 @@ class WorkerOutput(BaseModel):
     failure: str | None = Field(
         default=None, description="失败原因(None=成功)"
     )
+    # SP12a(dsh-superagent 借鉴):结构化提问,一次最多一个;
+    # 只有必须人拍板的阻塞才允许非空,routine 问题 worker 自查
+    question: str | None = Field(
+        default=None,
+        description="需要人/领导拍板的唯一结构化问题(None=无需提问)",
+    )
 
     @classmethod
     def from_text(cls, text: str) -> "WorkerOutput":
         """从纯文本构造(向后兼容:无结构化信息时,整体作为 artifact)。
 
         旧 worker 只返回 str,Leader review 时仍能工作。
+        SP12a:额外提取 QUESTION 标记行为结构化 question(artifact 保持
+        完整原文,避免破坏对 artifact 的 contains 类验收断言)。
         """
-        return cls(artifact=text)
+        return cls(artifact=text, question=extract_question(text))
 
     def to_dict(self) -> dict:
         """序列化为 dict(存入 worker_outputs 字段时用)。"""
@@ -92,18 +105,23 @@ class WorkerOutput(BaseModel):
             "evidence": list(self.evidence),
             "state_delta": dict(self.state_delta),
             "failure": self.failure,
+            "question": self.question,
         }
 
     @classmethod
     def from_dict(cls, d: dict | str) -> "WorkerOutput":
         """从 dict 或 str 反序列化(str 视为纯 artifact,向后兼容)。"""
         if isinstance(d, str):
-            return cls(artifact=d)
+            return cls(artifact=d, question=extract_question(d))
         return cls(
             artifact=d.get("artifact", ""),
             evidence=list(d.get("evidence", [])),
             state_delta=dict(d.get("state_delta", {})),
             failure=d.get("failure"),
+            # 旧快照无 question 字段 → None;str 形态则从文本提取
+            question=d.get("question")
+            if "question" in d
+            else extract_question(d.get("artifact", "")),
         )
 
 
@@ -139,6 +157,9 @@ def make_leader_plan_node(
         task = state["task"]
         messages = [
             SystemMessage(content=agent.system_prompt),
+            # SP12a:分派纪律置于 system_prompt 之后(spec §3.1);
+            # 记忆层再 insert(1) 会排在纪律之前,纪律最贴近任务
+            SystemMessage(content=LEADER_DISCIPLINE),
             HumanMessage(
                 content=f"请把以下任务拆解成可执行的步骤计划，每步指派一个 worker：\n\n{task}"
             ),
@@ -268,6 +289,9 @@ def make_init_worker(
                 for name, content in skills.items()
             )
             react_messages.append(SystemMessage(content=skill_text))
+        # SP12a:汇报纪律(QUESTION 协议)置于任务指令之前、skills 之后,
+        # 与 harness worker_system_prompt 的注入位置对齐
+        react_messages.append(SystemMessage(content=WORKER_DISCIPLINE))
         react_messages.append(HumanMessage(content=instruction))
 
         return {
@@ -354,8 +378,9 @@ def make_finalize(
 
         # Graph Engineering P2: 结构化 worker 产出
         # 当前 worker 仅产出文本,作为 artifact;evidence/state_delta/failure 留空
-        # 后续可让 worker 主动产出结构化 evidence(如测试结果)
-        worker_output = WorkerOutput(artifact=final_answer)
+        # SP12a:从文本提取 QUESTION 标记行为结构化 question(一次最多一个)
+        worker_output = WorkerOutput(artifact=final_answer,
+                                     question=extract_question(final_answer))
 
         if trace_writer:
             trace_writer.emit(
@@ -689,6 +714,15 @@ def make_leader_review_node(
             raw_output = outputs.get(recent_worker, "")
             worker_output = WorkerOutput.from_dict(raw_output)
 
+            # SP12a:worker 结构化提问 → worker_attention 事件(原样透传,
+            # leader 不代答不改写;无 trace_writer 时静默跳过)
+            if worker_output.question and trace_writer:
+                trace_writer.emit(
+                    run_id, "worker_attention", agent.name,
+                    {"worker": recent_worker, "question": worker_output.question},
+                    state_bucket="artifact",
+                )
+
             # P2: failure 非空直接判不合格,跳过 LLM 调用节省 token
             if worker_output.failure:
                 review_text = f"[自动验收] Worker {recent_worker} 报告失败: {worker_output.failure}"
@@ -759,6 +793,8 @@ def make_leader_review_node(
             verdict: ReviewVerdict = verdict_llm.invoke(
                 [
                     SystemMessage(content=agent.system_prompt),
+                    # SP12a:验收纪律(只做判断,不代写实现方案)
+                    SystemMessage(content=LEADER_DISCIPLINE),
                     HumanMessage(
                         content=(
                             f"Worker {recent_worker} 完成了步骤，"
@@ -801,6 +837,14 @@ def make_leader_review_node(
         outputs = state.get("worker_outputs", {})
         raw_output = outputs.get(worker_name, "")
         worker_output = WorkerOutput.from_dict(raw_output)
+
+        # SP12a:worker 结构化提问 → worker_attention 事件(同 dag 路径)
+        if worker_output.question and trace_writer:
+            trace_writer.emit(
+                run_id, "worker_attention", agent.name,
+                {"worker": worker_name, "question": worker_output.question},
+                state_bucket="artifact",
+            )
 
         # P2: failure 非空直接判不合格
         if worker_output.failure:
@@ -874,6 +918,8 @@ def make_leader_review_node(
         verdict: ReviewVerdict = verdict_llm.invoke(
             [
                 SystemMessage(content=agent.system_prompt),
+                # SP12a:验收纪律(只做判断,不代写实现方案)
+                SystemMessage(content=LEADER_DISCIPLINE),
                 HumanMessage(
                     content=(
                         f"Worker {worker_name} 完成了步骤 {current}，"

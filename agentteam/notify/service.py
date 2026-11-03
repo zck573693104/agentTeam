@@ -10,7 +10,9 @@
 """
 from __future__ import annotations
 
+import json
 import threading
+import time
 from typing import Any
 
 import requests
@@ -24,6 +26,19 @@ logger = get_logger("api.notify")
 # 正常完成、失败。取消不打扰(用户自己操作的,无需回执)。
 _NOTIFY_EVENTS = frozenset({"run_interrupted", "run_end", "error"})
 
+# SP12a 消息预算(dsh-superagent 注意力经济学:每条通知都是注意力成本):
+# 正文行数与字符数上限,超出截断。截断尾行不带链接假设(通知可能无 link)。
+_MAX_LINES = 8
+_MAX_CHARS = 300
+_TRUNCATE_TAIL = "\n…(内容已截断,详见控制台)"
+
+
+def _clip(text: str) -> str:
+    """正文超长截断:保留前 _MAX_CHARS 字符并追加截断尾行。"""
+    if len(text) <= _MAX_CHARS:
+        return text
+    return text[:_MAX_CHARS] + _TRUNCATE_TAIL
+
 
 def format_payload(
     provider: str, title: str, lines: list[str], link: str | None = None,
@@ -32,10 +47,13 @@ def format_payload(
 
     纯函数(便于单测)。text 统一为纯文本 + 链接尾行;markdown 类 provider
     (wecom/dingtalk)用同一文本,bot 端按纯文本渲染也完全可读。
+    SP12a:行数截到 _MAX_LINES,全文截到 _MAX_CHARS(消息预算)。
     """
+    lines = list(lines[:_MAX_LINES])
     body_text = "\n".join([title, *lines])
     if link:
         body_text += f"\n👉 {link}"
+    body_text = _clip(body_text)
     p = (provider or "generic").strip().lower()
     if p == "feishu":
         # 飞书自定义 bot:https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot
@@ -47,8 +65,9 @@ def format_payload(
         # 钉钉自定义机器人
         return {"msgtype": "markdown",
                 "markdown": {"title": title, "text": body_text}}
-    # 通用 JSON 端点(自建接收端/网关/Matrix 桥):字段自解释
-    return {"title": title, "text": "\n".join(lines), "link": link}
+    # 通用 JSON 端点(自建接收端/网关/Matrix 桥):字段自解释。
+    # 注意:text 不含 link(结构化字段单列,向后兼容),仅做消息预算截断
+    return {"title": title, "text": _clip("\n".join(lines)), "link": link}
 
 
 def _mask_url(url: str) -> str:
@@ -57,7 +76,12 @@ def _mask_url(url: str) -> str:
 
 
 class NotificationService:
-    """run 事件 → IM webhook。由 RunManager 在关键生命周期点调用。"""
+    """run 事件 → IM webhook。由 RunManager 在关键生命周期点调用。
+
+    SP12b:注入 outbox(NotifyOutboxRepo)后走「先存后发」——本类只落库,
+    HTTP 发送交给 OutboxWorker(退避重试/同 run 串行/重启续发);
+    未注入 outbox 时保持旧行为(daemon 线程直发,异常全吞),零依赖可单测。
+    """
 
     def __init__(
         self,
@@ -65,10 +89,12 @@ class NotificationService:
         team_store=None,
         *,
         settings: Settings | None = None,
+        outbox=None,
     ) -> None:
         self._run_repo = run_repo
         self._team_store = team_store
         self._settings = settings or get_settings()
+        self._outbox = outbox
 
     # ---------------- 事件入口(RunManager 调用) ----------------
 
@@ -77,8 +103,9 @@ class NotificationService:
     ) -> None:
         """处理一个 run 事件;不满足通知条件时静默返回。
 
-        本方法在 run 执行线程上同步执行,只做"决策 + 组装 + 投递线程"，
-        真正的 HTTP POST 在 daemon 线程(见 _send),不阻塞 run 状态推进。
+        outbox 路径(SP12b):组装请求体后 enqueue 落库即返回,发送在
+        OutboxWorker 后台线程——run 事件路径上只做决策 + 组装 + 落库。
+        旧路径:daemon 线程直发(不阻塞 run 状态推进)。
         """
         if event_type not in _NOTIFY_EVENTS:
             return
@@ -93,6 +120,12 @@ class NotificationService:
         base = self._settings.console_url.rstrip("/")
         link = f"{base}/runs/{run_id}"
         body = format_payload(self._settings.notify_provider, title, lines, link)
+        if self._outbox is not None:
+            self._outbox.enqueue(
+                run_id, event_type, url,
+                json.dumps(body, ensure_ascii=False), time.time(),
+            )
+            return
         threading.Thread(
             target=self._send, args=(url, body),
             name=f"agentteam-notify-{run_id[:8]}", daemon=True,

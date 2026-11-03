@@ -82,8 +82,12 @@ def create_app(
     # 导致 audit event 丢失或 SQLite 写入半截。
     @asynccontextmanager
     async def lifespan(app):
+        # SP12b: outbox worker 随服务起停;stop 在 run_manager 之后,
+        # 让终态通知有机会 enqueue 并在 shutdown 等待窗口内发出
+        outbox_worker.start()
         yield
         run_manager.shutdown(wait=True)
+        outbox_worker.stop()
         conn.close()
 
     app = FastAPI(title="AgentTeam", lifespan=lifespan)
@@ -157,11 +161,24 @@ def create_app(
         default_model=ModelRef("qwen", "qwen-max"),
     )
 
+    # SP12b: IM 通知 outbox(先存后发/退避重试/同 run 串行/重启续发)。
+    # NotificationService 只落库,OutboxWorker 后台消费;lifespan 负责起停。
+    from agentteam.notify.outbox import OutboxWorker
+    from agentteam.storage.notify import NotifyOutboxRepo
+
+    notify_outbox_repo = NotifyOutboxRepo(conn, lock=conn_lock)
+    outbox_worker = OutboxWorker(
+        notify_outbox_repo,
+        retry_max=settings.notify_retry_max,
+        backoff_base=settings.notify_backoff_base,
+        send_timeout=settings.notify_timeout_seconds,
+    )
+
     run_manager = RunManager(
         run_repo, audit_repo, event_bus,
         checkpointer=saver, evolution_engine=evolution_engine,
         memory_engine=memory_engine,
-        notifier=NotificationService(run_repo, team_store),
+        notifier=NotificationService(run_repo, team_store, outbox=notify_outbox_repo),
     )
 
     # SP8: harness（opencode 套壳）引擎组装。
@@ -197,6 +214,7 @@ def create_app(
             checkpointer=saver, agent_library=lib, skill_loader=skill_loader,
             harness_factory=harness_factory,
             harness_state_store=harness_state_store,
+            notify_outbox_repo=notify_outbox_repo,
         )
     )
     app.include_router(dashboard_router(run_repo, audit_repo))

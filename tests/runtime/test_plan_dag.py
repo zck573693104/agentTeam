@@ -374,10 +374,10 @@ def test_init_worker_dag_mode_finds_ready_step(fake_llm):
 
     # 找到 step_b 作为 current_step_id
     assert result["current_step_id"] == "step_b"
-    # react_messages 用 step_b 的 instruction
-    assert len(result["react_messages"]) == 2
-    assert isinstance(result["react_messages"][1], HumanMessage)
-    assert result["react_messages"][1].content == "do B"
+    # react_messages 用 step_b 的 instruction(SP12a:纪律消息居中,共 3 条)
+    assert len(result["react_messages"]) == 3
+    assert isinstance(result["react_messages"][2], HumanMessage)
+    assert result["react_messages"][2].content == "do B"
 
 
 def test_init_worker_sequential_mode_uses_current_step(fake_llm):
@@ -398,7 +398,8 @@ def test_init_worker_sequential_mode_uses_current_step(fake_llm):
     result = node(state)
     # sequential 模式不设 current_step_id(或设为空)
     assert result.get("current_step_id", "") == ""
-    assert result["react_messages"][1].content == "写 hello"
+    # SP12a:react_messages = system + 汇报纪律 + task
+    assert result["react_messages"][2].content == "写 hello"
 
 
 def test_finalize_dag_mode_returns_completed_steps(fake_llm):

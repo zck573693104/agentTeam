@@ -124,6 +124,17 @@ class Settings(BaseSettings):
         ge=0,
         description="webhook POST 超时秒数",
     )
+    # SP12b: outbox 重试策略(先存后发,退避重试,连续失败置 dropped 可查回执)
+    notify_retry_max: int = Field(
+        default=5,
+        ge=1,
+        description="单条通知连续失败多少次后置 dropped(保留 last_error 审计)",
+    )
+    notify_backoff_base: float = Field(
+        default=5.0,
+        ge=0,
+        description="重试退避起点秒数,指数翻倍,上限 300s",
+    )
 
     # 跨 run 记忆层(蒸馏 + 注入)
     memory_enabled: bool = Field(
@@ -139,6 +150,12 @@ class Settings(BaseSettings):
         default=600,
         ge=0,
         description="记忆注入的 token 预算(chars/4 估算);0 禁用注入(蒸馏仍进行)",
+    )
+
+    # SP12c: 事件驱动 Trigger(Slow Path 开关)
+    triggers_slow_path_enabled: bool = Field(
+        default=True,
+        description="允许触发规则走 Slow Path(LLM 语义判定);False 时只走 Fast Path 确定性条件",
     )
 
 

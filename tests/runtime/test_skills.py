@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from agentteam.domain.agent import Agent
+from agentteam.runtime.discipline import WORKER_DISCIPLINE
 from agentteam.runtime.skills import SkillLoader
 
 
@@ -110,7 +111,7 @@ def _make_agent_with_skills(skills=None):
 
 
 def test_make_init_worker_no_skills_unchanged_structure():
-    """无 skills 时:react_messages 结构与改造前一致(2 条)。"""
+    """无 skills 时:react_messages 为 3 条(SP12a 后纪律常驻注入)。"""
     agent = _make_agent_with_skills(skills=[])
     init = make_init_worker(agent)
     state = {
@@ -121,10 +122,11 @@ def test_make_init_worker_no_skills_unchanged_structure():
     }
     result = init(state)
     msgs = result["react_messages"]
-    # [SystemMessage(system_prompt), HumanMessage(instruction)]
-    assert len(msgs) == 2
+    # [SystemMessage(system_prompt), SystemMessage(汇报纪律), HumanMessage(instruction)]
+    assert len(msgs) == 3
     assert msgs[0].content == "You are a coder."
-    assert msgs[1].content == "do x"
+    assert WORKER_DISCIPLINE in msgs[1].content
+    assert msgs[2].content == "do x"
 
 
 def test_make_init_worker_single_skill_inserted_at_index_1():
@@ -140,14 +142,15 @@ def test_make_init_worker_single_skill_inserted_at_index_1():
     }
     result = init(state)
     msgs = result["react_messages"]
-    # [SystemMessage(system_prompt), SystemMessage(skill), HumanMessage(task)]
-    assert len(msgs) == 3
+    # [SystemMessage(system_prompt), SystemMessage(skill), SystemMessage(纪律), HumanMessage(task)]
+    assert len(msgs) == 4
     assert msgs[0].content == "You are a coder."
     assert "code_review" in msgs[1].content
     assert "先检查安全问题。" in msgs[1].content
     assert msgs[1].content.startswith('<skill name="code_review">')
     assert msgs[1].content.endswith("</skill>")
-    assert msgs[2].content == "写代码"
+    assert WORKER_DISCIPLINE in msgs[2].content
+    assert msgs[3].content == "写代码"
 
 
 def test_make_init_worker_multiple_skills_joined_in_one_system_message():
@@ -163,7 +166,8 @@ def test_make_init_worker_multiple_skills_joined_in_one_system_message():
     }
     result = init(state)
     msgs = result["react_messages"]
-    assert len(msgs) == 3
+    # SP12a:[system, skills, 纪律, task] 共 4 条
+    assert len(msgs) == 4
     skill_msg = msgs[1].content
     assert '<skill name="code_review">' in skill_msg
     assert "审查代码" in skill_msg
@@ -174,7 +178,7 @@ def test_make_init_worker_multiple_skills_joined_in_one_system_message():
 
 
 def test_make_init_worker_skills_none_treated_as_empty():
-    """skills=None 等价于空:不注入。"""
+    """skills=None 等价于空:不注入 skill(但 SP12a 纪律仍常驻,共 3 条)。"""
     agent = _make_agent_with_skills(skills=[])
     init = make_init_worker(agent, skills=None)
     state = {
@@ -184,7 +188,7 @@ def test_make_init_worker_skills_none_treated_as_empty():
         "execution_mode": "sequential",
     }
     result = init(state)
-    assert len(result["react_messages"]) == 2
+    assert len(result["react_messages"]) == 3
 
 
 def test_make_init_worker_dag_mode_with_skills():
@@ -202,7 +206,8 @@ def test_make_init_worker_dag_mode_with_skills():
     }
     result = init(state)
     msgs = result["react_messages"]
-    assert len(msgs) == 3
+    # SP12a:[system, skill, 纪律, task] 共 4 条
+    assert len(msgs) == 4
     assert msgs[1].content.startswith('<skill name="plan_skill">')
     assert result["current_step_id"] == "step1"
 
@@ -386,11 +391,12 @@ def test_e2e_compiler_with_skills_injects_into_react_messages(tmp_path):
     init_fn = make_init_worker(agent, skills=skills)
     result = init_fn(state)
     msgs = result["react_messages"]
-    assert len(msgs) == 3
+    # SP12a:[system, skill, 纪律, task] 共 4 条
+    assert len(msgs) == 4
     assert msgs[0].content == "You are a coder."
     assert '<skill name="code_review">' in msgs[1].content
     assert "E2E 审查 skill 内容" in msgs[1].content
-    assert msgs[2].content == "审查 PR #123"
+    assert msgs[3].content == "审查 PR #123"
 
 
 def test_e2e_backward_compat_no_skills_loader():

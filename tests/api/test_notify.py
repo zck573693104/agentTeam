@@ -53,6 +53,34 @@ def test_format_payload_four_providers():
     assert format_payload("weird", "T", ["a"], None)["title"] == "T"
 
 
+# ================= 消息预算(SP12a) =================
+
+
+def test_format_payload_truncates_long_body():
+    """正文超 300 字符截断并带尾行。"""
+    long_line = "x" * 400
+    f = format_payload("feishu", "T", [long_line], None)
+    text = f["content"]["text"]
+    assert len(text) < 400  # 300 + 尾行
+    assert text.endswith("(内容已截断,详见控制台)")
+
+
+def test_format_payload_truncates_line_count():
+    """行数超 8 行截断。"""
+    lines = [f"line{i}" for i in range(20)]
+    f = format_payload("feishu", "T", lines, None)
+    text = f["content"]["text"]
+    assert "line7" in text
+    assert "line8" not in text
+
+
+def test_format_payload_short_body_untouched():
+    """短正文原样保留,无尾行。"""
+    f = format_payload("feishu", "T", ["a", "b"], None)
+    assert f["content"]["text"] == "T\na\nb"
+    assert "内容已截断" not in f["content"]["text"]
+
+
 # ================= NotificationService =================
 
 

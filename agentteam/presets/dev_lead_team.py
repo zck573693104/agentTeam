@@ -63,6 +63,9 @@ TEAM: Team = Team(
     skills=["task_breakdown"],
     root=Agent(
         name="tech_lead", role="supervisor",
+        # SP12a:leader 走进程内确定性通道(plan/review 用轻量快模型),
+        # worker 跟随团队引擎(opencode 底座)——「领导轻量、工人强力」混编
+        engine="langgraph",
         system_prompt=(
             "你是技术主管,直接管理程序员下属(coder/tester):\n"
             "1. 拆解任务时为每一步写**可验证的验收标准**(acceptance_criteria,"

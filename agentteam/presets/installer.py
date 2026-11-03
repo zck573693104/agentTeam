@@ -11,6 +11,18 @@ from agentteam.domain.serializer import team_to_dict
 from agentteam.presets import get_preset
 
 
+def _strip_agent_engine(agent_dict: dict | None) -> None:
+    """递归清掉序列化 agent 树里的 engine 字段(SP12a installer 语义)。
+
+    engine=None 表示跟随 Team.engine;显式 --engine 安装时以用户选择为准。
+    """
+    if not isinstance(agent_dict, dict):
+        return
+    agent_dict.pop("engine", None)
+    for child in agent_dict.get("children") or []:
+        _strip_agent_engine(child)
+
+
 def install_preset_to_api(
     name: str,
     api: str = "http://localhost:8000",
@@ -42,6 +54,10 @@ def install_preset_to_api(
         d = team_to_dict(team)
         if engine:
             d["engine"] = engine
+            # SP12a:显式指定引擎时清掉 agent 级 engine 覆盖(如预设 leader
+            # 声明的 langgraph 混编)——显式选择优先,零 Key opencode 安装
+            # 不被 leader 的进程内模型通道破坏
+            _strip_agent_engine(d.get("root"))
         return d
 
     def _post_or_put(url_post: str, url_put: str | None, payload: dict, label: str) -> None:

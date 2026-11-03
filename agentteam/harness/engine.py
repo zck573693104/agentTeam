@@ -46,6 +46,7 @@ from agentteam.harness import translator
 from agentteam.harness.approval import ApprovalBroker, ApprovalInterrupt
 from agentteam.harness.events import EventMapper
 from agentteam.harness.opencode_client import OpenCodeClient, OpenCodeError
+from agentteam.runtime.discipline import extract_question
 from agentteam.runtime.trace import TraceWriter
 
 # Plan JSON schema：v2 没有结构化输出通道（format=json_schema 是 v1 能力），
@@ -830,6 +831,16 @@ class HarnessRunner:
                         self._run_id, "worker_end", info["worker"],
                         {"answer_length": len(info["answer"])},
                     )
+                    # SP12a:worker 结构化提问 → worker_attention 事件
+                    # (与 langgraph finalize/leader_review 的透传对齐,
+                    #  原样透传不代答;一次最多一个)
+                    question = extract_question(info["answer"])
+                    if question:
+                        self._trace.emit(
+                            self._run_id, "worker_attention", info["worker"],
+                            {"worker": info["worker"], "question": question},
+                            state_bucket="artifact",
+                        )
                 remaining.pop(key)
             if not remaining:
                 return

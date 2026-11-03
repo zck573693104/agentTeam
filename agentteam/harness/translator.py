@@ -152,10 +152,17 @@ def worker_tool_directive(tools: list[str] | None) -> str:
 
 
 def worker_system_prompt(spec: dict) -> str:
-    """worker 的最终角色设定 = 基础 prompt + skills + 工具白名单指令。"""
+    """worker 的最终角色设定 = 基础 prompt + skills + 工具白名单指令。
+
+    SP12a:末尾附加汇报纪律(QUESTION 协议)——与 langgraph init_worker
+    的注入对齐,worker 每轮最多一个结构化问题。
+    """
+    from agentteam.runtime.discipline import WORKER_DISCIPLINE
+
     base = system_prompt_for_spec(spec)
     directive = worker_tool_directive(spec.get("tools") or [])
-    return f"{base}\n\n{directive}" if base else directive
+    core = f"{base}\n\n{directive}" if base else directive
+    return f"{core}\n\n{WORKER_DISCIPLINE}"
 
 
 def worker_user_prompt(spec: dict, instruction: str) -> str:
@@ -185,10 +192,18 @@ def step_brief(step: dict) -> str:
 
 
 def supervisor_user_prompt(spec: dict, text: str) -> str:
-    """控制平面一次性 prompt（plan/review）：角色设定 + 禁用工具 + 任务。"""
+    """控制平面一次性 prompt（plan/review）：角色设定 + 禁用工具 + 任务。
+
+    SP12a:plan/review 共用的分派/验收纪律经此单一漏斗注入（langgraph
+    在 leader_plan/leader_review 分别注入同一份文本）。
+    """
+    from agentteam.runtime.discipline import LEADER_DISCIPLINE
+
     base = system_prompt_for_spec(spec)
     directive = worker_tool_directive([])
-    return prompt_with_system(f"{base}\n\n{directive}".strip(), text)
+    return prompt_with_system(
+        f"{base}\n\n{directive}\n\n{LEADER_DISCIPLINE}".strip(), text
+    )
 
 
 def approved_resume_prompt(tool: str, worker: str | None = None) -> str:

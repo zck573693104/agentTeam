@@ -41,6 +41,8 @@ TEAM: Team = Team(
     ],
     root=Agent(
         name="project_manager", role="supervisor",
+        # SP12a:leader 走进程内确定性通道(轻量快模型),worker 跟随团队引擎
+        engine="langgraph",
         system_prompt=(
             "你是项目经理(PM),派活给任务拆解师(task_breaker)、"
             "进度跟踪师(progress_tracker)和风险评估师(risk_assessor),"

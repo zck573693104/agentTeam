@@ -43,6 +43,167 @@ def run_to_dict(row) -> dict:
     return d
 
 
+class RunSubmitError(ValueError):
+    """run 提交的业务性失败（配额/底座不可用/编译失败）。
+
+    status_code 直接映射 HTTP 状态；HTTP 路由转 HTTPException，
+    Trigger 引擎等非 HTTP 调用方捕获后自行决定处置。
+    """
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+def submit_run(
+    *,
+    team,
+    task: str,
+    triggered_by_user: str | None,
+    team_store: TeamStore,
+    run_repo: RunRepo,
+    audit_repo: AuditRepo,
+    event_bus: EventBus,
+    run_manager: RunManager,
+    model_provider: ModelProvider,
+    tool_registry: ToolRegistry,
+    checkpointer,
+    agent_library: AgentLibrary,
+    skill_loader=None,
+    harness_factory=None,
+    quota_repo=None,
+    admin_audit_repo=None,
+) -> str:
+    """提交一个 run（create_run 的核心逻辑，供 HTTP 路由与 Trigger 引擎复用）。
+
+    SP12 对标 DeepSeek Super-agent 事件驱动：入站 Trigger 命中规则后
+    走同一条提交流程（配额/审计/引擎选择），triggered_by_user 记
+    "trigger:<规则名>" 以区分人工触发。
+    业务失败统一抛 RunSubmitError（配额 429 / harness 不可用 502-503 /
+    编译失败 400）；调用前 team 必须已存在且非 None。
+    """
+    # P-A4 Token 配额校验(对标阿里云 AgentTeams "成本可控"):
+    # 启动 run 前检查当前周期已用 token,超额返回 429。
+    # 无配额配置或 token_limit=0 视为不限,放行。
+    if quota_repo is not None:
+        check = quota_repo.check_quota(team.name)
+        if not check["allowed"]:
+            if admin_audit_repo is not None:
+                admin_audit_repo.add_event(
+                    "run_rejected_by_quota", "team", team.name,
+                    actor=triggered_by_user or "api-user",
+                    payload={
+                        "used": check["used"],
+                        "limit": check["limit"],
+                        "period": check["period"],
+                        "task": task[:200],
+                    },
+                )
+            raise RunSubmitError(
+                429,
+                (
+                    f"Token quota exceeded for team '{team.name}': "
+                    f"used {check['used']} / limit {check['limit']} "
+                    f"(period {check['period']}s)"
+                ),
+            )
+
+    run_id = run_repo.create_run(team.name, task, triggered_by_user=triggered_by_user)
+
+    # P-B2 审计:记录触发者(HTTP 用户 或 trigger:<规则名>)
+    if admin_audit_repo is not None and triggered_by_user:
+        admin_audit_repo.add_event(
+            "run_triggered", "run", run_id,
+            actor=triggered_by_user,
+            payload={"team_name": team.name, "task": task[:200]},
+        )
+    trace_writer = BroadcastTraceWriter(audit_repo, event_bus)
+    config = {"configurable": {"thread_id": run_id}}
+
+    # SP8: harness（opencode 套壳）引擎路径
+    if _team_engine(team) == "opencode":
+        if harness_factory is None:
+            run_repo.end_run(run_id, "failed")
+            eid = audit_repo.add_event(
+                run_id, "error", "system",
+                {"error": "harness engine not configured (opencode disabled)"},
+            )
+            event_bus.publish(run_id, {
+                "id": eid, "event_type": "error", "run_id": run_id,
+                "payload": {"error": "harness engine not configured"},
+            })
+            raise RunSubmitError(503, "harness engine not configured (opencode disabled)")
+        try:
+            from agentteam.harness.runner import ensure_backend
+            compat = ensure_backend(
+                harness_factory.client, team, harness_factory._default_model
+            )
+        except Exception as e:
+            run_repo.end_run(run_id, "failed")
+            eid = audit_repo.add_event(
+                run_id, "error", "system", {"error": str(e)}
+            )
+            event_bus.publish(run_id, {
+                "id": eid, "event_type": "error", "run_id": run_id,
+                "payload": {"error": str(e)},
+            })
+            raise RunSubmitError(502, f"opencode backend unavailable: {e}")
+        # 版本兼容性 warn 记入 run 审计（error 已在 ensure_backend 内抛出）
+        if compat.get("level") == "warn":
+            eid = audit_repo.add_event(
+                run_id, "backend_warning", "system",
+                {"version": compat.get("version"), "message": compat.get("message")},
+            )
+            event_bus.publish(run_id, {
+                "id": eid, "event_type": "backend_warning", "run_id": run_id,
+                "payload": {"version": compat.get("version"),
+                            "message": compat.get("message")},
+            })
+        # 注册所有已知 Team（TeamRef 解析 parity）
+        harness_factory.set_teams(team_store.list_all())
+        runner = harness_factory.create(
+            run_id, team, task, trace_writer, audit_repo,
+            run_manager=run_manager,
+        )
+        run_manager.start_run(run_id, runner, config, task)
+        return run_id
+
+    import agentteam.runtime.graph as _graph  # 局部导入,避免 api→runtime 顶层循环
+    compiler = _graph.TeamCompiler(
+        model_provider, tool_registry, library=agent_library,
+        run_manager=run_manager, skill_loader=skill_loader,
+    )
+    # 注册所有已知 Team 到 compiler._team_registry，使 TeamRef 可解析
+    for t in team_store.list_all():
+        compiler.register_team(t)
+    try:
+        graph = compiler.compile(
+            team,
+            checkpointer=checkpointer,
+            trace_writer=trace_writer,
+            audit_repo=audit_repo,
+        )
+    except Exception as e:
+        run_repo.end_run(run_id, "failed")
+        eid = audit_repo.add_event(
+            run_id, "error", "system", {"error": str(e)}
+        )
+        event_bus.publish(
+            run_id,
+            {
+                "id": eid,
+                "event_type": "error",
+                "run_id": run_id,
+                "payload": {"error": str(e)},
+            },
+        )
+        raise RunSubmitError(400, f"Compile failed: {e}")
+
+    run_manager.start_run(run_id, graph, config, task)
+    return run_id
+
+
 def _build_compiler(
     model_provider: ModelProvider,
     tool_registry: ToolRegistry,
@@ -90,6 +251,7 @@ def runs_router(
     admin_audit_repo: AdminAuditRepo | None = None,
     pep_repo=None,
     delivery_repo=None,
+    notify_outbox_repo=None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/runs", tags=["runs"])
     lib = agent_library or AgentLibrary()
@@ -105,130 +267,19 @@ def runs_router(
         user = getattr(request.state, "user", None)
         triggered_by_user = user["username"] if user else None
 
-        # P-A4 Token 配额校验(对标阿里云 AgentTeams "成本可控"):
-        # 启动 run 前检查当前周期已用 token,超额返回 429。
-        # 无配额配置或 token_limit=0 视为不限,放行。
-        if quota_repo is not None:
-            check = quota_repo.check_quota(team.name)
-            if not check["allowed"]:
-                if admin_audit_repo is not None:
-                    admin_audit_repo.add_event(
-                        "run_rejected_by_quota", "team", team.name,
-                        actor=triggered_by_user or "api-user",
-                        payload={
-                            "used": check["used"],
-                            "limit": check["limit"],
-                            "period": check["period"],
-                            "task": req.task[:200],
-                        },
-                    )
-                raise HTTPException(
-                    status_code=429,
-                    detail=(
-                        f"Token quota exceeded for team '{team.name}': "
-                        f"used {check['used']} / limit {check['limit']} "
-                        f"(period {check['period']}s)"
-                    ),
-                )
-
-        run_id = run_repo.create_run(team.name, req.task, triggered_by_user=triggered_by_user)
-
-        # P-B2 审计:记录"用户 X 触发了 run Y on team Z"
-        if admin_audit_repo is not None and triggered_by_user:
-            admin_audit_repo.add_event(
-                "run_triggered", "run", run_id,
-                actor=triggered_by_user,
-                payload={"team_name": team.name, "task": req.task[:200]},
-            )
-        trace_writer = BroadcastTraceWriter(audit_repo, event_bus)
-        config = {"configurable": {"thread_id": run_id}}
-
-        # SP8: harness（opencode 套壳）引擎路径
-        if _team_engine(team) == "opencode":
-            if harness_factory is None:
-                run_repo.end_run(run_id, "failed")
-                eid = audit_repo.add_event(
-                    run_id, "error", "system",
-                    {"error": "harness engine not configured (opencode disabled)"},
-                )
-                event_bus.publish(run_id, {
-                    "id": eid, "event_type": "error", "run_id": run_id,
-                    "payload": {"error": "harness engine not configured"},
-                })
-                raise HTTPException(
-                    status_code=503,
-                    detail="harness engine not configured (opencode disabled)",
-                )
-            try:
-                from agentteam.harness.runner import ensure_backend
-                compat = ensure_backend(
-                    harness_factory.client, team, harness_factory._default_model
-                )
-            except Exception as e:
-                run_repo.end_run(run_id, "failed")
-                eid = audit_repo.add_event(
-                    run_id, "error", "system", {"error": str(e)}
-                )
-                event_bus.publish(run_id, {
-                    "id": eid, "event_type": "error", "run_id": run_id,
-                    "payload": {"error": str(e)},
-                })
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"opencode backend unavailable: {e}",
-                )
-            # 版本兼容性 warn 记入 run 审计（error 已在 ensure_backend 内抛出）
-            if compat.get("level") == "warn":
-                eid = audit_repo.add_event(
-                    run_id, "backend_warning", "system",
-                    {"version": compat.get("version"), "message": compat.get("message")},
-                )
-                event_bus.publish(run_id, {
-                    "id": eid, "event_type": "backend_warning", "run_id": run_id,
-                    "payload": {"version": compat.get("version"),
-                                "message": compat.get("message")},
-                })
-            # 注册所有已知 Team（TeamRef 解析 parity）
-            harness_factory.set_teams(team_store.list_all())
-            runner = harness_factory.create(
-                run_id, team, req.task, trace_writer, audit_repo,
-                run_manager=run_manager,
-            )
-            run_manager.start_run(run_id, runner, config, req.task)
-            return {"run_id": run_id}
-
-        import agentteam.runtime.graph as _graph  # 局部导入,避免 api→runtime 顶层循环
-        compiler = _graph.TeamCompiler(
-            model_provider, tool_registry, library=lib,
-            run_manager=run_manager, skill_loader=skill_loader,
-        )
-        # 注册所有已知 Team 到 compiler._team_registry，使 TeamRef 可解析
-        for t in team_store.list_all():
-            compiler.register_team(t)
         try:
-            graph = compiler.compile(
-                team,
-                checkpointer=checkpointer,
-                trace_writer=trace_writer,
-                audit_repo=audit_repo,
+            run_id = submit_run(
+                team=team, task=req.task, triggered_by_user=triggered_by_user,
+                team_store=team_store,
+                run_repo=run_repo, audit_repo=audit_repo, event_bus=event_bus,
+                run_manager=run_manager,
+                model_provider=model_provider, tool_registry=tool_registry,
+                checkpointer=checkpointer, agent_library=lib,
+                skill_loader=skill_loader, harness_factory=harness_factory,
+                quota_repo=quota_repo, admin_audit_repo=admin_audit_repo,
             )
-        except Exception as e:
-            run_repo.end_run(run_id, "failed")
-            eid = audit_repo.add_event(
-                run_id, "error", "system", {"error": str(e)}
-            )
-            event_bus.publish(
-                run_id,
-                {
-                    "id": eid,
-                    "event_type": "error",
-                    "run_id": run_id,
-                    "payload": {"error": str(e)},
-                },
-            )
-            raise HTTPException(status_code=400, detail=f"Compile failed: {e}")
-
-        run_manager.start_run(run_id, graph, config, req.task)
+        except RunSubmitError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail)
         return {"run_id": run_id}
 
     @router.get("")
@@ -311,6 +362,33 @@ def runs_router(
             "gate": gate,
             "preview": build_approval_preview(gate),
         }
+
+    @router.get("/{run_id}/notifications")
+    def list_notifications(run_id: str):
+        """IM 通知回执(SP12b outbox):该 run 的通知发送状态。
+
+        每行含 event/status(pending|sent|dropped)/attempts/last_error/时间;
+        dropped = 连续失败达上限(保留 last_error 供排查),pending 会在
+        OutboxWorker 重试或服务重启后续发。
+        """
+        run = run_repo.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+        if notify_outbox_repo is None:
+            return []
+        rows = notify_outbox_repo.list_for_run(run_id)
+        return [
+            {
+                "id": r["id"],
+                "event": r["event"],
+                "status": r["status"],
+                "attempts": r["attempts"],
+                "last_error": r["last_error"],
+                "created_at": r["created_at"],
+                "sent_at": r["sent_at"],
+            }
+            for r in rows
+        ]
 
     @router.get("/{run_id}/stream")
     async def stream_run(run_id: str, request: Request):

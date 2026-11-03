@@ -215,6 +215,45 @@ def _migration_v13_alters(conn: sqlite3.Connection) -> None:
             pass  # 幂等:列已存在(旧库重跑迁移)
 
 
+# SP12b: IM 通知 outbox(先存后发/退避重试/同 run 串行/回执可查)。
+# 借鉴 dsh-superagent Outbox 语义:消息先落库再发送,进程重启后 pending 行
+# 自动续发;status: pending → sent / dropped(连续失败达上限,保留 last_error)。
+# next_retry_at/created_at/sent_at 用 REAL(unix 秒),比较与退避计算都在 SQL 外做。
+_MIGRATION_V14 = """
+CREATE TABLE IF NOT EXISTS notify_outbox (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL,
+    event         TEXT NOT NULL,
+    url           TEXT NOT NULL,
+    payload_json  TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    last_error    TEXT,
+    next_retry_at REAL NOT NULL DEFAULT 0,
+    created_at    REAL NOT NULL,
+    sent_at       REAL
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_due ON notify_outbox(status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_run ON notify_outbox(run_id, id);
+"""
+
+# SP12c: 事件驱动 Trigger 规则表(对标 DeepSeek Super-agent 的 Trigger 两级过滤)。
+# 规则的可变结构(conditions/task/slow_path/enabled)整体存 rules JSON;
+# name 唯一,secret 明文存储(与 auth_api_keys 同级别的本地信任域)但 API 返回时打码。
+_MIGRATION_V15 = """
+CREATE TABLE IF NOT EXISTS trigger_rules (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    team_name  TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT 'webhook',
+    secret     TEXT,
+    rules      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_trigger_rules_team ON trigger_rules(team_name, id);
+"""
+
+
 MIGRATIONS: list[tuple[int, str, object]] = [
     (1, "base tables (runs/run_events/approvals/teams/library_agents)", _MIGRATION_V1),
     (2, "evolution_history table (SP7b)", _MIGRATION_V2),
@@ -225,6 +264,8 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (11, "run_engine_state table (SP8 harness snapshot, 对等 SqliteSaver checkpoint)", _MIGRATION_V11),
     (12, "run_memories table (跨 run 记忆层)", _MIGRATION_V12),
     (13, "ALTER approvals for v12 columns (tool_name/args_preview, 审批 diff 预览)", _migration_v13_alters),
+    (14, "notify_outbox table (SP12b IM 通知 outbox:先存后发/退避重试/回执)", _MIGRATION_V14),
+    (15, "trigger_rules table (SP12c 事件驱动 Trigger:Fast/Slow Path 两级过滤)", _MIGRATION_V15),
 ]
 
 

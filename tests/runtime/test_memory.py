@@ -15,6 +15,7 @@ from agentteam.runtime.memory import (
     _parse_memory_response,
     build_memory_context,
 )
+from agentteam.runtime.discipline import LEADER_DISCIPLINE
 from agentteam.runtime.nodes import Plan, PlanStep, make_leader_plan_node
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
@@ -203,9 +204,12 @@ def test_leader_plan_injects_memory_between_system_and_task():
         "run_id": "r1", "task": "实现 X",
         "memory_context": "<memory>历史记忆</memory>",
     })
+    # SP12a:消息顺序 system → memory(insert(1))→ 分派纪律 → 任务;
+    # 纪律最贴近任务(spec §3.1),记忆层语义不变
     kinds = [type(m).__name__ for m in spy.captured]
-    assert kinds == ["SystemMessage", "SystemMessage", "HumanMessage"]
+    assert kinds == ["SystemMessage", "SystemMessage", "SystemMessage", "HumanMessage"]
     assert spy.captured[1].content == "<memory>历史记忆</memory>"
+    assert spy.captured[2].content == LEADER_DISCIPLINE
 
 
 def test_leader_plan_without_memory_has_no_extra_message():
@@ -216,7 +220,9 @@ def test_leader_plan_without_memory_has_no_extra_message():
     spy = _SpyLLM(llm)
     node = make_leader_plan_node(SimpleNamespace(name="leader", system_prompt="s"), spy)
     node({"run_id": "r1", "task": "t"})
-    assert len(spy.captured) == 2  # system + task
+    # SP12a 后无 memory 也是 3 条:system + 分派纪律 + task(纪律常驻注入)
+    assert len(spy.captured) == 3
+    assert spy.captured[1].content == LEADER_DISCIPLINE
 
 
 # ---------- harness 引擎注入 ----------

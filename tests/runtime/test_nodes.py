@@ -3,6 +3,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from agentteam.domain.team import Leader
 from agentteam.domain.worker import Worker
 from agentteam.models.provider import ModelRef
+from agentteam.runtime.discipline import WORKER_DISCIPLINE
 from agentteam.runtime.nodes import (
     Plan,
     PlanStep,
@@ -405,11 +406,14 @@ def test_init_worker_sets_react_messages(fake_llm):
         "current_step": 0,
     }
     result = node(state)
-    assert len(result["react_messages"]) == 2
+    # SP12a:汇报纪律(QUESTION 协议)常驻注入,位于 system_prompt 与任务之间
+    assert len(result["react_messages"]) == 3
     assert isinstance(result["react_messages"][0], SystemMessage)
-    assert isinstance(result["react_messages"][1], HumanMessage)
+    assert isinstance(result["react_messages"][1], SystemMessage)
+    assert isinstance(result["react_messages"][2], HumanMessage)
     assert result["react_messages"][0].content == "你是代码工程师"
-    assert result["react_messages"][1].content == "写 hello"
+    assert result["react_messages"][1].content == WORKER_DISCIPLINE
+    assert result["react_messages"][2].content == "写 hello"
 
 
 def test_init_worker_resets_iteration_and_tool_calls(fake_llm):

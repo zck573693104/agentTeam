@@ -359,6 +359,8 @@ opencode 引擎相关环境变量（`AGENTTEAM_OPENCODE_URL` / `AGENTTEAM_OC_MOD
 | `AGENTTEAM_NOTIFY_PROVIDER` | `generic` | 通知消息格式：`feishu` / `wecom` / `dingtalk` / `generic` |
 | `AGENTTEAM_CONSOLE_URL` | `http://127.0.0.1:8040` | 控制台外部可达地址（通知里的跳转链接基准） |
 | `AGENTTEAM_NOTIFY_TIMEOUT_SECONDS` | `5.0` | webhook POST 超时秒数 |
+| `AGENTTEAM_NOTIFY_RETRY_MAX` | `5` | 单条通知连续失败多少次后置 dropped（回执保留 last_error 可查） |
+| `AGENTTEAM_NOTIFY_BACKOFF_BASE` | `5.0` | 通知重试退避起点秒数（指数翻倍，上限 300s） |
 | `AGENTTEAM_MEMORY_ENABLED` | `true` | 跨 run 记忆层：run 终态后蒸馏团队记忆，并在后续 run 注入 leader 上下文 |
 | `AGENTTEAM_MEMORY_MAX_ENTRIES` | `8` | 每次注入 leader 上下文的最近记忆条数上限 |
 | `AGENTTEAM_MEMORY_INJECT_BUDGET_TOKENS` | `600` | 记忆注入的 token 预算（chars/4 估算）；`0` 禁用注入（蒸馏仍进行） |
@@ -380,6 +382,26 @@ AGENTTEAM_NOTIFY_PROVIDER=feishu        // 消息体按飞书 bot 格式组装
 `notify_provider` 决定请求体格式（飞书 `msg_type:text`、企微/钉钉 `msgtype:markdown`、
 `generic` 输出自解释 JSON 可对接自建接收端/Matrix 桥）。通知失败只记日志，
 绝不影响 run 主流程；取消（cancelled）不打扰。
+
+**可靠出站（SP12b outbox）**：通知先落库（`notify_outbox` 表）再由后台 worker
+发送——进程重启后未发通知自动续发；失败按 5s 起步指数退避（上限 300s），
+连续 `RETRY_MAX` 次失败置 dropped（不丢审计信息）；同一 run 的多条通知按
+入队序串行发送（「等待审批」必先于结果到达）。发送回执可查：
+`GET /api/runs/{id}/notifications`（status/attempts/last_error/时间）。
+正文超过 300 字符或 8 行自动截断（每条通知都是团队的注意力成本）。
+
+### 模型分层指南（SP12a：领导轻量、工人强力）
+
+借鉴 DeepSeek Super-agent 的 Router/Worker 分层：**leader 是协调者不是执行者**
+（分派纪律写死在 prompt：指令只含目标+验收标准、≤30 词、不写实现方案），
+因此 leader 用便宜快的小模型即可；worker 干重活，配最强模型：
+
+- **langgraph 引擎**：直接给 leader/worker 配不同 `model`；
+- **opencode 引擎（混编）**：leader 声明 `engine: "langgraph"` → plan/review 走
+  进程内轻量通道，worker 留在 opencode 底座（`dev_lead` / `enterprise_dev` /
+  `project_management` 预设已内置此声明）；
+- worker 若必须向人提问，回复末尾用单独一行 `QUESTION: <问题>`（一次最多一个），
+  轨迹中表现为 `worker_attention` 事件。
 
 ### 跨 run 记忆层（团队经验蒸馏与注入）
 
