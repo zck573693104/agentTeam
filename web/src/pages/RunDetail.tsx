@@ -6,7 +6,7 @@ import {
   message,
 } from "antd";
 import { useFetch } from "../hooks/useFetch";
-import { api, type Approval, type PendingApproval, type Run } from "../api/client";
+import { api, type Approval, type FollowUpResponse, type PendingApproval, type Run } from "../api/client";
 import ApprovalPreview from "../components/ApprovalPreview";
 import StatusBadge from "../components/StatusBadge";
 import SSEViewer from "../components/SSEViewer";
@@ -31,6 +31,11 @@ export default function RunDetail() {
   const [rejectModalOpen, setRejectModalOpen] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // SP12d 绿色通道:人对运行中/等待中 worker 的追问直通(只入不回)
+  const [followUpTarget, setFollowUpTarget] = useState<"worker" | "leader">("worker");
+  const [followUpWorker, setFollowUpWorker] = useState("");
+  const [followUpText, setFollowUpText] = useState("");
+  const [followUpSending, setFollowUpSending] = useState(false);
 
   if (loading && (!run || run.run_id !== runId)) {
     return (
@@ -78,6 +83,41 @@ export default function RunDetail() {
   // Run 状态徽章 + 警示
   const isInterrupted = run.status === "interrupted";
   const isRunning = run.status === "running";
+
+  const handleFollowUp = async (): Promise<void> => {
+    if (!runId) return;
+    const text = followUpText.trim();
+    if (!text) {
+      message.warning("追问内容不能为空");
+      return;
+    }
+    if (followUpTarget === "worker" && !followUpWorker.trim()) {
+      message.warning("追问目标 worker 必填（禁止广播）");
+      return;
+    }
+    try {
+      setFollowUpSending(true);
+      const resp = await api<FollowUpResponse>(`/api/runs/${runId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          target: followUpTarget,
+          worker_name: followUpTarget === "worker" ? followUpWorker.trim() : null,
+          text,
+        }),
+      });
+      message.success(
+        resp.target === "leader"
+          ? "已投递给 leader（仅事件提醒）"
+          : `已投递给 ${followUpWorker.trim()}（队列深度 ${resp.queue_depth}）`
+      );
+      setFollowUpText("");
+      setSseKey((k) => k + 1);
+    } catch (e) {
+      message.error((e as Error).message);
+    } finally {
+      setFollowUpSending(false);
+    }
+  };
 
   return (
     <div>
@@ -235,7 +275,82 @@ export default function RunDetail() {
         }}>
           {run.task}
         </div>
+        {/* SP12 Mandate:授权凭据(旧 run 无凭据不展示) */}
+        {run.mandate && (
+          <div style={{
+            marginTop: 10,
+            fontFamily: "var(--at-font-mono)",
+            fontSize: 10,
+            color: "var(--at-text-faint)",
+            letterSpacing: "0.06em",
+          }}>
+            MANDATE · {run.mandate.basis.toUpperCase()} by {run.mandate.submitted_by}
+            {" "}· policy {run.mandate.policy_version.slice(0, 8)}
+          </div>
+        )}
       </section>
+
+      {/* SP12d 绿色通道:追问直通(运行中/等待审批时可用;只入不回) */}
+      {(isRunning || isInterrupted) && (
+        <section className="at-panel at-fade-in" style={{ padding: 18, marginBottom: 16 }}>
+          <div className="at-section-title">Follow-up · 追问直通</div>
+          <div style={{
+            fontFamily: "var(--at-font-mono)",
+            fontSize: 10,
+            color: "var(--at-text-faint)",
+            marginBottom: 12,
+            letterSpacing: "0.06em",
+          }}>
+            人的追问直达指定目标，不过 leader（只入不回——回答仍走正常汇报链）
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            {(["worker", "leader"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setFollowUpTarget(t)}
+                style={{
+                  background: followUpTarget === t ? "rgba(255, 181, 71, 0.12)" : "transparent",
+                  border: "1px solid",
+                  borderColor: followUpTarget === t ? "var(--at-amber)" : "var(--at-border)",
+                  color: followUpTarget === t ? "var(--at-amber)" : "var(--at-text-dim)",
+                  padding: "6px 16px",
+                  cursor: "pointer",
+                  fontFamily: "var(--at-font-mono)",
+                  fontSize: 11,
+                  letterSpacing: "0.1em",
+                  textTransform: "uppercase",
+                }}
+              >
+                {t === "worker" ? "▸ Worker" : "▸ Leader"}
+              </button>
+            ))}
+          </div>
+          {followUpTarget === "worker" && (
+            <Input
+              value={followUpWorker}
+              onChange={(e) => setFollowUpWorker(e.target.value)}
+              placeholder="worker 名（必填，禁止广播）"
+              maxLength={128}
+              style={{ marginBottom: 10, fontFamily: "var(--at-font-mono)" }}
+            />
+          )}
+          <Input.TextArea
+            value={followUpText}
+            onChange={(e) => setFollowUpText(e.target.value)}
+            placeholder="追问文本（上限 4KB；worker 回答仍经 leader 汇总）"
+            rows={2}
+            maxLength={4000}
+            style={{ marginBottom: 10, fontFamily: "var(--at-font-mono)" }}
+          />
+          <button
+            className="at-btn-amber"
+            disabled={followUpSending}
+            onClick={handleFollowUp}
+          >
+            {followUpSending ? "◌ SENDING" : "➤ 投递追问"}
+          </button>
+        </section>
+      )}
 
       {/* Tab 切换:Trace / Approvals */}
       <section className="at-panel at-fade-in" style={{ padding: 0 }}>

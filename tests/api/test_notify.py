@@ -171,11 +171,22 @@ def test_event_whitelist(sent):
     svc = NotificationService(
         repo, None, settings=_settings(notify_webhook_url="http://global"),
     )
-    svc.on_run_event("r1", "run_cancelled")  # 取消不打扰
     svc.on_run_event("r1", "leader_plan")  # 非生命周期事件
     assert sent == []
     svc.on_run_event("r1", "run_end")
     assert len(sent) == 1
+
+
+def test_cancel_notification_revocation_wording(sent):
+    """SP12 Mandate:人的停止 = 撤权,cancel 通知带人工撤权文案。"""
+    repo = _FakeRunRepo({"r1": dict(_RUN_ROW)})
+    svc = NotificationService(
+        repo, None, settings=_settings(notify_webhook_url="http://global"),
+    )
+    svc.on_run_event("r1", "run_cancelled")
+    assert len(sent) == 1
+    assert "人工撤权" in sent[0][1]["title"]
+    assert "授权已终止" in sent[0][1]["text"]
 
 
 def test_unknown_run_still_notifies(sent):

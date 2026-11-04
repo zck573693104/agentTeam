@@ -321,11 +321,18 @@ def make_agent_step(
     llm_with_tools = llm.bind_tools(tools) if tools else llm
 
     def agent_step(state: dict) -> dict:
+        run_id = state.get("run_id", "")
+        follow_up_msgs: list = []
         if run_manager is not None:
-            run_id = state.get("run_id", "")
             if run_manager.is_cancelled(run_id):
                 raise RunCancelledError(f"Run {run_id} cancelled by user")
-        react_messages = state.get("react_messages", [])
+            # SP12d 绿色通道:人的追问直达本 worker(与取消检查同模式轮询)。
+            # 只入不回——worker 对追问的处理仍走正常汇报链(→ leader → 出口)。
+            for text in run_manager.pop_follow_ups(run_id, getattr(agent, "name", "")):
+                follow_up_msgs.append(
+                    HumanMessage(content=f"[人工追问] {text}")
+                )
+        react_messages = list(state.get("react_messages", [])) + follow_up_msgs
         response = llm_with_tools.invoke(react_messages)
 
         usage = getattr(response, "usage_metadata", None)
@@ -334,13 +341,13 @@ def make_agent_step(
         tool_calls = getattr(response, "tool_calls", None)
         if tool_calls:
             return {
-                "react_messages": [response],
+                "react_messages": [*follow_up_msgs, response],
                 "tool_calls": tool_calls,
                 "final_answer": "",
                 "total_tokens": tokens,
             }
         return {
-            "react_messages": [response],
+            "react_messages": [*follow_up_msgs, response],
             "tool_calls": [],
             "final_answer": response.content,
             "total_tokens": tokens,

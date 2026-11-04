@@ -1,6 +1,7 @@
 """RunManager：后台线程执行 LangGraph graph + interrupt/resume。"""
 from __future__ import annotations
 
+import json
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait as _futures_wait
@@ -71,6 +72,10 @@ class RunManager:
         # interrupted_at:记录 run 进入 interrupted 状态的时间戳,
         # 用于 TTL 清理(避免 abandoned interrupted run 永久驻留内存)
         self._interrupted_at: dict[str, float] = {}
+        # SP12d 绿色通道:人的追问 inbox,{run_id: {worker_name: [text, ...]}}。
+        # 只入不回(worker 回答仍走 leader 汇报链);引擎执行线程在安全边界
+        # pop_follow_ups 消费,与 is_cancelled 同锁同模式。
+        self._follow_ups: dict[str, dict[str, list[str]]] = {}
         # 有界线程池:替代裸 threading.Thread,防止高并发下 OS 线程爆炸。
         # 提交超限的 run 会在池内排队等待,而非立即失败。
         self._run_executor = ThreadPoolExecutor(
@@ -390,16 +395,19 @@ class RunManager:
             if not self._run_repo.try_claim(run_id, "interrupted", "cancelling"):
                 return False  # 被 approve 抢走或状态已变
             self._run_repo.end_run(run_id, "cancelled")
-            eid = self._audit_repo.add_event(run_id, "run_cancelled", "user")
+            payload = self._revocation_payload(run_id, "user requested cancel")
+            eid = self._audit_repo.add_event(run_id, "run_cancelled", "user", payload)
             self._bus.publish(
                 run_id,
                 {
                     "id": eid,
                     "event_type": "run_cancelled",
                     "run_id": run_id,
-                    "payload": {"reason": "user requested cancel"},
+                    "payload": payload,
                 },
             )
+            # SP12 Mandate:撤权也是值得回执的授权事件(带人工撤权文案)
+            self._notify(run_id, "run_cancelled", payload)
             self._cleanup_run(run_id)
             return True
 
@@ -437,6 +445,93 @@ class RunManager:
             self._threads.pop(run_id, None)
             self._cancel_events.pop(run_id, None)
             self._interrupted_at.pop(run_id, None)
+            # SP12d:终态 run 的追问 inbox 一并丢弃(人需重新提交)
+            self._follow_ups.pop(run_id, None)
+
+    # ---------------- SP12 Mandate:撤权 + 授权快照 ----------------
+
+    def mandate_version(self, run_id: str) -> str | None:
+        """读 run 的授权规则版本(SP12 Mandate;无凭据/损坏返回 None)。
+
+        供 harness 审批落账时盖章(approvals.mandate_version)。
+        """
+        run = self._run_repo.get_run(run_id)
+        if run is None or "mandate_json" not in run.keys() or not run["mandate_json"]:
+            return None
+        try:
+            return json.loads(run["mandate_json"]).get("policy_version")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            return None
+
+    def _revocation_payload(self, run_id: str, reason: str) -> dict[str, Any]:
+        """run_cancelled 事件的撤权标记(SP12 Mandate:人的停止 = 撤权)。
+
+        cancelled 状态与撤权合一:人工取消视为对该 run 授权的终止,
+        事件带 revoked_by_human + 授权凭据里的 policy_version 供审计;
+        旧 run 无凭据时不带 mandate_version 键。
+        """
+        run = self._run_repo.get_run(run_id)
+        mandate_version = None
+        if run is not None and "mandate_json" in run.keys() and run["mandate_json"]:
+            try:
+                mandate_version = json.loads(run["mandate_json"]).get("policy_version")
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                mandate_version = None
+        payload: dict[str, Any] = {"reason": reason, "revoked_by_human": True}
+        if mandate_version:
+            payload["mandate_version"] = mandate_version
+        return payload
+
+    # ---------------- SP12d 绿色通道:追问直通 worker ----------------
+
+    def deliver_follow_up(
+        self, run_id: str, target: str, worker_name: str | None, text: str,
+    ) -> int:
+        """入队一条人的追问(SP12d 绿色通道,只入不回)。
+
+        worker 的回答仍走 leader → 出口;leader 目标只产生 follow_up_delivered
+        事件(leader 仅可据此 stop,不可代答/重新派工——通信拓扑红线)。
+
+        - target="worker":worker_name 必填,进 per-worker inbox,由双引擎在
+          安全边界消费(langgraph: agent_step LLM 调用前轮询;harness: 轮询
+          间隙 interrupt → prompt_async → 重锚 turn_id);
+        - target="leader":仅事件,无消费方。
+
+        返回该目标当前队列深度。run 存在性/状态由 HTTP 层校验。
+        """
+        name = "__leader__" if target == "leader" else (worker_name or "")
+        with self._lock:
+            per_run = self._follow_ups.setdefault(run_id, {})
+            per_run.setdefault(name, []).append(text)
+            depth = len(per_run[name])
+        payload: dict[str, Any] = {
+            "target": target,
+            "worker": worker_name,
+            "text_length": len(text),
+            "queue_depth": depth,
+        }
+        eid = self._audit_repo.add_event(
+            run_id, "follow_up_delivered", "user", payload,
+            state_bucket="context",
+        )
+        self._bus.publish(
+            run_id,
+            {"id": eid, "event_type": "follow_up_delivered",
+             "run_id": run_id, "payload": payload},
+        )
+        return depth
+
+    def pop_follow_ups(self, run_id: str, worker_name: str) -> list[str]:
+        """引擎侧消费:取走指定 worker 的全部追问(先进先出)。
+
+        与 is_cancelled 同模式:执行线程在安全边界轮询调用;
+        未知 run/无消息返回空列表,不抛异常。
+        """
+        with self._lock:
+            per_run = self._follow_ups.get(run_id)
+            if not per_run:
+                return []
+            return per_run.pop(worker_name, [])
 
     def _sweep_interrupted_runs(self) -> int:
         """驱逐超过 TTL 仍未被 resume 的 interrupted run 的内存态。
@@ -515,6 +610,14 @@ class RunManager:
                 "run_id": run_id,
                 "pending_approval": None,
             }
+            # SP12 Mandate:授权凭据只读快照随 state 下发(节点可读不可改;
+            # 向下只读继承,worker 不放大范围)。旧 run 无凭据时不设键。
+            mandate_json = dict(run).get("mandate_json") if run is not None else None
+            if mandate_json:
+                try:
+                    initial["mandate"] = json.loads(mandate_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
             # 记忆层: 团队历史记忆注入 leader 上下文（双引擎都消费 initial,
             # langgraph 走 TeamState.memory_context,harness 前置拼进 plan 指令）
             memory_context = self._build_memory_context(run_id)
@@ -600,16 +703,19 @@ class RunManager:
         若 status 既非 cancelling 也非 running(已被其他方终结),只 cleanup 内存。
         """
         if self._run_repo.end_run_if_status(run_id, "cancelling", "cancelled"):
-            eid = self._audit_repo.add_event(run_id, "run_cancelled", "user")
+            payload = self._revocation_payload(
+                run_id, "cancelled after natural completion")
+            eid = self._audit_repo.add_event(run_id, "run_cancelled", "user", payload)
             self._bus.publish(
                 run_id,
                 {
                     "id": eid,
                     "event_type": "run_cancelled",
                     "run_id": run_id,
-                    "payload": {"reason": "cancelled after natural completion"},
+                    "payload": payload,
                 },
             )
+            self._notify(run_id, "run_cancelled", payload)
         self._cleanup_run(run_id)
 
     def _mark_interrupted(self, run_id: str) -> None:
@@ -719,16 +825,18 @@ class RunManager:
             ended = self._run_repo.end_run_if_status(run_id, "cancelling", "cancelled")
             if not ended:
                 self._run_repo.end_run_if_status(run_id, "running", "cancelled")
-            eid = self._audit_repo.add_event(run_id, "run_cancelled", "user")
+            payload = self._revocation_payload(run_id, "user requested cancel")
+            eid = self._audit_repo.add_event(run_id, "run_cancelled", "user", payload)
             self._bus.publish(
                 run_id,
                 {
                     "id": eid,
                     "event_type": "run_cancelled",
                     "run_id": run_id,
-                    "payload": {"reason": "user requested cancel"},
+                    "payload": payload,
                 },
             )
+            self._notify(run_id, "run_cancelled", payload)
         else:
             # 普通异常:沿用 failed 逻辑
             logger.exception("run %s failed", run_id, exc_info=error)

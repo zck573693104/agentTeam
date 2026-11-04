@@ -37,6 +37,7 @@
 - **MCP 集成**：基于 Model Context Protocol 加载外部工具，支持 stdio / http 传输
 - **Agent 库**：`$ref` 引用复用，循环引用检测，深拷贝 + 字段覆盖
 - **节点契约**：`PlanStep` 携带 `acceptance_criteria` / `budget_tokens` / `depends_on` / `condition`，`WorkerOutput` 区分 artifact / evidence / state_delta / failure 四类产出
+- **通信纪律与授权（SP12，借鉴 dsh-superagent）**：leader/worker 职责硬隔离 + 通知预算、IM 通知 Outbox 可靠出站、事件驱动 Trigger（Fast/Slow Path 两级过滤）、Mandate 授权凭据（授权与执行分离）、追问直通绿色通道（人对 worker 单向直达，不过 leader）
 
 ### 核心原语（pi-mono 设计）
 
@@ -382,7 +383,8 @@ AGENTTEAM_NOTIFY_PROVIDER=feishu        // 消息体按飞书 bot 格式组装
 
 `notify_provider` 决定请求体格式（飞书 `msg_type:text`、企微/钉钉 `msgtype:markdown`、
 `generic` 输出自解释 JSON 可对接自建接收端/Matrix 桥）。通知失败只记日志，
-绝不影响 run 主流程；取消（cancelled）不打扰。
+绝不影响 run 主流程。取消（cancelled）也会通知——人工停止 = 撤权（见下文
+Mandate），属于授权事件回执而非普通打扰。
 
 **可靠出站（SP12b outbox）**：通知先落库（`notify_outbox` 表）再由后台 worker
 发送——进程重启后未发通知自动续发；失败按 5s 起步指数退避（上限 300s），
@@ -446,6 +448,49 @@ curl -X POST http://localhost:8000/api/triggers -H "Content-Type: application/js
 规则管理：`GET /api/triggers`（secret 打码）/ `GET|PUT|DELETE /api/triggers/{name}`。
 命中但提交失败（配额 429 / 底座 502-503）会透传对应状态码；任务文本从事件字段
 提取时单值截断 2000 字符、总长 4000 字符，防外部事件撑爆 prompt。
+
+### Mandate 授权模型（SP12：授权与执行分离）
+
+借鉴 dsh-superagent 的 Mandate 设计：每个 run 携带一份**授权凭据**（谁、依据
+什么授权规则版本、允许做什么），向下只读继承——worker 不放大范围（越界 =
+failure，由 leader_review 判定）。
+
+- `basis`：`explicit`（人经 API 提交）| `inferred`（事件 Trigger 命中规则自动触发）；
+- `submitted_by`：提交者身份（API 用户名 / `trigger:<规则名>` / 缺省 `api`）；
+- `policy_version`：授权规则版本 = 团队配置内容哈希。团队配置热更新 → 版本变更 →
+  进行中 run 记 `policy_expired` 注记（**不中断运行**，对齐 dsh「不撤销在途
+  Mandate、变更通知到在途工单」）；
+- **审批门 = 授权管理**：工具级审批通过 = 该操作授权延续，拒绝 = 该 step 授权
+  终止；审批历史记录决策当时的 `mandate_version`；
+- **人的停止 = 撤权**：cancel run 视为授权终止，通知带「人工撤权」文案，
+  事件带 `revoked_by_human` 标记。
+
+凭据存 `runs.mandate_json`（迁移 v16），`GET /api/runs/{run_id}` 返回 `mandate`
+对象；旧 run 无凭据按无授权兼容。
+
+### 绿色通道（SP12d：追问直通 worker）
+
+对标 dsh-superagent 的 Subscription fan-out：**人对运行中/等待中 worker 的
+单向追问直达 worker 会话，不过 leader**（最大单项注意力节省）。通信拓扑红线
+不破——消息**只入不回**，worker 的回答仍走正常汇报链（→ leader → 出口）：
+
+```bash
+# 追问指定 worker（必须显式指定，禁止广播）
+curl -X POST http://localhost:8000/api/runs/<run_id>/messages -H "Content-Type: application/json" -d '{
+  "target": "worker", "worker_name": "coder", "text": "登录接口的 token 有效期改回 7 天"
+}'
+
+# 提醒 leader（只产生事件，leader 可据此 stop，不可代答/重新派工）
+curl -X POST http://localhost:8000/api/runs/<run_id>/messages -H "Content-Type: application/json" -d '{
+  "target": "leader", "text": "预算只剩一半了，收尾时优先跑测试"
+}'
+```
+
+投递语义：run 必须处于 running/interrupted（终态返回 409，提示重新提交而非
+复活）；双引擎统一生效——langgraph 在 worker 每次 LLM 调用前注入
+`[人工追问]` 消息（与取消检查同轮询）；opencode 在轮询间隙 interrupt 当前
+回合 → 排队追问回合 → turn 重锚。投递产生 `follow_up_delivered` 轨迹事件
+（含队列深度），前端无监听时零影响。
 
 ### 跨 run 记忆层（团队经验蒸馏与注入）
 
@@ -536,8 +581,9 @@ with override_settings(max_run_workers=2) as s:
 | GET | `/api/runs/{run_id}` | 查看任务详情 |
 | GET | `/api/runs/{run_id}/trace` | 查看执行轨迹（支持 `chain=call\|tool\|decision` 过滤） |
 | GET | `/api/runs/{run_id}/stream` | SSE 实时事件流 |
-| POST | `/api/runs/{run_id}/cancel` | 取消正在执行的 run |
-| GET | `/api/runs/{run_id}/approvals` | 列出 run 的所有审批节点 |
+| POST | `/api/runs/{run_id}/cancel` | 取消正在执行的 run（= 人工撤权，见 Mandate） |
+| POST | `/api/runs/{run_id}/messages` | **追问直通**（SP12d）：人对运行中/等待中的指定 worker 或 leader 投递追问 |
+| GET | `/api/runs/{run_id}/approvals` | 列出 run 的所有审批节点（含决策时的 `mandate_version`） |
 | GET | `/api/runs/{run_id}/pending-approval` | 待审批预览（工具级审批返回 write_file diff / bash 命令等） |
 
 ### Triggers 事件驱动（SP12c）

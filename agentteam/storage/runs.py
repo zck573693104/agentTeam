@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 
@@ -15,22 +16,45 @@ class RunRepo(BaseSqliteRepo):
     """
 
     def create_run(
-        self, team_name: str, task: str, triggered_by_user: str | None = None
+        self, team_name: str, task: str, triggered_by_user: str | None = None,
+        mandate=None,
     ) -> str:
         """创建 run 记录,返回 run_id。
 
         triggered_by_user(P-B2 WAT 双身份):触发该 run 的用户 username,
         用于审计归属:run 执行时 actor 是 agent,但触发者是人类用户。
         None 表示未启用鉴权或未注入 user(向后兼容)。
+
+        mandate(SP12 Mandate 授权凭据):Mandate 实例或 None。None 旧路径
+        兼容(mandate_json 存 NULL,读取侧按无授权处理);传入时序列化为
+        JSON 落库,授权与执行分离、向下只读继承。
         """
         run_id = uuid.uuid4().hex
         now = _now()
+        mandate_json = None
+        if mandate is not None:
+            mandate_json = json.dumps(
+                mandate.to_dict() if hasattr(mandate, "to_dict") else dict(mandate),
+                ensure_ascii=False,
+            )
         self._execute(
-            "INSERT INTO runs (id, team_name, task, status, created_at, updated_at, triggered_by_user) "
-            "VALUES (?, ?, ?, 'pending', ?, ?, ?)",
-            (run_id, team_name, task, now, now, triggered_by_user),
+            "INSERT INTO runs (id, team_name, task, status, created_at, updated_at, "
+            "triggered_by_user, mandate_json) "
+            "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)",
+            (run_id, team_name, task, now, now, triggered_by_user, mandate_json),
         )
         return run_id
+
+    def set_mandate(self, run_id: str, mandate) -> None:
+        """补写/覆盖授权凭据(SP12 Mandate;显式指定授权等场景预留)。"""
+        mandate_json = (
+            json.dumps(mandate.to_dict(), ensure_ascii=False)
+            if mandate is not None else None
+        )
+        self._execute(
+            "UPDATE runs SET mandate_json = ?, updated_at = ? WHERE id = ?",
+            (mandate_json, _now(), run_id),
+        )
 
     def get_run(self, run_id: str) -> sqlite3.Row | None:
         return self._fetchone("SELECT * FROM runs WHERE id = ?", (run_id,))
@@ -70,6 +94,19 @@ class RunRepo(BaseSqliteRepo):
             (status, now, now, total_tokens, run_id, expected_status),
         )
         return cur.rowcount > 0
+
+    def list_active_by_team(self, team_name: str) -> list[sqlite3.Row]:
+        """某团队全部进行中 run(pending/running/interrupted)。
+
+        SP12 Mandate 策略版本化用:团队热更新后对进行中 run 记 policy
+        过期注记。按创建时间升序(老的先注记)。
+        """
+        return self._fetchall(
+            "SELECT * FROM runs WHERE team_name = ? "
+            "AND status IN ('pending', 'running', 'interrupted') "
+            "ORDER BY created_at",
+            (team_name,),
+        )
 
     def list_runs(self, limit: int | None = None, offset: int = 0) -> list[sqlite3.Row]:
         """按创建时间倒序返回 runs,支持分页。

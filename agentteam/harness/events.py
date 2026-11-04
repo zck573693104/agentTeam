@@ -135,6 +135,16 @@ class EventMapper:
         with self._lock:
             return self._errors.get(session_id)
 
+    def clear_error(self, session_id: str) -> None:
+        """清除 session 级错误标记(SP12d 绿色通道)。
+
+        追问投递会 interrupt 掐断当前回合;若被掐断的旧回合以 step.failed
+        形状到达(如限流形状),它属于被有意中止的回合,不应让 run 失败——
+        重锚 turn_id 后清掉残留,新回合(人的追问)由后续轮询正常判定。
+        """
+        with self._lock:
+            self._errors.pop(session_id, None)
+
     def turn_finished(self, session_id: str) -> bool:
         """看到过 step.ended(finish=stop) —— 加速唤醒用，正确性仍由轮询兜底。"""
         with self._lock:

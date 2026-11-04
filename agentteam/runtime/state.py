@@ -55,6 +55,10 @@ class TeamState(TypedDict):
     # 记忆层: 团队历史记忆注入块(RunManager._build_memory_context 构造,
     # leader_plan 读取;空则不设键)。经 state 传递而非节点闭包,编译缓存安全。
     memory_context: str
+    # SP12 Mandate:授权凭据只读快照(RunManager._run_in_background 从
+    # runs.mandate_json 注入;无凭据的旧 run 不设键)。节点可读不可改——
+    # 授权向下只读继承,worker 不放大范围。
+    mandate: dict | None
     total_tokens: Annotated[int, operator.add]
     # 跨层执行路径追踪，如 "team:dev.ceo.cto"
     path: str

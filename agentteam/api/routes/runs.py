@@ -14,6 +14,7 @@ from agentteam.api.events import BroadcastTraceWriter, EventBus
 from agentteam.api.run_manager import RunManager
 from agentteam.api.store import TeamStore
 from agentteam.domain.library import AgentLibrary
+from agentteam.domain.mandate import default_mandate
 from agentteam.models.provider import ModelProvider
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.runs import RunRepo
@@ -33,13 +34,35 @@ class ApproveRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=2048, description="审批理由")
 
 
+class FollowUpMessageRequest(BaseModel):
+    """SP12d 绿色通道:人对运行中/等待中 worker 的追问。"""
+    target: str = Field(description="投递目标:worker | leader(必选其一,禁止广播)")
+    worker_name: str | None = Field(
+        default=None, max_length=128,
+        description="target=worker 时必填:追问送达的 worker 名",
+    )
+    text: str = Field(
+        min_length=1, max_length=4000,
+        description="追问文本(上限 4KB,与 Trigger 任务文本同限)",
+    )
+
+
 def run_to_dict(row) -> dict:
     """将 runs 表行转为 API 响应 dict：id → run_id（与 POST 响应一致）。
 
     公开供 dashboard 等其他路由复用，避免 id→run_id 重映射逻辑分散。
+    SP12 Mandate:mandate_json 解析为 mandate 对象(dict);NULL/损坏 → None。
     """
     d = dict(row)
     d["run_id"] = d.pop("id")
+    raw = d.pop("mandate_json", None)
+    if raw:
+        try:
+            d["mandate"] = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            d["mandate"] = None
+    else:
+        d["mandate"] = None
     return d
 
 
@@ -109,7 +132,10 @@ def submit_run(
                 ),
             )
 
-    run_id = run_repo.create_run(team.name, task, triggered_by_user=triggered_by_user)
+    run_id = run_repo.create_run(
+        team.name, task, triggered_by_user=triggered_by_user,
+        mandate=default_mandate(team, task, triggered_by_user),
+    )
 
     # P-B2 审计:记录触发者(HTTP 用户 或 trigger:<规则名>)
     if admin_audit_repo is not None and triggered_by_user:
@@ -663,5 +689,48 @@ def runs_router(
             )
             raise HTTPException(status_code=500, detail=str(e))
         return {"ok": True, "step_id": step_id}
+
+    @router.post("/{run_id}/messages")
+    def deliver_follow_up(run_id: str, req: FollowUpMessageRequest):
+        """SP12d 绿色通道:人对运行中/等待中 worker 的追问直通(不过 leader)。
+
+        - 消息只入不回:worker 的回答仍走正常汇报链(→ leader → 出口);
+        - 归属约束:必须显式指定 worker(或 leader),禁止广播到全部 worker;
+        - leader 目标只产生 follow_up_delivered 事件(leader 仅可据此 stop,
+          不可代答/重新派工——通信拓扑红线);
+        - 终态 run 不接受投递(不自动复活,提示重新提交)。
+        """
+        run = run_repo.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+        if run["status"] not in ("running", "interrupted"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Run '{run_id}' is {run['status']}; follow-up messages "
+                    "are only accepted while running/interrupted "
+                    "(submit a new run instead of resuming a finished one)"
+                ),
+            )
+        target = (req.target or "").strip().lower()
+        if target not in ("worker", "leader"):
+            raise HTTPException(
+                status_code=422, detail="target must be 'worker' or 'leader'",
+            )
+        if target == "worker" and not (req.worker_name or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail="worker_name is required when target='worker' "
+                       "(no broadcasting)",
+            )
+        if target == "leader" and req.worker_name:
+            raise HTTPException(
+                status_code=422,
+                detail="worker_name must be empty when target='leader'",
+            )
+        depth = run_manager.deliver_follow_up(
+            run_id, target, (req.worker_name or "").strip() or None, req.text,
+        )
+        return {"ok": True, "target": target, "queue_depth": depth}
 
     return router

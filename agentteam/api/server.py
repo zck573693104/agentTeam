@@ -207,7 +207,9 @@ def create_app(
             model_provider=mp,
         )
 
-    app.include_router(teams_router(team_store, memory_repo))
+    app.include_router(teams_router(
+        team_store, memory_repo, run_repo=run_repo, audit_repo=audit_repo,
+    ))
     app.include_router(
         runs_router(
             run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,

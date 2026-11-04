@@ -254,6 +254,21 @@ CREATE INDEX IF NOT EXISTS idx_trigger_rules_team ON trigger_rules(team_name, id
 """
 
 
+# SP12 Mandate 授权模型:授权与执行分离。
+# runs.mandate_json:run 的授权凭据(basis/submitted_by/policy_version/scope),
+#   创建时由 submit_run 按触发身份生成,向下只读继承不放大范围;
+# approvals.mandate_version:决策时的授权规则版本(审批门 = 授权管理:
+#   通过 = 该操作授权延续,拒绝 = 该 step 授权终止)。
+# 两列都 TEXT 可空:旧 run/旧审批行无授权凭据,读取侧按 None 兼容。
+def _migration_v16_alters(conn: sqlite3.Connection) -> None:
+    for column in ("runs.mandate_json", "approvals.mandate_version"):
+        table, col = column.split(".")
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # 幂等:列已存在(旧库重跑迁移)
+
+
 MIGRATIONS: list[tuple[int, str, object]] = [
     (1, "base tables (runs/run_events/approvals/teams/library_agents)", _MIGRATION_V1),
     (2, "evolution_history table (SP7b)", _MIGRATION_V2),
@@ -266,6 +281,7 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (13, "ALTER approvals for v12 columns (tool_name/args_preview, 审批 diff 预览)", _migration_v13_alters),
     (14, "notify_outbox table (SP12b IM 通知 outbox:先存后发/退避重试/回执)", _MIGRATION_V14),
     (15, "trigger_rules table (SP12c 事件驱动 Trigger:Fast/Slow Path 两级过滤)", _MIGRATION_V15),
+    (16, "ALTER runs/approvals for v15 columns (mandate_json/mandate_version, SP12 Mandate 授权)", _migration_v16_alters),
 ]
 
 

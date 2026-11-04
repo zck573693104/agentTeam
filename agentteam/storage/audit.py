@@ -111,17 +111,22 @@ class AuditRepo(BaseSqliteRepo):
         run_id: str,
         tool_name: str | None = None,
         args_preview: str | None = None,
+        mandate_version: str | None = None,
     ) -> str:
         """写入一条 pending 审批记录。
 
         tool 级审批在决策落账时顺带记录 tool_name / args_preview（取自 gate），
         供历史 Approvals 列表展示「动了什么」；step/worker 级 gate 两列为 None。
+
+        mandate_version(SP12 Mandate):决策时的授权规则版本。审批门 = 授权
+        管理——通过 = 该操作授权延续,拒绝 = 该 step 授权终止;None 为旧
+        路径/无授权凭据兼容。
         """
         approval_id = uuid.uuid4().hex
         self._execute(
-            "INSERT INTO approvals (id, run_id, status, requested_at, tool_name, args_preview) "
-            "VALUES (?, ?, 'pending', ?, ?, ?)",
-            (approval_id, run_id, _now(), tool_name, args_preview),
+            "INSERT INTO approvals (id, run_id, status, requested_at, tool_name, args_preview, mandate_version) "
+            "VALUES (?, ?, 'pending', ?, ?, ?, ?)",
+            (approval_id, run_id, _now(), tool_name, args_preview, mandate_version),
         )
         return approval_id
 
@@ -230,6 +235,7 @@ _CHAIN_MAP: dict[str, str] = {
     "worker_start": "call",
     "worker_end": "call",
     "supervisor": "call",
+    "follow_up_delivered": "call",      # SP12d 绿色通道:人的追问入站
     # tool chain
     "tool_call": "tool",
     "tool_result": "tool",
@@ -240,6 +246,7 @@ _CHAIN_MAP: dict[str, str] = {
     "leader_review": "decision",
     "condition_eval": "decision",
     "plan_rejected": "decision",
+    "policy_expired": "decision",       # SP12 Mandate:授权依据过期注记
 }
 
 

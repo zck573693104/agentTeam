@@ -23,8 +23,9 @@ from agentteam.logging_config import get_logger
 logger = get_logger("api.notify")
 
 # 触发通知的事件白名单:等待人工(interrupted,两引擎统一在 RunManager 标记)、
-# 正常完成、失败。取消不打扰(用户自己操作的,无需回执)。
-_NOTIFY_EVENTS = frozenset({"run_interrupted", "run_end", "error"})
+# 正常完成、失败。SP12 Mandate:取消也通知——人的停止 = 撤权(授权终止),
+# 带人工撤权文案,属授权事件回执而非普通取消。
+_NOTIFY_EVENTS = frozenset({"run_interrupted", "run_end", "error", "run_cancelled"})
 
 # SP12a 消息预算(dsh-superagent 注意力经济学:每条通知都是注意力成本):
 # 正文行数与字符数上限,超出截断。截断尾行不带链接假设(通知可能无 link)。
@@ -173,6 +174,10 @@ class NotificationService:
             title = "✅ AgentTeam · Run 完成"
             if tokens:
                 lines.append(f"token 用量:{tokens}")
+        elif event_type == "run_cancelled":
+            # SP12 Mandate:人的停止 = 撤权,授权终止回执
+            title = "🛑 AgentTeam · Run 已人工撤权"
+            lines.append("状态:cancelled(人工撤权,该 run 授权已终止)")
         else:  # error
             title = "❌ AgentTeam · Run 失败"
             err = ((payload or {}).get("error") or "")[:200]

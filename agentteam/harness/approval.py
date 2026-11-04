@@ -95,17 +95,22 @@ class ApprovalBroker:
         approved: bool,
         decider: str = "api-user",
         reason: str | None = None,
+        mandate_version: str | None = None,
     ) -> bool:
         """落 approvals 审计 + 发 approval_decided，返回决策值。
 
         tool 级 gate 顺带落 tool_name/args_preview，历史 Approvals 列表
         从此可展示「动了什么」（审批 diff 预览的历史侧）。
+
+        mandate_version(SP12 Mandate):决策时的授权规则版本,审批门 = 授权
+        管理——通过 = 该操作授权延续,拒绝 = 该 step 授权终止。
         """
         if self._audit is not None:
             approval_id = self._audit.add_approval(
                 run_id,
                 tool_name=gate.get("permission"),
                 args_preview=gate.get("args"),
+                mandate_version=mandate_version,
             )
             self._audit.decide_approval(
                 approval_id, "approved" if approved else "rejected", decider, reason

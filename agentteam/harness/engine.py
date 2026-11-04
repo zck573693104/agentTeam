@@ -335,9 +335,14 @@ class HarnessRunner:
             raise ValueError(f"Run {self._run_id}: resume without pending park")
         gate = park["gate"]
         ctx = park.get("ctx") or {}
+        # SP12 Mandate:审批决策盖章当时的授权规则版本(审批门 = 授权管理)
+        mandate_version = (
+            self._rm.mandate_version(self._run_id) if self._rm is not None else None
+        )
         approved = self._broker.resolve(
             self._run_id, gate, bool(decision.get("approved")),
             decision.get("decider", "api-user"), decision.get("reason"),
+            mandate_version=mandate_version,
         )
         st["park"] = None
         stage = ctx.get("stage")
@@ -792,6 +797,10 @@ class HarnessRunner:
                 for info in remaining.values():
                     self._interrupt_quietly(info["session_id"])
                 raise RunCancelledError()
+            # SP12d 绿色通道:轮询间隙投递人的追问(引擎线程内消费,不与
+            # _drive 并发改 frame;见 _drain_follow_ups)
+            if self._rm is not None:
+                self._drain_follow_ups(remaining)
             for key, info in list(remaining.items()):
                 session_id = info["session_id"]
                 # SSE 侧 session.error/step.failed 之外再走一条 REST 判定：
@@ -852,6 +861,36 @@ class HarnessRunner:
                     f"{[i['session_id'] for i in remaining.values()]}"
                 )
             time.sleep(self._poll)
+
+    def _drain_follow_ups(self, remaining: dict) -> None:
+        """SP12d 绿色通道:把人的追问投递到在飞 worker 会话(只入不回)。
+
+        必须在引擎线程内消费(API 线程只经 RunManager 入队)——与
+        _apply_resume 的 tool 分支同三步:interrupt 掐当前回合 →
+        prompt_async 排队追问回合 → turn_id 重锚为新用户消息,引擎既有
+        轮询(assistant_done/turn_error/final_text)自然衔接新回合。
+        worker 的回答仍走正常汇报链(→ leader → 出口),追问不产生回执。
+        """
+        for info in remaining.values():
+            texts = self._rm.pop_follow_ups(self._run_id, info["worker"])
+            if not texts:
+                continue
+            session_id = info["session_id"]
+            self._interrupt_quietly(session_id)
+            resp = self._client.prompt_async(
+                session_id, "\n\n".join(f"[人工追问] {t}" for t in texts),
+                delivery="queue",
+            )
+            info["turn_id"] = self._client.turn_message_id(resp)
+            # 被掐断的旧回合若有 step.failed 残留,不清会让下一轮误判 run 失败
+            self._mapper.clear_error(session_id)
+            if self._trace is not None:
+                self._trace.emit(
+                    self._run_id, "follow_up_delivered", "user",
+                    {"worker": info["worker"], "session_id": session_id,
+                     "count": len(texts)},
+                    state_bucket="context",
+                )
 
     def _review_tool_calls(
         self, st: dict, frame: dict, idx: int, child: dict, info: dict,

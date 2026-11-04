@@ -113,7 +113,7 @@ CREATE TABLE run_engine_state (run_id TEXT PRIMARY KEY, state TEXT,
 
 
 class StubRunManager:
-    """引擎级测试用：只实现 is_cancelled。"""
+    """引擎级测试用：只实现 is_cancelled 与追问 inbox 协议。"""
 
     def __init__(self) -> None:
         self._cancel = threading.Event()
@@ -123,6 +123,13 @@ class StubRunManager:
 
     def cancel(self) -> None:
         self._cancel.set()
+
+    def pop_follow_ups(self, run_id: str, worker_name: str) -> list[str]:
+        # SP12d 绿色通道:引擎轮询间隙会拉追问;测试桩默认无追问
+        return []
+
+    def mandate_version(self, run_id: str) -> str | None:
+        return None
 
 
 @pytest.fixture

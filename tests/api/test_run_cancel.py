@@ -96,8 +96,11 @@ def test_cancel_interrupted_run_ends_directly():
     rm._run_repo.end_run.assert_called_once_with(run_id, "cancelled")
     # 不走 update_status 路径(interrupted 直接结束)
     rm._run_repo.update_status.assert_not_called()
-    # 发 run_cancelled 事件到 audit_repo
-    rm._audit_repo.add_event.assert_called_once_with(run_id, "run_cancelled", "user")
+    # 发 run_cancelled 事件到 audit_repo(SP12 Mandate:带人工撤权标记)
+    rm._audit_repo.add_event.assert_called_once_with(
+        run_id, "run_cancelled", "user",
+        {"reason": "user requested cancel", "revoked_by_human": True},
+    )
     # publish 到 EventBus
     assert rm._bus.publish.called
     published = rm._bus.publish.call_args[0][1]
@@ -219,8 +222,11 @@ def test_handle_error_with_cancelled_error_marks_cancelled():
 
     # 标 cancelled(不是 failed)。P0-2 修复后用条件 end_run_if_status 避免覆盖竞态。
     rm._run_repo.end_run_if_status.assert_called_once_with(run_id, "cancelling", "cancelled")
-    # 发 run_cancelled 事件(actor=user,表示用户触发)
-    rm._audit_repo.add_event.assert_called_once_with(run_id, "run_cancelled", "user")
+    # 发 run_cancelled 事件(actor=user,表示用户触发;SP12 Mandate 带撤权标记)
+    rm._audit_repo.add_event.assert_called_once_with(
+        run_id, "run_cancelled", "user",
+        {"reason": "user requested cancel", "revoked_by_human": True},
+    )
     # publish 到 EventBus
     assert rm._bus.publish.called
     published = rm._bus.publish.call_args[0][1]
@@ -275,7 +281,11 @@ def test_run_in_background_catches_runcancellederror_via_baseexception():
     # 应标 cancelled(不是 failed,也不是卡 cancelling)。P0-2 修复后用条件 end_run_if_status。
     rm._run_repo.end_run_if_status.assert_called_once_with(run_id, "cancelling", "cancelled")
     # add_event 被调用 2 次(run_start + run_cancelled),检查最后一次是 run_cancelled
-    rm._audit_repo.add_event.assert_called_with(run_id, "run_cancelled", "user")
+    # (SP12 Mandate:撤权标记随事件落账)
+    rm._audit_repo.add_event.assert_called_with(
+        run_id, "run_cancelled", "user",
+        {"reason": "user requested cancel", "revoked_by_human": True},
+    )
     # cleanup 被调用
     assert run_id not in rm._cancel_events
 

@@ -37,11 +37,26 @@ export interface Run {
   updated_at: string;
   ended_at: string | null;
   total_tokens: number;
+  // SP12 Mandate:授权凭据(旧 run 无凭据为 null)
+  mandate: {
+    basis: "explicit" | "inferred";
+    submitted_by: string;
+    policy_version: string;
+    scope: string | null;
+  } | null;
 }
 
 export interface CreateRunRequest {
   team_name: string;
   task: string;
+}
+
+// ---- SP12d 绿色通道(POST /api/runs/{id}/messages) ----
+
+export interface FollowUpResponse {
+  ok: boolean;
+  target: "worker" | "leader";
+  queue_depth: number;
 }
 
 export interface ApproveRequest {
