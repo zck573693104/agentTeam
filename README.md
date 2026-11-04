@@ -718,7 +718,7 @@ install_preset_to_api("enterprise_dev", api_url="http://localhost:8000")
 - **Dashboard** — 用量统计、趋势图、最近 run 列表
 - **Teams** — 团队 CRUD、配置编辑、Team Memory 记忆面板（查看/删除团队记忆）
 - **Runs** — run 列表、状态过滤
-- **RunDetail** — run 详情、SSE 实时轨迹、审批 diff 预览（write_file 变更 diff / bash 命令在批准前直接可见）
+- **RunDetail** — run 详情、SSE 实时轨迹（含追问回执/撤权/授权过期事件）、审批 diff 预览（write_file 变更 diff / bash 命令在批准前直接可见）、追问直通面板（运行中/等待审批时对指定 worker 或 leader 投递追问，禁止广播）、Mandate 授权凭据展示（旧 run 无凭据自动省略）
 - **Skills** — Skill 列表、内容查看
 
 ### 开发
@@ -767,7 +767,7 @@ python -m pytest tests/integration/ -v
 
 ### 测试规模
 
-- **569 测试用例 / 77 测试文件**，覆盖所有核心模块
+- **883 测试用例 / 100 测试文件**，覆盖所有核心模块（882 passed + 1 skipped 基线；另 3 条真机 opencode 冒烟需本机起真实底座，离线默认 skip/失败不计入功能保证）
 - 含端到端集成测试（多级团队 + MCP 全流程）
 - 含并发安全测试（library check-then-set、SSE 断线重连）
 
