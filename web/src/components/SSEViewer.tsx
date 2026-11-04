@@ -6,6 +6,7 @@ const EVENT_COLORS: Record<string, string> = {
   run_end: "#ffd24a",
   error: "#ff5a5f",
   run_interrupted: "#ffb547",
+  run_cancelled: "#ff5a5f",
   leader_plan: "#4ad8e8",
   leader_review: "#4ad8e8",
   worker_start: "#4ad8e8",
@@ -13,6 +14,10 @@ const EVENT_COLORS: Record<string, string> = {
   tool_call: "#ffb547",
   approval_requested: "#ffb547",
   approval_decided: "#ffd24a",
+  // SP12d 绿色通道:人的追问入站回执
+  follow_up_delivered: "#4ad8e8",
+  // SP12 Mandate:授权依据过期注记
+  policy_expired: "#ffb547",
 };
 
 /** 已知事件类型列表,用于注册 EventSource 监听器。 */
@@ -21,6 +26,7 @@ const EVENT_TYPES = [
   "run_end",
   "error",
   "run_interrupted",
+  "run_cancelled",
   "leader_plan",
   "leader_review",
   "worker_start",
@@ -28,6 +34,8 @@ const EVENT_TYPES = [
   "tool_call",
   "approval_requested",
   "approval_decided",
+  "follow_up_delivered",
+  "policy_expired",
 ];
 
 interface SSEEvent {
