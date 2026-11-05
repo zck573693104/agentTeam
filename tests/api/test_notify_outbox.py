@@ -322,10 +322,10 @@ def test_migration_v14_creates_outbox_table(tmp_path):
     conn.execute("CREATE TABLE runs (id TEXT PRIMARY KEY)")
     conn.execute("PRAGMA user_version = 13")
     conn.commit()
-    # run_migrations 返回本次执行的 migration 数:13→16 共 3 条
-    # (v14 outbox + v15 trigger_rules + v16 mandate 列)
-    assert run_migrations(conn) == 3
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
+    # run_migrations 返回本次执行的 migration 数:13→17 共 4 条
+    # (v14 outbox + v15 trigger_rules + v16 mandate 列 + v17 drop run_engine_state)
+    assert run_migrations(conn) == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
     rows = conn.execute(
         "SELECT name FROM sqlite_master WHERE name='notify_outbox'"
     ).fetchall()

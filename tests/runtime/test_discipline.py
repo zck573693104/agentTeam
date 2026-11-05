@@ -4,8 +4,7 @@
 - extract_question:QUESTION/问题 标记解析(一次最多一个/无标记 None)
 - WorkerOutput.question 序列化往返(含旧快照向后兼容)
 - leader_review 遇 worker 提问 → worker_attention 轨迹事件(原样透传)
-- leader_plan 注入分派纪律(langgraph 侧;harness 侧由 test_memory 的
-  harness 注入用例与 translator 单测覆盖)
+- leader_plan 注入分派纪律(langgraph 侧)
 """
 from __future__ import annotations
 

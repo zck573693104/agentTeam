@@ -81,7 +81,7 @@ def triggers_router(
 
         - 规则配了 secret → 请求头 X-Trigger-Secret 必须匹配,否则 401
         - 两级过滤:Fast Path 确定性条件 / Slow Path LLM 判定
-        - 命中 → 与人工 POST /api/runs 完全相同的提交流程(配额/审计/引擎选择)
+        - 命中 → 与人工 POST /api/runs 完全相同的提交流程(配额/审计)
         """
         rule = trigger_repo.get_by_name(name)
         if rule is None:
@@ -103,7 +103,7 @@ def triggers_router(
         }
         decision = trigger_engine.handle_event(name, event)
         if decision["matched"] and decision.get("status_code"):
-            # 命中但 run 提交失败(配额/底座不可用)——透传业务状态码
+            # 命中但 run 提交失败(配额/编译失败)——透传业务状态码
             raise HTTPException(
                 status_code=decision["status_code"],
                 detail=f"trigger '{name}' matched but run submission failed",

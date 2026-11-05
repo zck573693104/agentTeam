@@ -22,7 +22,7 @@ from agentteam.logging_config import get_logger
 
 logger = get_logger("api.notify")
 
-# 触发通知的事件白名单:等待人工(interrupted,两引擎统一在 RunManager 标记)、
+# 触发通知的事件白名单:等待人工(interrupted,统一在 RunManager 标记)、
 # 正常完成、失败。SP12 Mandate:取消也通知——人的停止 = 撤权(授权终止),
 # 带人工撤权文案,属授权事件回执而非普通取消。
 _NOTIFY_EVENTS = frozenset({"run_interrupted", "run_end", "error", "run_cancelled"})

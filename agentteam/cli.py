@@ -220,11 +220,10 @@ def show_preset(name: str) -> int:
     return 0
 
 
-def install_preset(name: str, api: str = "http://localhost:8000",
-                   engine: str | None = None) -> int:
-    """安装预置团队到 API 服务。engine: 覆盖执行引擎（opencode/langgraph）。"""
+def install_preset(name: str, api: str = "http://localhost:8000") -> int:
+    """安装预置团队到 API 服务。"""
     try:
-        result = install_preset_to_api(name, api=api, engine=engine)
+        result = install_preset_to_api(name, api=api)
     except KeyError as e:
         print(f"错误: {e}")
         return 1
@@ -235,8 +234,6 @@ def install_preset(name: str, api: str = "http://localhost:8000",
     if result["library"]:
         print(f"  专家库: {result['library']}")
     print(f"  团队: {result['teams']}")
-    if engine:
-        print(f"  执行引擎: {engine}")
     return 0
 
 
@@ -264,10 +261,6 @@ def main(argv: list[str] | None = None) -> int:
     p_install_p = sub.add_parser("install-preset", help="安装预置团队到 API")
     p_install_p.add_argument("name", help="预置团队名称")
     p_install_p.add_argument("--api", default=DEFAULT_API_URL, help="API 地址")
-    p_install_p.add_argument(
-        "--engine", choices=["opencode", "langgraph"], default=None,
-        help="覆盖预置团队的执行引擎（SP8: opencode 需先启动 opencode server）",
-    )
 
     p_list_s = sub.add_parser("list-skills", help="列出 API 上可用的 skill")
     p_list_s.add_argument("--api", default=DEFAULT_API_URL, help="API 地址")
@@ -287,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "show-preset":
         return show_preset(args.name)
     elif args.command == "install-preset":
-        return install_preset(args.name, args.api, engine=args.engine)
+        return install_preset(args.name, args.api)
     elif args.command == "list-skills":
         return list_skills(args.api)
     else:

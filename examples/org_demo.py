@@ -10,12 +10,8 @@
         └── lead_ops      (L3 · 运维组长)  → ops_a
 
 用法：
-    # 注册（langgraph 引擎，需模型 Key）
+    # 注册（需模型 Key）
     python -m agentteam.cli register-team examples/org_demo.py
-
-    # 注册为 opencode 引擎（先起 opencode server；或装进 API 后经 Web 控制台查看）
-    curl -X POST http://localhost:8000/api/teams -H "Content-Type: application/json" \\
-         -d @<(python -c "from examples.org_demo import ORG_TEAM; import json; print(json.dumps(ORG_TEAM, ensure_ascii=False))")
 
 Web 控制台 Teams 页展开 org_demo 卡片的 Agent Tree 即可看到完整三层组织树。
 """
@@ -63,7 +59,6 @@ TEAM: Team = Team(
     name="org_demo",
     description="演示组织：CTO→两大研发部总监→4 个技术组长→7 名组员（三层领导 + N 技术组）",
     default_model=ModelRef("qwen", "qwen-max"),
-    engine="opencode",
     root=_lead("cto", "CTO，统管两大研发部", [
         _lead("director_platform", "平台研发部总监", [
             _lead("lead_backend", "后端技术组组长", [

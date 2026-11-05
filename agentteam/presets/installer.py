@@ -11,22 +11,9 @@ from agentteam.domain.serializer import team_to_dict
 from agentteam.presets import get_preset
 
 
-def _strip_agent_engine(agent_dict: dict | None) -> None:
-    """递归清掉序列化 agent 树里的 engine 字段(SP12a installer 语义)。
-
-    engine=None 表示跟随 Team.engine;显式 --engine 安装时以用户选择为准。
-    """
-    if not isinstance(agent_dict, dict):
-        return
-    agent_dict.pop("engine", None)
-    for child in agent_dict.get("children") or []:
-        _strip_agent_engine(child)
-
-
 def install_preset_to_api(
     name: str,
     api: str = "http://localhost:8000",
-    engine: str | None = None,
 ) -> dict:
     """安装预置团队到 API 服务。
 
@@ -36,29 +23,17 @@ def install_preset_to_api(
        sub-team 需在 preset 模块中定义为模块级变量(变量名 = team.name.upper() 优先)
     3. 注册 TEAM 到 /api/teams(POST 失败为 400 重复 → PUT 更新)
 
-    engine (SP8.1): 覆盖预设的执行引擎（"opencode" | "langgraph" | None）。
-    None = 保留预设自身声明（未声明即 langgraph）。覆盖作用于主团队与
-    deps_teams —— TeamRef 引用时 sub-team 被内联进主团队引擎执行，
-    但作为独立团队运行时也保持同一引擎，避免混合舰队语义分裂。
-
-    返回 {"library": [...], "teams": [...], "engine": str|None}。
+    返回 {"library": [...], "teams": [...]}。
     幂等:重复安装时 POST→PUT 回退,不会因重复而失败。
     """
     from dataclasses import asdict
 
     mod = get_preset(name)
     meta = mod.METADATA
-    result: dict[str, list[str]] = {"library": [], "teams": [], "engine": engine}
+    result: dict[str, list[str]] = {"library": [], "teams": []}
 
     def _team_payload(team) -> dict:
-        d = team_to_dict(team)
-        if engine:
-            d["engine"] = engine
-            # SP12a:显式指定引擎时清掉 agent 级 engine 覆盖(如预设 leader
-            # 声明的 langgraph 混编)——显式选择优先,零 Key opencode 安装
-            # 不被 leader 的进程内模型通道破坏
-            _strip_agent_engine(d.get("root"))
-        return d
+        return team_to_dict(team)
 
     def _post_or_put(url_post: str, url_put: str | None, payload: dict, label: str) -> None:
         resp = requests.post(url_post, json=payload, timeout=10)

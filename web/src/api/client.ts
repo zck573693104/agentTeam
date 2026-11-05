@@ -182,7 +182,6 @@ export interface Team {
   default_model: Record<string, any> | null;
   skills: string[];
   mcp_servers: Record<string, any>[];
-  engine?: "langgraph" | "opencode" | null;
 }
 
 // ---- SP7: Skills + Evolution ----

@@ -5,7 +5,7 @@
  "reason": str|None, "status_code": int|None}
 
 - matched=True 且 run_id 非 None:已创建 run
-- matched=True 且 status_code 非 None:命中但提交失败(配额/底座),透传给调用方
+- matched=True 且 status_code 非 None:命中但提交失败(配额/编译失败),透传给调用方
 - matched=False:被 Fast Path 过滤 / Slow Path 拒绝 / Slow Path 不可用
 """
 from __future__ import annotations
@@ -96,7 +96,7 @@ class TriggerEngine:
                 rule.team_name, task, triggered_by_user=f"trigger:{rule.name}",
             )
         except RunSubmitError as e:
-            # 命中但提交失败(配额/底座)——透传业务状态码给调用方
+            # 命中但提交失败(配额/编译失败)——透传业务状态码给调用方
             return {"matched": True, "run_id": None, "via": via, "reason": reason,
                     "error": str(e), "status_code": e.status_code}
         if self._audit is not None:

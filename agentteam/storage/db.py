@@ -180,16 +180,6 @@ def _migration_v3(conn: sqlite3.Connection) -> None:
         pass
 
 
-# SP8: harness 引擎编排快照（与 SqliteSaver checkpoint 对等，
-# 服务重启后 approve 仍可续跑）
-_MIGRATION_V11 = """
-CREATE TABLE IF NOT EXISTS run_engine_state (
-    run_id     TEXT PRIMARY KEY,
-    state      TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-"""
-
 # 跨 run 记忆层:run 终态后由 MemoryEngine 蒸馏的团队级经验条目
 _MIGRATION_V12 = """
 CREATE TABLE IF NOT EXISTS run_memories (
@@ -269,6 +259,10 @@ def _migration_v16_alters(conn: sqlite3.Connection) -> None:
             pass  # 幂等:列已存在(旧库重跑迁移)
 
 
+# opencode harness 引擎移除:删除其编排快照表(V11 引入,已无读方)
+_MIGRATION_V17 = "DROP TABLE IF EXISTS run_engine_state;"
+
+
 MIGRATIONS: list[tuple[int, str, object]] = [
     (1, "base tables (runs/run_events/approvals/teams/library_agents)", _MIGRATION_V1),
     (2, "evolution_history table (SP7b)", _MIGRATION_V2),
@@ -276,12 +270,12 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (4, "performance indexes (WAL/aggregate)", _MIGRATION_V4),
     (8, "ALTER runs/run_events for v6 columns (triggered_by_user/trace_id/parent_span_id/chain)", _migration_v6_alters),
     (10, "ALTER run_events.state_bucket for v8 (Graph Engineering P5)", _migration_v8_alters),
-    (11, "run_engine_state table (SP8 harness snapshot, 对等 SqliteSaver checkpoint)", _MIGRATION_V11),
     (12, "run_memories table (跨 run 记忆层)", _MIGRATION_V12),
     (13, "ALTER approvals for v12 columns (tool_name/args_preview, 审批 diff 预览)", _migration_v13_alters),
     (14, "notify_outbox table (SP12b IM 通知 outbox:先存后发/退避重试/回执)", _MIGRATION_V14),
     (15, "trigger_rules table (SP12c 事件驱动 Trigger:Fast/Slow Path 两级过滤)", _MIGRATION_V15),
     (16, "ALTER runs/approvals for v15 columns (mandate_json/mandate_version, SP12 Mandate 授权)", _migration_v16_alters),
+    (17, "drop run_engine_state (opencode harness 移除)", _MIGRATION_V17),
 ]
 
 

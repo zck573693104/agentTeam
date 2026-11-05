@@ -21,9 +21,7 @@
 - [测试](#测试)
 - [模块索引](#模块索引)
 - [里程碑](#里程碑)
-- [SP8：opencode 套壳引擎（双引擎架构）](#sp8opencode-套壳引擎双引擎架构)
 - [容器部署（内网一键起）](#容器部署内网一键起)
-- [企业部署指引（opencode 路线）](#企业部署指引opencode-路线)
 
 ---
 
@@ -122,13 +120,6 @@
   - `graph.py` — TeamCompiler（Team → StateGraph 编译，含审批门 + MCP 加载）
   - `trace.py` — TraceWriter 协议（SQLite / Fake 实现）
   - `approval.py` — 审批门节点（step 级 / worker 级 / tool 级，interrupt 实现）
-- `agentteam.harness` —— **SP8：opencode 套壳执行引擎**（Agent = 控制平面 + opencode 底座）
-  - `opencode_client.py` — opencode v2 `/api/*` REST + SSE 客户端（自动重连、回合锚点）
-  - `translator.py` — Team JSON → opencode v2 会话/prompt 内联/计划 schema/MCP/provider 配置
-  - `approval.py` — 三级审批桥（step/worker 控制平面门 + tool 级事后中断与审计）
-  - `engine.py` — HarnessRunner（plan→dispatch(seq/dag)→review，graph 协议适配 + 快照续跑）
-  - `events.py` — opencode 事件 → AgentTeam trace 事件词表（前端零改动）
-  - `runner.py` — 状态持久化（run_engine_state 表）+ 引擎工厂
 - `agentteam.api` —— FastAPI 后端 API（团队注册、任务提交、SSE 实时推送、审批续跑、用量统计）
   - `server.py` — FastAPI app 工厂（create_app）
   - `serializer.py` — Team JSON ↔ dataclass 转换
@@ -234,29 +225,12 @@ role → `RoleSpec` 注册表（class-level 单例），第三方可扩展新 ro
 
 ## 快速开始
 
-三种启动方式：**A. 本机开发模式**（双引擎，最快跑通）、**B. Docker 一键起**（内网部署）、**C. 测试脚本**。
+三种启动方式：**A. 本机开发模式**（最快跑通）、**B. Docker 一键起**（内网部署）、**C. 测试脚本**。
 
-### 引擎怎么选（只需要其一，不必同时存在）
-
-两个执行引擎是每团队二选一的关系（`Team.engine` 字段），按需取舍：
-
-| | langgraph 引擎（默认） | opencode 引擎 |
-|---|---|---|
-| 额外安装 | **无**（纯 Python 进程内） | opencode server：本机 CLI / Docker 容器 / 内网另一台机器，三选一 |
-| 模型接入 | 各供应商 API Key（`DASHSCOPE_API_KEY` 等） | opencode provider（免费模型零 Key 开箱 / 自有 Key / 自托管 vLLM） |
-| tool 级审批语义 | **事前拦截**（工具执行前 interrupt） | 事后中断 + 审计（v2 底座限制，首个调用可能已执行） |
-| 适合场景 | 合规要求执行前拦截、零外部依赖 | 要 opencode 生态（75+ provider）、免费模型开箱跑 |
-
-判断规则：**只选一个**。不想装 opencode → 全部团队不写 `engine` 字段（默认 langgraph），
-可另设 `AGENTTEAM_HARNESS_DISABLED=1` 彻底关闭 harness；反之全 fleet 走 opencode →
-设 `AGENTTEAM_DEFAULT_ENGINE=opencode`。默认引擎下不安装 opencode 对 langgraph
-零影响（harness 仅在 opencode 团队提交 run 时才真正连接）。
-
-**既不装 opencode、也不用 Docker？** 完全可以——这就是默认 langgraph 模式：
-纯 Python 进程内执行，唯一前置是**任意一家模型的 API Key 环境变量**
-（`DASHSCOPE_API_KEY`（Qwen）/ `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`，或本地
-Ollama 免 Key）。按下方方式 A 跳过第 1 步即可，编排/三级审批/自进化/Web 控制台
-全部可用，且 tool 级审批是更强的「事前拦截」语义。
+执行引擎是 **langgraph**：纯 Python 进程内执行，唯一前置是**任意一家模型的 API Key
+环境变量**（`DASHSCOPE_API_KEY`（Qwen）/ `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`，
+或本地 Ollama 免 Key）。编排/三级审批/自进化/Web 控制台全部可用，
+tool 级审批是「事前拦截」语义。
 
 ### 方式 A：本机开发模式
 
@@ -264,47 +238,38 @@ Ollama 免 Key）。按下方方式 A 跳过第 1 步即可，编排/三级审�
 # 0. 安装（首次执行一次；extras 可选 qwen/openai/anthropic/ollama/dev）
 pip install -e ".[qwen,dev]"
 
-# 1. 启动执行底座：opencode server —— 【可选】
-#    不想装 opencode / 不用 Docker：跳过本步，全程走 langgraph 引擎（见上文引擎怎么选）
-npm i -g opencode-ai@1.18.32        # 版本钉在 1.18.x（引擎契约已验证线，见 SP8 §9）
-opencode serve --port 4117          # 建议在目标项目目录下运行，worker 的文件操作落在这里
-
-# 2. 启动控制平面：API + Web 控制台（同源托管）
+# 1. 启动控制平面：API + Web 控制台（同源托管）
 AGENTTEAM_SKILLS_DIR=./skills uvicorn agentteam.api.server:create_app --factory --port 8000
 #   - API 服务 / Web 控制台：http://localhost:8000
 #   - API 文档：http://localhost:8000/docs
 #   - AGENTTEAM_SKILLS_DIR 让 Web 控制台的 Skills 页有数据（默认空）
 
-# 3. 注册团队（三选一；前提是你已在第 2 步把服务跑起来）
-python -m agentteam.cli install-preset enterprise_dev --engine opencode   # 企业预设（opencode 引擎，免费模型零 Key 开箱）
-python -m agentteam.cli register-dev-team                                 # 研发小队（langgraph 引擎）
-#   ↑ 不装 opencode 的主路径：先配任一家模型 Key，如 export DASHSCOPE_API_KEY=sk-xxx（Qwen）
+# 2. 注册团队（三选一；前提是你已在第 1 步把服务跑起来）
+python -m agentteam.cli install-preset enterprise_dev     # 企业预设（三级团队）
+python -m agentteam.cli register-dev-team                 # 研发小队
+#   ↑ 先配任一家模型 Key，如 export DASHSCOPE_API_KEY=sk-xxx（Qwen）
 #   （OPENAI_API_KEY / ANTHROPIC_API_KEY / 本地 Ollama 亦可，见「配置」与模型适配器）
-python -m agentteam.cli register-team path/to/team.py                     # 自定义 Team 配置文件
+python -m agentteam.cli register-team path/to/team.py     # 自定义 Team 配置文件
 
-# 4. 提交任务
+# 3. 提交任务
 curl -X POST http://localhost:8000/api/runs   -H "Content-Type: application/json"   -d '{"team_name": "enterprise_dev", "task": "实现一个 hello world 程序"}'
 
-# 5. 查看实时轨迹
+# 4. 查看实时轨迹
 curl -N http://localhost:8000/api/runs/{run_id}/stream   # SSE 事件流
 #   或浏览器打开 http://localhost:8000 进 Web 控制台（Runs → RunDetail 页可审批/取消）
 ```
 
 要点：
 
-- 团队 JSON 里写 `"engine": "opencode"` 走套壳引擎，不写走原 LangGraph 引擎，二者可混跑。
-  opencode 引擎配默认免费模型即可开箱跑通（无任何模型 Key）；langgraph 引擎的 run 需要
-  对应供应商的 API Key（如 `DASHSCOPE_API_KEY`）。
+- langgraph 引擎的 run 需要对应供应商的 API Key（如 `DASHSCOPE_API_KEY`）。
 - 首跑提交后即可在 Web 控制台看到实时轨迹；**审批触发时 run 变 `interrupted`**，
   在 Runs → RunDetail 页点批准/拒绝即续跑（服务重启后仍可续）。
-- 深层级预设（enterprise_dev 三级团队）在免费模型上首跑可能较慢或撞限流（见下表）。
 
 ### 常见启动问题
 
 | 现象 | 原因与处理 |
 |---|---|
 | Web 控制台 Skills 页为空 / `GET /api/skills/{name}` 404 | 未设技能目录：启动 API 时带 `AGENTTEAM_SKILLS_DIR=./skills`（Docker 镜像已内置） |
-| 提交 run 返回 502 "opencode 版本不兼容" | opencode server 版本偏离契约线：`npm i -g opencode-ai@1.18.32` 钉回 1.18.x |
 | run failed，error 里含 429 / FreeUsageLimitError | 免费共享模型限流：等额度恢复，或换自有 Key（`DEEPSEEK_API_KEY` 等放 `.env`） |
 | run 卡在 `interrupted` | 正常——等待人工审批；到 Web 控制台 Runs → RunDetail 点批准/拒绝 |
 | Web 控制台 404 / 无样式 | 未构建前端：`cd web && npm install && npm run build`（dist 会由 API 同源托管） |
@@ -312,29 +277,22 @@ curl -N http://localhost:8000/api/runs/{run_id}/stream   # SSE 事件流
 ### 方式 B：Docker 一键起（内网部署）
 
 ```bash
-# 1. 准备 .env（compose 强制要求底座密码）
-echo "OPENCODE_SERVER_PASSWORD=换一个强密码" > .env
-
-# 2. 一键起双容器：agentteam(控制平面) + opencode(底座，共享网络命名空间)
+# 一键起容器（控制平面，数据落 agentteam-data 卷）
 docker compose up -d --build
 
-# 3. 访问 http://127.0.0.1:8000（只绑 loopback，对外走内网反代/SSH 隧道）
+# 访问 http://127.0.0.1:8000（只绑 loopback，对外走内网反代/SSH 隧道）
 ```
 
-常用变体与卷挂载（目标仓库、模型密钥透传）见 [容器部署](#容器部署内网一键起)。
+常用变体与卷挂载见 [容器部署](#容器部署内网一键起)。
 
 ### 方式 C：测试脚本
 
 ```bash
 python -m pytest tests -q                                 # 全量
-python -m pytest tests/harness -q                         # 仅套壳引擎（离线 fake，无外部依赖）
-python -m pytest tests/harness/test_real_opencode.py -q   # 真机冒烟（需 4117 端口 server；限流自动 skip）
 
 cd web && npm install && npm run build && npx vitest run  # 前端构建 + 前端测试
 ```
 
-opencode 引擎相关环境变量（`AGENTTEAM_OPENCODE_URL` / `AGENTTEAM_OC_MODEL` /
-`AGENTTEAM_OC_TIMEOUT` 等）见 [SP8 章节](#sp8opencode-套壳引擎双引擎架构)；
 平台配置（DB/日志/鉴权/配额）见 [配置](#配置)。
 
 ---
@@ -366,6 +324,7 @@ opencode 引擎相关环境变量（`AGENTTEAM_OPENCODE_URL` / `AGENTTEAM_OC_MOD
 | `AGENTTEAM_MEMORY_MAX_ENTRIES` | `8` | 每次注入 leader 上下文的最近记忆条数上限 |
 | `AGENTTEAM_MEMORY_INJECT_BUDGET_TOKENS` | `600` | 记忆注入的 token 预算（chars/4 估算）；`0` 禁用注入（蒸馏仍进行） |
 | `AGENTTEAM_TRIGGERS_SLOW_PATH_ENABLED` | `true` | 事件驱动 Trigger 允许 Slow Path（LLM 语义判定）；`false` 只走 Fast Path 确定性条件 |
+| `AGENTTEAM_SKILLS_DIR` | 不设＝不加载 | SP7 技能目录（`uvicorn --factory` 无法传参时的唯一入口） |
 
 ### IM 通知（等待审批 / 完成 / 失败推送）
 
@@ -399,10 +358,7 @@ Mandate），属于授权事件回执而非普通打扰。
 （分派纪律写死在 prompt：指令只含目标+验收标准、≤30 词、不写实现方案），
 因此 leader 用便宜快的小模型即可；worker 干重活，配最强模型：
 
-- **langgraph 引擎**：直接给 leader/worker 配不同 `model`；
-- **opencode 引擎（混编）**：leader 声明 `engine: "langgraph"` → plan/review 走
-  进程内轻量通道，worker 留在 opencode 底座（`dev_lead` / `enterprise_dev` /
-  `project_management` 预设已内置此声明）；
+- 直接给 leader/worker 配不同 `model`；
 - worker 若必须向人提问，回复末尾用单独一行 `QUESTION: <问题>`（一次最多一个），
   轨迹中表现为 `worker_attention` 事件。
 
@@ -411,7 +367,7 @@ Mandate），属于授权事件回执而非普通打扰。
 对标 DeepSeek Super-agent 的事件驱动设计（第 3 节 Trigger）：Agent 不再只能等人
 `POST /api/runs`，任何能发 JSON 的系统（GitHub webhook、IM bot、cron、自建巡检）
 都可以成为事件源。规则存 SQLite（`trigger_rules` 表），命中后走与人工提交
-**完全相同**的 run 流程（配额/审计/引擎选择），`triggered_by_user` 记
+**完全相同**的 run 流程（配额/审计），`triggered_by_user` 记
 `trigger:<规则名>` 以区分人工触发。
 
 **两级过滤**（Fast/Slow Path，规则里二选一或组合）：
@@ -446,7 +402,7 @@ curl -X POST http://localhost:8000/api/triggers -H "Content-Type: application/js
 ```
 
 规则管理：`GET /api/triggers`（secret 打码）/ `GET|PUT|DELETE /api/triggers/{name}`。
-命中但提交失败（配额 429 / 底座 502-503）会透传对应状态码；任务文本从事件字段
+命中但提交失败（配额 429 / 编译失败 400）会透传对应状态码；任务文本从事件字段
 提取时单值截断 2000 字符、总长 4000 字符，防外部事件撑爆 prompt。
 
 ### Mandate 授权模型（SP12：授权与执行分离）
@@ -487,9 +443,8 @@ curl -X POST http://localhost:8000/api/runs/<run_id>/messages -H "Content-Type: 
 ```
 
 投递语义：run 必须处于 running/interrupted（终态返回 409，提示重新提交而非
-复活）；双引擎统一生效——langgraph 在 worker 每次 LLM 调用前注入
-`[人工追问]` 消息（与取消检查同轮询）；opencode 在轮询间隙 interrupt 当前
-回合 → 排队追问回合 → turn 重锚。投递产生 `follow_up_delivered` 轨迹事件
+复活）；langgraph 在 worker 每次 LLM 调用前注入
+`[人工追问]` 消息（与取消检查同轮询）。投递产生 `follow_up_delivered` 轨迹事件
 （含队列深度），前端无监听时零影响。
 
 ### 跨 run 记忆层（团队经验蒸馏与注入）
@@ -498,7 +453,6 @@ run 终态（completed / failed）后，`MemoryEngine` 在后台线程用 LLM �
 trace 蒸馏成一条团队记忆（结果要点 / 踩坑 / 涉及文件），存入 SQLite `run_memories`
 表；下一次同团队 run 启动时，最近 N 条记忆按 token 预算裁剪后注入 leader 的
 plan 上下文（`<memory>` 块），团队因此「记得」上次做过什么、踩过什么坑。
-双引擎统一生效（langgraph 注入 leader_plan 消息，opencode 引擎前置拼进 plan 指令）。
 
 ```jsonc
 // 全部可关：
@@ -514,28 +468,6 @@ curl -X DELETE http://localhost:8000/api/teams/dev_lead/memories/3   # 删除（
 ```
 
 蒸馏失败只记日志，绝不影响 run 主流程；记忆按 team 隔离，跨队不可见。
-
-### 混编（确定性领导 + 自主工人）
-
-Agent 级 `engine` 字段（对标 AgentTeams 多运行时混编思想）：`Team.engine=opencode`
-时，给 supervisor 显式声明 `engine="langgraph"`，其 plan/review 改走**进程内
-LangChain 模型**（确定性、便宜、快），worker 会话仍走 opencode（自主执行底座）。
-TeamJSON 示例：
-
-```jsonc
-{
-  "name": "mixed_team", "engine": "opencode",
-  "root": {
-    "name": "leader", "role": "supervisor",
-    "engine": "langgraph",              // ← 混编开关：领导走进程内模型
-    "model": {"provider": "qwen", "name": "qwen-max"},
-    "children": [ ... ]                 // worker 不动，照走 opencode
-  }
-}
-```
-
-显式声明 `engine="langgraph"` 但 API 进程没配模型 Key 会在 run 启动时报错
-（fail-fast，不静默降级）。
 
 Python 代码内访问配置：
 
@@ -767,7 +699,7 @@ python -m pytest tests/integration/ -v
 
 ### 测试规模
 
-- **883 测试用例 / 100 测试文件**，覆盖所有核心模块（882 passed + 1 skipped 基线；另 3 条真机 opencode 冒烟需本机起真实底座，离线默认 skip/失败不计入功能保证）
+- **741 测试用例 / 93 测试文件**，覆盖所有核心模块（740 passed + 1 skipped 基线）
 - 含端到端集成测试（多级团队 + MCP 全流程）
 - 含并发安全测试（library check-then-set、SSE 断线重连）
 
@@ -777,13 +709,6 @@ python -m pytest tests/integration/ -v
 
 ```
 agentteam/
-├── harness/                  # SP8: opencode 套壳执行引擎（双引擎）
-│   ├── opencode_client.py    # v2 /api/* REST + SSE 客户端
-│   ├── translator.py         # Team JSON → opencode 配置
-│   ├── approval.py           # 三级审批桥（tool 级事后中断+审计）
-│   ├── engine.py             # HarnessRunner 编排（graph 协议适配）
-│   ├── events.py             # opencode 事件 → trace 词表
-│   └── runner.py             # 快照持久化 + 引擎工厂
 ├── api/                      # FastAPI 后端
 │   ├── server.py             # app 工厂 create_app
 │   ├── run_manager.py        # 后台线程执行 + interrupt/resume
@@ -868,132 +793,34 @@ agentteam/
 - [x] M5b Web UI（React + antd + SSE 实时控制台）
 - [x] M6 示例团队 + 测试
 - [x] SP7 Skill 系统 + 自进化
-- [x] SP8 opencode 套壳引擎（双引擎：`Team.engine = "langgraph" | "opencode"`）
-
-## SP8：opencode 套壳引擎（双引擎架构）
-
-AgentTeam 现在支持把执行层架在开源 [opencode](https://github.com/sst/opencode)（MIT）上：
-AgentTeam 保留**控制平面**（Team schema、三级审批策略、专家库、SP7 自进化、审计、
-Web 控制台），opencode server 承担 **agent loop / 工具系统 / 模型接入 / MCP**。
-设计详见 [docs/opencode-harness-design.md](docs/opencode-harness-design.md)。
-
-启动方式见上文[快速开始 · 方式 A](#方式-a本机开发模式)。注册 opencode 引擎团队并提交任务：
-
-```bash
-curl -X POST http://localhost:8000/api/teams -H "Content-Type: application/json" -d '{
-  "name": "oc_dev", "description": "套壳研发小队", "engine": "opencode",
-  "root": {
-    "name": "leader", "role": "supervisor", "system_prompt": "你是研发主管",
-    "children": [
-      {"name": "coder",  "role": "worker", "system_prompt": "你负责写代码", "tools": ["write_file", "bash"]},
-      {"name": "tester", "role": "worker", "system_prompt": "你负责测试", "tools": ["read_file", "bash"]}
-    ]},
-  "default_model": {"provider": "qwen", "name": "qwen-max"},
-  "skills": [], "mcp_servers": []
-}'
-
-curl -X POST http://localhost:8000/api/runs \
-  -H "Content-Type: application/json" \
-  -d '{"team_name": "oc_dev", "task": "实现一个 hello world 程序"}'
-```
-
-不声明 `engine` 的团队自动走原 LangGraph 引擎，行为完全不变。
-
-### 4. 配置（环境变量）
-
-| 变量 | 含义 | 默认 |
-|---|---|---|
-| `AGENTTEAM_OPENCODE_URL` | opencode server 地址 | `http://127.0.0.1:4096` |
-| `AGENTTEAM_OC_MODEL` | 默认模型 `provider/model` | `opencode/ling-3.0-flash-fin-free`（免费） |
-| `OPENCODE_SERVER_PASSWORD` | opencode server Basic Auth | 无 |
-| `AGENTTEAM_DEFAULT_ENGINE` | Team 未声明 engine 时的默认引擎 | `langgraph` |
-| `AGENTTEAM_OC_TIMEOUT` | 单次 prompt 等待上限（秒） | `600` |
-| `AGENTTEAM_OC_TOOL_GUARD` | 白名单外工具调用的处置：`strict`（中断+审批）/ `audit`（只记账继续跑）/ `off` | `strict` |
-| `AGENTTEAM_SKILLS_DIR` | SP7 技能目录（`uvicorn --factory` 无法传参时的唯一入口） | 不设＝不加载技能 |
-| `AGENTTEAM_OC_SMOKE=0` | 关闭真实 opencode 冒烟测试 | 自动探测 |
-| `AGENTTEAM_HARNESS_DISABLED=1` | 完全禁用 harness 引擎 | 启用 |
-
-### 5. 测试
-
-```bash
-python -m pytest tests -q          # 全量（新旧引擎 + 734 用例）
-python -m pytest tests/harness -q  # 仅套壳引擎（fake server，无外部依赖）
-# 真实 opencode 冒烟：先 `opencode serve --port 4117`，再跑 tests/harness/test_real_opencode.py
-```
 
 ## 容器部署（内网一键起）
 
-仓库自带两个镜像定义与编排：`Dockerfile`（控制平面，React 控制台在镜像内构建后
-由 FastAPI 同源挂载）与 `docker/opencode.Dockerfile`（执行底座，版本钉死）。
+仓库自带镜像定义与编排：`Dockerfile`（控制平面，React 控制台在镜像内构建后
+由 FastAPI 同源挂载）。
 
 ```bash
-cp .env.example .env               # 至少改 OPENCODE_SERVER_PASSWORD、AGENTTEAM_OC_MODEL
-docker compose build               # opencode 版本可用 --build-arg OPENCODE_VERSION=1.18.32
+docker compose build
 docker compose up -d
 docker compose logs -f agentteam   # 控制台 http://127.0.0.1:8000（只绑宿主 loopback）
 ```
 
 拓扑与安全边界：
 
-- **opencode 只监听容器 loopback**：它与控制平面共享 network namespace
-  （`network_mode: "service:agentteam"`），因此宿主和同网段机器都连不上 4117，
-  而 `AGENTTEAM_OPENCODE_URL=http://127.0.0.1:4117` 天然可用。宿主 `8000` 也只绑
-  `127.0.0.1`，对外访问交给内网反向代理或 SSH 隧道。
-- **两个非 root 用户**：控制平面 `agentteam`(uid 10001)、底座 `opencode`(uid 10001)，
-  worker 的 `write_file` / `bash` 都在 opencode 容器的 `/workspace` 内发生。
-- **代码不出域**：把目标仓库挂成 `AGENTTEAM_WORKSPACE`（默认 `./workspace`）。
+- **宿主 `8000` 只绑 `127.0.0.1`**，对外访问交给内网反向代理或 SSH 隧道。
+- **非 root 用户**：容器内以 `agentteam`(uid 10001) 运行。
+- **代码不出域**：把目标仓库挂成工作目录，worker 的 `write_file` / `bash`
+  都在工作目录内发生。
 - **模型不出域**：provider 指向内网网关（vLLM / Ollama / 自托管 DeepSeek / LiteLLM），
-  密钥经环境变量透传，opencode 配置里用 `{env:DEEPSEEK_API_KEY}` 引用，
-  不要把明文写进 `opencode.jsonc` 或 Team JSON。
-- **持久化**：`agentteam-data`（SQLite：团队、run 快照、审批、审计、进化历史）、
-  `opencode-config` / `opencode-data`（opencode 自身配置与会话库）都是命名卷。
-- **升级底座版本**：改 `OPENCODE_VERSION` 前先在目标版本上跑
-  `tests/harness/test_real_opencode.py`；引擎的版本兼容门会对主版本偏离返回 502
-  并给出降级指引，小版本偏离记 `backend_warning` 事件。
+  密钥经环境变量注入，不要把明文写进 Team JSON。
+- **持久化**：`agentteam-data` 命名卷（SQLite：团队、run 快照、审批、审计、
+  进化历史、记忆）。
 
 首次起完注册团队：
 
 ```bash
-agentteam install-preset enterprise_dev --engine opencode   # 混跑：预设走套壳引擎
-# 或按上面「3. 注册 opencode 引擎团队」的 curl 自建
+python -m agentteam.cli install-preset enterprise_dev
 ```
-
-## 企业部署指引（opencode 路线）
-
-1. **数据不出域**：AgentTeam 控制平面 + opencode server 全部内网部署；模型走
-   内网网关（vLLM/Ollama/DeepSeek 自托管，或 LiteLLM 统一代理），Team JSON 里
-   `default_model` 指向网关 provider 即可。
-2. **版本钉住（重要）**：引擎契约只对 opencode **1.18.x（已验证 1.18.32）** 做
-   功能保证——上游 HTTP 面按版本漂移（v2 渠道 experimental 无兼容承诺，`tools`/
-   `deny`/`wait` 的行为随版本变化，issue 对照见设计文档 §9）。run 提交时引擎会
-   自动做版本兼容门：主版本偏离直接拒绝（502，附降级指引），小版本偏离告警并
-   记入 run 审计（`backend_warning` 事件）。升级 opencode 前先重跑
-   `tests/harness/test_real_opencode.py`。
-3. **权限最小化**：Worker 的 `tools` 白名单 + `approval_policy(level="tool", targets=[...])`
-   把写文件/执行命令纳入人工审批。**注意 v2 底座上的语义是「事后中断 + 审计」**
-   （opencode v2 无会话级权限规则集，见设计文档 §4/§8）：违规调用一旦被观测到即
-   中断回合、写 `tool_denied` 并挂起等人工，放行后从断点续跑；但**首个被观测到的
-   调用可能已经执行完毕**，需要「执行前拦住」语义的合规场景请把该 worker 的
-   `engine` 留在 `langgraph`。生产建议给 opencode server 设置
-   `OPENCODE_SERVER_PASSWORD`、用防火墙限制 127.0.0.1，并把 server 跑在
-   容器/独立用户下（worker 的文件操作与命令都在其工作目录内发生）——
-   上面「容器部署」那套编排就是把这几条钉死的默认形态。
-4. **审计与合规**：所有审批决策、工具调用、token 消耗落在 SQLite（`run_events` /
-   `approvals` / `evolution_history`），可对接企业日志管道；Web 控制台实时查看。
-5. **成本控制**：`GET /api/dashboard` 按团队/状态聚合 token 用量；模型侧用
-   LiteLLM 配预算与限流。
-6. **高可用**：审批等待期间 run 快照持久化（`run_engine_state` 表），服务重启后
-   审批仍可续跑；进化引擎失败自动隔离，不影响主流程。
-7. **已知边界**：执行底座已迁到 opencode v2 `/api/*` 面（v1.18.32 实测）。v2 不提供
-   per-request `system`/`format`/`tools`，也没有会话级 permission 规则集，因此
-   system prompt 内联进用户文本、Plan JSON 靠 prompt + 宽容提取、工具管控靠
-   「prompt 约束 + 事后中断审计」（逐项对策见设计文档 §8）。若 opencode 后续补齐
-   事前权限门，只需替换 `approval.review_tool_call` 的处置分支，控制平面与审计词表不变。
-8. **预设舰队混跑**：企业预设默认 langgraph 引擎；`agentteam install-preset
-   enterprise_dev --engine opencode` 可把预设（含依赖 sub-team）安装为 opencode
-   引擎，与 langgraph 团队同 fleet 混跑，`AGENTTEAM_DEFAULT_ENGINE` 可设全站默认。
-   适配器扩展（DeepSeek Harness / ZCode）评估结论与触发信号见设计文档 §10：
-   当前均不建议投入，模型侧需求经 LiteLLM 网关解决。
 
 ## License
 

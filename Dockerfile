@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1
 # AgentTeam 控制平面：FastAPI + SQLite 审计 + React 控制台（同源挂在 /，API 在 /api）。
-# 执行底座 opencode server 不在本镜像内 —— 见 docker/opencode.Dockerfile。
 
 # 控制台构建。产物 COPY 进运行镜像后由 FastAPI 静态挂载，
 # 前端一律用相对路径 /api/*，因此同源部署无需任何 base 配置。
@@ -32,8 +31,7 @@ RUN mkdir -p /app/data && chown -R 10001:10001 /app
 USER agentteam
 
 # create_app 的默认 SQLite 路径是相对 CWD 的 data/agentteam.db，故卷挂 /app/data。
-ENV AGENTTEAM_SKILLS_DIR=/app/skills \
-    AGENTTEAM_OPENCODE_URL=http://127.0.0.1:4117
+ENV AGENTTEAM_SKILLS_DIR=/app/skills
 
 EXPOSE 8000
 VOLUME ["/app/data"]

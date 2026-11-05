@@ -37,7 +37,6 @@ TEST_SUBTEAM: Team = Team(
     description="测试小队 — 主管 + 测试员",
     root=Agent(
         name="test_lead", role="supervisor",
-        engine="langgraph",  # SP12a:领导轻量混编(确定性 plan/review 通道)
         system_prompt="你是测试主管,派活给 tester。",
         children=[Agent(
             name="tester", role="worker",
@@ -65,15 +64,11 @@ TEAM: Team = Team(
     ],
     root=Agent(
         name="ceo", role="supervisor",
-        # SP12a:各级 leader(ceo/cto/test_lead)统一走进程内确定性通道,
-        # worker 跟随团队引擎——「领导轻量、工人强力」混编
-        engine="langgraph",
         system_prompt="你是 CEO,派活给技术副总裁 CTO,审核 CTO 产出。",
         # P2 maker/checker 独立:review 用不同模型,避免同模型自评自批
         review_model=ModelRef("openai", "gpt-4o-mini"),
         children=[Agent(
             name="cto", role="supervisor",
-            engine="langgraph",  # SP12a:同上,中层领导也走轻量通道
             system_prompt=(
                 "你是 CTO,派活给工程师(eng)、审查员(reviewer)和测试小队(qa_team),"
                 "汇总各方产出回复 CEO。"

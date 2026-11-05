@@ -3,7 +3,7 @@
 设计原则(与 SP7b EvolutionEngine 同纪律):
 - 异步:RunManager 终态分支的 daemon 线程触发,不阻塞主流程
 - 隔离:蒸馏失败仅记日志,绝不影响 run 结果
-- 双引擎:挂在 RunManager 终态收敛点,langgraph / opencode 团队都生效
+- 全团队生效:挂在 RunManager 终态收敛点,所有 langgraph 团队都覆盖
 - 团队级:记忆按 team_name 聚合(非 agent 级),注入下一次同团队 run 的
   leader 上下文,让团队「记得」上次做过什么、踩过什么坑
 

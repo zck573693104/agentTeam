@@ -53,7 +53,6 @@ def create_app(
     agent_library: AgentLibrary | None = None,
     skills_dir: Path | None = None,
     web_dist: Path | None | object = _DEFAULT,
-    harness_enabled: bool | None = None,
     log_level: str | None = None,
 ) -> FastAPI:
     # 从集中式 Settings 读取配置(env_prefix=AGENTTEAM_ 自动覆盖)
@@ -66,11 +65,7 @@ def create_app(
     logger.info("starting AgentTeam, db_path=%s", db_path)
     conn = init_db(db_path)
 
-    # harness（opencode 引擎）默认启用；AGENTTEAM_HARNESS_DISABLED=1 显式关闭
-    # （如旧引擎回归测试环境）。harness_enabled 参数优先于环境变量。
     import os as _os
-    if harness_enabled is None:
-        harness_enabled = not _os.environ.get("AGENTTEAM_HARNESS_DISABLED")
 
     # BUG-07:用 lifespan 在 app shutdown 时显式 close conn,
     # 避免 Windows 上 SQLite 文件锁残留(原实现 conn 仅在 app GC 时释放)。
@@ -151,7 +146,7 @@ def create_app(
 
     # 记忆层: run 终态后蒸馏团队记忆(MemoryEngine),新 run 启动时注入
     # leader 上下文(RunManager._build_memory_context)。失败静默隔离,
-    # 不影响主流程;与 evolution 同一个收敛点,双引擎统一生效。
+    # 不影响主流程;与 evolution 同一个收敛点,对所有团队统一生效。
     memory_repo = MemoryRepo(conn, lock=conn_lock)
     memory_engine = MemoryEngine(
         model_provider=mp,
@@ -181,32 +176,6 @@ def create_app(
         notifier=NotificationService(run_repo, team_store, outbox=notify_outbox_repo),
     )
 
-    # SP8: harness（opencode 套壳）引擎组装。
-    # client/factory 惰性创建：未配置 opencode 或显式禁用时不建连接，
-    # langgraph 路径（默认）零影响。
-    from agentteam.harness.opencode_client import OpenCodeClient
-    from agentteam.harness.runner import (
-        HarnessEngineFactory,
-        HarnessStateStore,
-        default_oc_config_from_env,
-    )
-
-    harness_factory: HarnessEngineFactory | None = None
-    harness_state_store = None
-    if harness_enabled:
-        oc_cfg, oc_default_model = default_oc_config_from_env()
-        oc_client = OpenCodeClient(oc_cfg)
-        harness_state_store = HarnessStateStore(conn, lock=conn_lock)
-        harness_factory = HarnessEngineFactory(
-            client=oc_client,
-            default_model=oc_default_model,
-            skill_loader=skill_loader,
-            library=lib,
-            state_store=harness_state_store,
-            prompt_timeout=float(_os.environ.get("AGENTTEAM_OC_TIMEOUT", "600")),
-            model_provider=mp,
-        )
-
     app.include_router(teams_router(
         team_store, memory_repo, run_repo=run_repo, audit_repo=audit_repo,
     ))
@@ -214,15 +183,13 @@ def create_app(
         runs_router(
             run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,
             checkpointer=saver, agent_library=lib, skill_loader=skill_loader,
-            harness_factory=harness_factory,
-            harness_state_store=harness_state_store,
             notify_outbox_repo=notify_outbox_repo,
         )
     )
 
     # SP12c: 事件驱动 Trigger(对标 DeepSeek Super-agent 事件驱动设计)。
     # 入站 webhook 经 Fast/Slow Path 两级过滤命中规则后,走与人工提交
-    # 完全相同的 submit_run 流程(配额/审计/引擎选择),triggered_by_user
+    # 完全相同的 submit_run 流程(配额/审计),triggered_by_user
     # 记 "trigger:<规则名>"。Slow Path 需要模型 Key,无 Key 静默跳过。
     from agentteam.api.routes.runs import RunSubmitError, submit_run
     from agentteam.api.routes.triggers import triggers_router
@@ -242,7 +209,7 @@ def create_app(
             run_manager=run_manager,
             model_provider=mp, tool_registry=tr,
             checkpointer=saver, agent_library=lib,
-            skill_loader=skill_loader, harness_factory=harness_factory,
+            skill_loader=skill_loader,
         )
 
     trigger_engine = TriggerEngine(

@@ -67,7 +67,7 @@ def run_to_dict(row) -> dict:
 
 
 class RunSubmitError(ValueError):
-    """run 提交的业务性失败（配额/底座不可用/编译失败）。
+    """run 提交的业务性失败（配额 429 / 编译失败 400）。
 
     status_code 直接映射 HTTP 状态；HTTP 路由转 HTTPException，
     Trigger 引擎等非 HTTP 调用方捕获后自行决定处置。
@@ -94,17 +94,16 @@ def submit_run(
     checkpointer,
     agent_library: AgentLibrary,
     skill_loader=None,
-    harness_factory=None,
     quota_repo=None,
     admin_audit_repo=None,
 ) -> str:
     """提交一个 run（create_run 的核心逻辑，供 HTTP 路由与 Trigger 引擎复用）。
 
     SP12 对标 DeepSeek Super-agent 事件驱动：入站 Trigger 命中规则后
-    走同一条提交流程（配额/审计/引擎选择），triggered_by_user 记
+    走同一条提交流程（配额/审计），triggered_by_user 记
     "trigger:<规则名>" 以区分人工触发。
-    业务失败统一抛 RunSubmitError（配额 429 / harness 不可用 502-503 /
-    编译失败 400）；调用前 team 必须已存在且非 None。
+    业务失败统一抛 RunSubmitError（配额 429 / 编译失败 400）；
+    调用前 team 必须已存在且非 None。
     """
     # P-A4 Token 配额校验(对标阿里云 AgentTeams "成本可控"):
     # 启动 run 前检查当前周期已用 token,超额返回 429。
@@ -146,54 +145,6 @@ def submit_run(
         )
     trace_writer = BroadcastTraceWriter(audit_repo, event_bus)
     config = {"configurable": {"thread_id": run_id}}
-
-    # SP8: harness（opencode 套壳）引擎路径
-    if _team_engine(team) == "opencode":
-        if harness_factory is None:
-            run_repo.end_run(run_id, "failed")
-            eid = audit_repo.add_event(
-                run_id, "error", "system",
-                {"error": "harness engine not configured (opencode disabled)"},
-            )
-            event_bus.publish(run_id, {
-                "id": eid, "event_type": "error", "run_id": run_id,
-                "payload": {"error": "harness engine not configured"},
-            })
-            raise RunSubmitError(503, "harness engine not configured (opencode disabled)")
-        try:
-            from agentteam.harness.runner import ensure_backend
-            compat = ensure_backend(
-                harness_factory.client, team, harness_factory._default_model
-            )
-        except Exception as e:
-            run_repo.end_run(run_id, "failed")
-            eid = audit_repo.add_event(
-                run_id, "error", "system", {"error": str(e)}
-            )
-            event_bus.publish(run_id, {
-                "id": eid, "event_type": "error", "run_id": run_id,
-                "payload": {"error": str(e)},
-            })
-            raise RunSubmitError(502, f"opencode backend unavailable: {e}")
-        # 版本兼容性 warn 记入 run 审计（error 已在 ensure_backend 内抛出）
-        if compat.get("level") == "warn":
-            eid = audit_repo.add_event(
-                run_id, "backend_warning", "system",
-                {"version": compat.get("version"), "message": compat.get("message")},
-            )
-            event_bus.publish(run_id, {
-                "id": eid, "event_type": "backend_warning", "run_id": run_id,
-                "payload": {"version": compat.get("version"),
-                            "message": compat.get("message")},
-            })
-        # 注册所有已知 Team（TeamRef 解析 parity）
-        harness_factory.set_teams(team_store.list_all())
-        runner = harness_factory.create(
-            run_id, team, task, trace_writer, audit_repo,
-            run_manager=run_manager,
-        )
-        run_manager.start_run(run_id, runner, config, task)
-        return run_id
 
     import agentteam.runtime.graph as _graph  # 局部导入,避免 api→runtime 顶层循环
     compiler = _graph.TeamCompiler(
@@ -252,14 +203,6 @@ def _build_compiler(
     return compiler
 
 
-def _team_engine(team) -> str:
-    """Team 执行引擎解析：Team.engine 显式声明优先，否则取环境默认。"""
-    import os
-    return getattr(team, "engine", None) or os.environ.get(
-        "AGENTTEAM_DEFAULT_ENGINE", "langgraph"
-    )
-
-
 def runs_router(
     run_manager: RunManager,
     team_store: TeamStore,
@@ -271,8 +214,6 @@ def runs_router(
     checkpointer=None,
     agent_library: AgentLibrary | None = None,
     skill_loader=None,
-    harness_factory=None,
-    harness_state_store=None,
     quota_repo: QuotaRepo | None = None,
     admin_audit_repo: AdminAuditRepo | None = None,
     pep_repo=None,
@@ -301,7 +242,7 @@ def runs_router(
                 run_manager=run_manager,
                 model_provider=model_provider, tool_registry=tool_registry,
                 checkpointer=checkpointer, agent_library=lib,
-                skill_loader=skill_loader, harness_factory=harness_factory,
+                skill_loader=skill_loader,
                 quota_repo=quota_repo, admin_audit_repo=admin_audit_repo,
             )
         except RunSubmitError as e:
@@ -362,32 +303,18 @@ def runs_router(
 
     @router.get("/{run_id}/pending-approval")
     def get_pending_approval(run_id: str):
-        """待审批预览(审批 diff 预览):中断 run 的 park gate + 结构化预览。
+        """待审批预览:中断 run 的 gate + 结构化预览。
 
         - run 非 interrupted → {"pending": false}
-        - harness 引擎有 park 快照 → gate(含截断后的完整入参) + preview
-          (write_file → unified diff / 新内容全文,bash → 命令,见
-          harness/approval_preview.py)
-        - 无快照(langgraph interrupt 等场景) → pending=true 但 gate/preview 为
-          null,前端回退到现有横幅
+        - interrupted → pending=true 但 gate/preview 为 null,
+          前端回退到现有横幅(langgraph interrupt 不产生 park gate)
         """
-        from agentteam.harness.approval_preview import build_approval_preview
-
         run = run_repo.get_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
         if run["status"] != "interrupted":
             return {"pending": False}
-        gate = None
-        if harness_state_store is not None:
-            snapshot = harness_state_store.load(run_id)
-            if snapshot:
-                gate = (snapshot.get("park") or {}).get("gate")
-        return {
-            "pending": True,
-            "gate": gate,
-            "preview": build_approval_preview(gate),
-        }
+        return {"pending": True, "gate": None, "preview": None}
 
     @router.get("/{run_id}/notifications")
     def list_notifications(run_id: str):
@@ -527,26 +454,11 @@ def runs_router(
                 detail=f"Run '{run_id}' is not interrupted (status={current['status']})",
             )
 
-        # SP8: 引擎分支需要 Team（engine 字段 + harness rehydrate 都要）
         team = team_store.get(run["team_name"])
         try:
             if run_manager.has_graph(run_id):
                 # fast path: graph 仍在内存(正常流程),直接 resume
                 run_manager.resume_run(run_id, req.approved, req.reason, decider=decider)
-            elif _team_engine(team) == "opencode":
-                # harness 引擎重启恢复：重建 runner，invoke 时从
-                # run_engine_state 表恢复编排快照（与 SqliteSaver 对等）
-                if harness_factory is None:
-                    raise ValueError("harness engine not configured")
-                harness_factory.set_teams(team_store.list_all())
-                runner = harness_factory.rehydrate(
-                    run_id, team, run["task"],
-                    BroadcastTraceWriter(audit_repo, event_bus), audit_repo,
-                    run_manager=run_manager,
-                )
-                run_manager.rehydrate_and_resume(
-                    run_id, runner, req.approved, req.reason, decider=decider
-                )
             else:
                 # lazy recompile (P0): 服务重启后 _graphs/_configs 丢失,
                 # 从 team_store 取 Team 重新 compile,再 resume。

@@ -9,7 +9,7 @@
 - 撤权:_revocation_payload 带不带 mandate_version 两形态
 - state 快照:_run_in_background 把 mandate 注入 initial(只读)
 - 策略版本化:团队热更新 → 进行中 run 轨迹出现 policy_expired 注记
-- 审批盖章:add_approval/ApprovalBroker.resolve 记录 mandate_version
+- 审批盖章:add_approval 记录 mandate_version
 """
 from __future__ import annotations
 
@@ -29,7 +29,6 @@ from agentteam.domain.mandate import (
     default_mandate,
     policy_version_for_team,
 )
-from agentteam.harness.approval import ApprovalBroker
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
 from agentteam.storage.runs import RunRepo
@@ -296,12 +295,3 @@ def test_add_approval_stamps_mandate_version(run_repo, audit_repo):
                                           mandate_version="pv-approve")
     row = audit_repo.get_approval(approval_id)
     assert row["mandate_version"] == "pv-approve"
-
-
-def test_broker_resolve_passes_mandate_version(run_repo, audit_repo):
-    run_id = run_repo.create_run("t", "task")
-    broker = ApprovalBroker(None, audit_repo)
-    broker.resolve(run_id, {"permission": "bash", "gate": "tool"}, True,
-                   mandate_version="pv-broker")
-    rows = audit_repo.list_approvals(run_id)
-    assert rows[0]["mandate_version"] == "pv-broker"

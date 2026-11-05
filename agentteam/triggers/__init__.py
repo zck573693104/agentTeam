@@ -5,7 +5,7 @@
 - Fast Path:确定性规则(条件全命中才放行),程序求值零 LLM 成本
 - Slow Path:Fast Path 未命中时,LLM 按规则的自然语言策略判定是否行动;
   无模型 Key / 全局关闭 / 判定异常时静默跳过(与 MemoryEngine 同纪律)
-- 命中后经 submit_run 走与人工提交完全相同的配额/审计/引擎选择路径,
+- 命中后经 submit_run 走与人工提交完全相同的配额/审计路径,
   triggered_by_user 记 "trigger:<规则名>"
 """
 from agentteam.triggers.engine import TriggerEngine

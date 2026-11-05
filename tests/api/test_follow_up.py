@@ -5,8 +5,6 @@
   未知 run 空 pop、follow_up_delivered 审计事件
 - HTTP 端点:404/409/422 校验(归属约束:必须显式指定 worker,禁止广播)
 - langgraph 消费:agent_step 在 LLM 调用前注入 [人工追问] 消息并持久化
-- harness 消费:_drain_follow_ups 三步投递(interrupt → prompt_async →
-  重锚 turn_id)
 """
 from __future__ import annotations
 
@@ -21,7 +19,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 from agentteam.api.events import EventBus
 from agentteam.api.run_manager import RunManager
 from agentteam.api.routes.runs import runs_router
-from agentteam.harness.engine import HarnessRunner
 from agentteam.runtime.nodes import make_agent_step
 from agentteam.storage.audit import AuditRepo
 from agentteam.storage.db import init_db
@@ -235,64 +232,3 @@ def test_agent_step_without_follow_up_no_extra_message():
     node = make_agent_step(worker, spy, [], run_manager=_StubRM())
     result = node({"run_id": "r1", "react_messages": []})
     assert [type(m).__name__ for m in result["react_messages"]] == ["AIMessage"]
-
-
-# ================= harness 消费 =================
-
-
-class _FakeOCClient:
-    def __init__(self):
-        self.interrupted: list[str] = []
-        self.prompts: list[tuple[str, str]] = []
-
-    def interrupt_session(self, session_id):
-        self.interrupted.append(session_id)
-
-    def prompt_async(self, session_id, text, delivery=None, **kw):
-        self.prompts.append((session_id, text))
-        return {"id": "m-new-turn"}
-
-    def turn_message_id(self, resp):
-        return resp["id"]
-
-
-def _runner(client, rm_stub, trace=None):
-    return HarnessRunner(
-        client=client, run_id="r1", team=None, task="t",
-        trace_writer=trace, audit_repo=None, run_manager=rm_stub,
-    )
-
-
-class _TraceSpy:
-    def __init__(self):
-        self.events: list[tuple] = []
-
-    def emit(self, run_id, event_type, actor, payload=None, **kwargs):
-        self.events.append((run_id, event_type, actor, payload))
-
-
-def test_harness_drain_delivers_follow_up():
-    """轮询间隙把追问投到在飞会话:interrupt → prompt_async → 重锚 turn_id。"""
-    client = _FakeOCClient()
-    stub = _StubRM({"w1": ["补充:验收标准改成 contains"]})
-    trace = _TraceSpy()
-    runner = _runner(client, stub, trace)
-    info = {"worker": "w1", "session_id": "s1", "turn_id": "t-old"}
-    runner._drain_follow_ups({"__seq__": info})
-
-    assert client.interrupted == ["s1"]
-    assert len(client.prompts) == 1
-    assert client.prompts[0][0] == "s1"
-    assert "[人工追问]" in client.prompts[0][1]
-    assert info["turn_id"] == "m-new-turn"  # 重锚,引擎轮询衔接新回合
-    delivered = [e for e in trace.events if e[1] == "follow_up_delivered"]
-    assert len(delivered) == 1
-    assert delivered[0][2] == "user"
-
-
-def test_harness_drain_skips_empty_inbox():
-    client = _FakeOCClient()
-    runner = _runner(client, _StubRM())
-    runner._drain_follow_ups(
-        {"__seq__": {"worker": "w1", "session_id": "s1", "turn_id": "t"}})
-    assert client.interrupted == [] and client.prompts == []

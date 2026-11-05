@@ -57,7 +57,7 @@ class RunManager:
         # SP7b: 自进化引擎（run 终态后异步触发；None 静默跳过）
         self._evolution = evolution_engine
         # 记忆层: run 终态后蒸馏团队记忆 + 新 run 启动时注入 leader 上下文
-        # （None 静默跳过,双引擎经此处统一生效）
+        # （None 静默跳过,对所有团队统一生效）
         self._memory = memory_engine
         # P-A5: IM 通知服务（等待审批/完成/失败推送 webhook；None 静默跳过）
         self._notifier = notifier
@@ -182,32 +182,12 @@ class RunManager:
 
         decider(P-B2 WAT 双身份):审批决策者用户名,写入 resume payload,
         供节点读取并记入 audit_events。
-
-        harness 引擎（__harness__ 标记）没有 Command 概念，改用
-        {"__resume__": decision} 重入 invoke（见 HarnessRunner._apply_resume）。
         """
         with self._lock:
             graph = self._graphs.get(run_id)
             config = self._configs.get(run_id)
         if graph is None or config is None:
             raise ValueError(f"Run {run_id} not found or not started")
-
-        if getattr(graph, "__harness__", False):
-            resume_value: dict[str, Any] = {
-                "__resume__": {
-                    "approved": approved,
-                    "decider": decider,
-                    **({"reason": reason} if reason else {}),
-                }
-            }
-            self._run_repo.update_status(run_id, "running")
-            # resume 走 run 线程池(与 langgraph 分支一致)
-            future = self._run_executor.submit(
-                self._resume_in_background, run_id, graph, config, resume_value,
-            )
-            with self._lock:
-                self._threads[run_id] = future
-            return
 
         from langgraph.types import Command
 
@@ -331,25 +311,6 @@ class RunManager:
         with self._lock:
             self._threads[run_id] = future
 
-    def rehydrate_and_resume(
-        self,
-        run_id: str,
-        graph,
-        approved: bool,
-        reason: str | None = None,
-        decider: str = "api-user",
-    ) -> None:
-        """把重建的 harness runner 注入内存后 resume（服务重启恢复路径）。
-
-        与 recompile_and_resume 对等：approve_run 检测到内存无 runner
-        （重启后 _graphs 清空）时，由路由层重建 runner 再调用本方法。
-        """
-        with self._lock:
-            self._graphs[run_id] = graph
-            self._configs[run_id] = {"configurable": {"thread_id": run_id}}
-            self._cancel_events.setdefault(run_id, threading.Event())
-        self.resume_run(run_id, approved, reason, decider=decider)
-
     def wait(self, run_id: str, timeout: float = 30.0) -> None:
         """等待 run 的后台 Future 结束(测试用)。
 
@@ -453,7 +414,7 @@ class RunManager:
     def mandate_version(self, run_id: str) -> str | None:
         """读 run 的授权规则版本(SP12 Mandate;无凭据/损坏返回 None)。
 
-        供 harness 审批落账时盖章(approvals.mandate_version)。
+        供审批落账时盖章(approvals.mandate_version)。
         """
         run = self._run_repo.get_run(run_id)
         if run is None or "mandate_json" not in run.keys() or not run["mandate_json"]:
@@ -492,9 +453,8 @@ class RunManager:
         worker 的回答仍走 leader → 出口;leader 目标只产生 follow_up_delivered
         事件(leader 仅可据此 stop,不可代答/重新派工——通信拓扑红线)。
 
-        - target="worker":worker_name 必填,进 per-worker inbox,由双引擎在
-          安全边界消费(langgraph: agent_step LLM 调用前轮询;harness: 轮询
-          间隙 interrupt → prompt_async → 重锚 turn_id);
+        - target="worker":worker_name 必填,进 per-worker inbox,由引擎在
+          安全边界消费(langgraph: agent_step LLM 调用前轮询);
         - target="leader":仅事件,无消费方。
 
         返回该目标当前队列深度。run 存在性/状态由 HTTP 层校验。
@@ -618,8 +578,8 @@ class RunManager:
                     initial["mandate"] = json.loads(mandate_json)
                 except (json.JSONDecodeError, TypeError):
                     pass
-            # 记忆层: 团队历史记忆注入 leader 上下文（双引擎都消费 initial,
-            # langgraph 走 TeamState.memory_context,harness 前置拼进 plan 指令）
+            # 记忆层: 团队历史记忆注入 leader 上下文（langgraph 消费
+            # TeamState.memory_context）
             memory_context = self._build_memory_context(run_id)
             if memory_context:
                 initial["memory_context"] = memory_context
@@ -782,7 +742,7 @@ class RunManager:
     def _build_memory_context(self, run_id: str) -> str:
         """取团队最近记忆,格式化为 leader 注入块(记忆层)。
 
-        在构造初始 state 时调用（langgraph 与 harness 引擎都经过这里）。
+        在构造初始 state 时调用（langgraph 执行路径）。
         失败静默返回空串——注入是增值能力,不阻塞 run 启动。
         """
         if self._memory is None:

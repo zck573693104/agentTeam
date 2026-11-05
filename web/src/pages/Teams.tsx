@@ -165,7 +165,7 @@ export default function Teams() {
               {/* 指标 */}
               <div style={{
                 display: "grid",
-                gridTemplateColumns: "1fr 1fr 1fr",
+                gridTemplateColumns: "1fr 1fr",
                 gap: 10,
                 padding: "12px 0",
                 borderTop: "1px solid var(--at-border-soft)",
@@ -176,16 +176,6 @@ export default function Teams() {
                   <div className="at-stat-label" style={{ marginBottom: 4 }}>Root</div>
                   <div style={{ fontFamily: "var(--at-font-mono)", fontSize: 12, color: "var(--at-text)" }}>
                     {team.root.role}
-                  </div>
-                </div>
-                <div>
-                  <div className="at-stat-label" style={{ marginBottom: 4 }}>Engine</div>
-                  <div style={{
-                    fontFamily: "var(--at-font-mono)", fontSize: 12,
-                    color: team.engine === "opencode" ? "var(--at-amber)" : "var(--at-text-faint)",
-                    fontWeight: team.engine === "opencode" ? 700 : 400,
-                  }}>
-                    {team.engine === "opencode" ? "◉ OPENCODE" : "LANGGRAPH"}
                   </div>
                 </div>
                 <div>

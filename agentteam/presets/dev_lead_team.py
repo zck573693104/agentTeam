@@ -5,16 +5,14 @@
 
 「领导管理下属」的关键语义：
 - **带验收标准的分派**：领导拆解时为每步写可验证的 acceptance_criteria，
-  派活即告知下属交付标准（harness 引擎透传进 worker prompt）；
+  派活即告知下属交付标准（透传进 worker prompt）；
 - **验收留痕**：worker 交付后对 dict 形式标准做机器验证
   （contains/regex/test，复用 runtime/criteria），发 criteria_check 事件；
-- **治理点**：程序员写文件/执行命令需人工审批（tool 级事前拦截——
-  langgraph 引擎；opencode 引擎为事后中断+审计）；
+- **治理点**：程序员写文件/执行命令需人工审批（tool 级事前拦截）；
 - **自进化**：coder 注册进专家库（LIB_AGENTS），run 终态后参与 SP7 进化。
 
 用法:
     python -m agentteam.cli install-preset dev_lead --api http://localhost:8000
-    python -m agentteam.cli install-preset dev_lead --engine opencode   # 免费模型零 Key
 """
 from __future__ import annotations
 
@@ -63,9 +61,6 @@ TEAM: Team = Team(
     skills=["task_breakdown"],
     root=Agent(
         name="tech_lead", role="supervisor",
-        # SP12a:leader 走进程内确定性通道(plan/review 用轻量快模型),
-        # worker 跟随团队引擎(opencode 底座)——「领导轻量、工人强力」混编
-        engine="langgraph",
         system_prompt=(
             "你是技术主管,直接管理程序员下属(coder/tester):\n"
             "1. 拆解任务时为每一步写**可验证的验收标准**(acceptance_criteria,"

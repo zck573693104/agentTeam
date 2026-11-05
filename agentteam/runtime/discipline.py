@@ -4,18 +4,18 @@
 - Router(leader) 只路由不做技术决策,路由批注 ≤30 词;
 - Worker 静默干活,例行问题自查,只有必须人拍板的阻塞才提问,且一次最多一个。
 
-langgraph 与 harness 双引擎共用同一份文本(spec §3.1/§3.3),保证纪律一致;
+langgraph 全程共用同一份文本(plan/review 注入同一张卡),保证纪律一致;
 纪律是 prompt 层约束,不改工具集与审批门(与 dsh "prompt text cannot change
 enforcement" 同原则)。
 
 QUESTION 协议:worker 回复中以「QUESTION: 」或「问题：」开头的单独一行
-表示需要人/领导拍板的问题,每轮最多一个。extract_question 供双引擎
+表示需要人/领导拍板的问题,每轮最多一个。extract_question
 从纯文本回复中提取(与 artifact/evidence 的文本协议同风格)。
 """
 from __future__ import annotations
 
-# leader 纪律(plan 与 review 共用一张卡;harness 经 supervisor_user_prompt
-# 单一漏斗注入,langgraph 在 leader_plan/leader_review 各插一条 SystemMessage)
+# leader 纪律(plan 与 review 共用一张卡;
+# langgraph 在 leader_plan/leader_review 各插一条 SystemMessage)
 LEADER_DISCIPLINE = (
     "【分派纪律】你是协调者，不是执行者：\n"
     "1. 给下属的指令只写「目标 + 背景 + 验收标准」，禁止写实现方案、"

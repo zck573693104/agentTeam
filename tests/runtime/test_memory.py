@@ -1,14 +1,11 @@
-"""记忆层: MemoryEngine 蒸馏 + build_memory_context 注入格式 + 双引擎注入点。"""
+"""记忆层: MemoryEngine 蒸馏 + build_memory_context 注入格式。"""
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage
 
 from agentteam.config import override_settings
-from agentteam.domain.serializer import team_from_dict
-from agentteam.harness.engine import HarnessRunner
 from agentteam.models.provider import ModelRef
 from agentteam.runtime.memory import (
     MemoryEngine,
@@ -223,51 +220,3 @@ def test_leader_plan_without_memory_has_no_extra_message():
     # SP12a 后无 memory 也是 3 条:system + 分派纪律 + task(纪律常驻注入)
     assert len(spy.captured) == 3
     assert spy.captured[1].content == LEADER_DISCIPLINE
-
-
-# ---------- harness 引擎注入 ----------
-
-def _harness_team():
-    return team_from_dict({
-        "name": "t", "description": "",
-        "root": {
-            "name": "leader", "role": "supervisor", "system_prompt": "s",
-            "children": [
-                {"name": "w1", "role": "worker", "system_prompt": "w", "tools": []},
-            ],
-        },
-        "default_model": {"provider": "qwen", "name": "qwen-max"},
-        "skills": [], "mcp_servers": [],
-    })
-
-
-def _bare_runner(team, task="任务") -> HarnessRunner:
-    """绕过 __init__(免 opencode client),只装配 _initial_state/invoke 用到的属性。"""
-    r = HarnessRunner.__new__(HarnessRunner)
-    r._team = team
-    r._library = None
-    r._skills = None
-    r._task = task
-    r._memory_context = ""
-    r._mapper = MagicMock()
-    r._state = None
-    r._persist = MagicMock()
-    r._drive = MagicMock()
-    r._store = None
-    return r
-
-
-def test_harness_invoke_captures_memory_context():
-    r = _bare_runner(_harness_team())
-    r.invoke({"memory_context": "<memory>MEM</memory>", "task": "任务"}, {})
-    assert r._memory_context == "<memory>MEM</memory>"
-    instruction = r._state["frames"][0]["instruction"]
-    assert instruction.startswith("<memory>MEM</memory>")
-    assert instruction.endswith("任务")
-
-
-def test_harness_without_memory_keeps_plain_instruction():
-    r = _bare_runner(_harness_team())
-    r.invoke({"task": "任务"}, {})
-    assert r._memory_context == ""
-    assert r._state["frames"][0]["instruction"] == "任务"

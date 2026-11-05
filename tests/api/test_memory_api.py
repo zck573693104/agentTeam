@@ -2,7 +2,6 @@
 import threading
 from unittest.mock import MagicMock
 
-from agentteam.harness.runner import HarnessStateStore
 from agentteam.storage.db import init_db
 from agentteam.storage.memory import MemoryRepo
 from agentteam.storage.runs import RunRepo
@@ -61,32 +60,8 @@ def test_pending_approval_not_interrupted(make_client, tmp_path):
     assert resp.json() == {"pending": False}
 
 
-def test_pending_approval_with_park_snapshot(make_client, tmp_path):
-    client = make_client(
-        fake_provider=make_provider_with_plan(), db_path=str(tmp_path / "p.db")
-    )
-    run_id = _submit_run(client, tmp_path, "dev")
-
-    # 模拟 harness park:改状态 + 写快照(第二条连接,与生产同构)
-    conn2 = init_db(str(tmp_path / "p.db"))
-    RunRepo(conn2).update_status(run_id, "interrupted")
-    HarnessStateStore(conn2).save(run_id, {
-        "park": {"gate": {
-            "gate": "tool", "worker": "w1", "permission": "bash",
-            "args": '{"command": "ls"}', "input": {"command": "ls -la"},
-        }},
-    })
-    resp = client.get(f"/api/runs/{run_id}/pending-approval")
-    body = resp.json()
-    assert body["pending"] is True
-    assert body["gate"]["permission"] == "bash"
-    assert body["preview"]["kind"] == "command"
-    assert body["preview"]["command"] == "ls -la"
-    conn2.close()
-
-
-def test_pending_approval_interrupted_without_snapshot(make_client, tmp_path):
-    """langgraph interrupt(无 park 快照)→ pending=true 但 gate/preview 为 null。"""
+def test_pending_approval_interrupted(make_client, tmp_path):
+    """langgraph interrupt → pending=true 但 gate/preview 为 null(回退横幅)。"""
     client = make_client(
         fake_provider=make_provider_with_plan(), db_path=str(tmp_path / "p.db")
     )

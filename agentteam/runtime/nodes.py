@@ -289,8 +289,7 @@ def make_init_worker(
                 for name, content in skills.items()
             )
             react_messages.append(SystemMessage(content=skill_text))
-        # SP12a:汇报纪律(QUESTION 协议)置于任务指令之前、skills 之后,
-        # 与 harness worker_system_prompt 的注入位置对齐
+        # SP12a:汇报纪律(QUESTION 协议)置于任务指令之前、skills 之后
         react_messages.append(SystemMessage(content=WORKER_DISCIPLINE))
         react_messages.append(HumanMessage(content=instruction))
 

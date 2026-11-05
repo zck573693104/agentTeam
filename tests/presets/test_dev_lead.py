@@ -72,7 +72,7 @@ def test_skills_exist_on_disk():
 
 
 def test_install_payload_shape(monkeypatch):
-    """安装 payload：库 agent + 主团队，无 sub-team；engine 覆盖生效。"""
+    """安装 payload：库 agent + 主团队，无 sub-team。"""
     from unittest.mock import MagicMock, patch
 
     with patch("agentteam.presets.installer.requests") as mock_req:
@@ -80,11 +80,8 @@ def test_install_payload_shape(monkeypatch):
                                                json=lambda: {"name": "x"})
         mock_req.ConnectionError = Exception
         from agentteam.presets import install_preset_to_api
-        result = install_preset_to_api("dev_lead", api="http://api",
-                                       engine="opencode")
+        result = install_preset_to_api("dev_lead", api="http://api")
     assert result["library"] == ["coder"]
     assert result["teams"] == ["dev_lead"]
-    team_payload = mock_req.post.call_args_list[-1][1]["json"]
-    assert team_payload["engine"] == "opencode"
     lib_payload = mock_req.post.call_args_list[0][1]["json"]
     assert lib_payload["name"] == "coder"
