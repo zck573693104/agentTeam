@@ -53,7 +53,9 @@ def _leader_from_dict(d: dict) -> Leader:
 def _worker_from_dict(d: dict) -> Worker:
     return Worker(
         name=d["name"],
-        role=d["role"],
+        # role 是展示用职务标签(to_agent 转换后丢弃);缺省回退为成员名,
+        # 兼容 Web 表单等只关心 name/system_prompt 的精简 payload
+        role=d.get("role", d["name"]),
         description=d.get("description", ""),
         system_prompt=d.get("system_prompt", ""),
         model=_model_ref_from_dict(d.get("model")),

@@ -41,13 +41,13 @@ export default function Skills() {
       />
 
       {error && !data && (
-        <div style={{ padding: 40, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+        <div style={{ padding: 40, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
           ✕ SIGNAL ERROR: {error}
         </div>
       )}
 
       {loading && !data && (
-        <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 12, textAlign: "center" }}>
+        <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 13, textAlign: "center" }}>
           <span style={{ color: "var(--at-amber)" }}>●</span> LOADING SKILLS...
         </div>
       )}
@@ -58,7 +58,7 @@ export default function Skills() {
           textAlign: "center",
           color: "var(--at-text-faint)",
           fontFamily: "var(--at-font-mono)",
-          fontSize: 12,
+          fontSize: 13,
         }}>
           ◌ NO SKILLS · 暂无技能
         </div>
@@ -73,7 +73,7 @@ export default function Skills() {
             padding: "10px 20px",
             background: "var(--at-bg-elev)",
             fontFamily: "var(--at-font-mono)",
-            fontSize: 10,
+            fontSize: 12,
             color: "var(--at-text-faint)",
             letterSpacing: "0.14em",
             textTransform: "uppercase",
@@ -109,12 +109,12 @@ export default function Skills() {
                     e.currentTarget.style.boxShadow = "none";
                   }}
                 >
-                  <span style={{ fontFamily: "var(--at-font-mono)", fontSize: 11, color: "var(--at-text-faint)" }}>
+                  <span style={{ fontFamily: "var(--at-font-mono)", fontSize: 13, color: "var(--at-text-faint)" }}>
                     {String(idx + 1).padStart(2, "0")}
                   </span>
                   <span style={{
                     fontFamily: "var(--at-font-mono)",
-                    fontSize: 13,
+                    fontSize: 14,
                     color: expanded ? "var(--at-amber)" : "var(--at-text)",
                     fontWeight: 500,
                   }}>
@@ -132,7 +132,7 @@ export default function Skills() {
                   </span>
                   <span style={{
                     fontFamily: "var(--at-font-mono)",
-                    fontSize: 10,
+                    fontSize: 12,
                     color: expanded ? "var(--at-amber)" : "var(--at-text-faint)",
                     textAlign: "right",
                     letterSpacing: "0.1em",
@@ -148,7 +148,7 @@ export default function Skills() {
                   }}>
                     <div style={{
                       fontFamily: "var(--at-font-mono)",
-                      fontSize: 9,
+                      fontSize: 12,
                       color: "var(--at-amber)",
                       letterSpacing: "0.18em",
                       textTransform: "uppercase",
@@ -159,13 +159,13 @@ export default function Skills() {
                       ▸ SKILL CONTENT
                     </div>
                     {contentLoading ? (
-                      <div style={{ padding: 24, textAlign: "center", color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 11 }}>
+                      <div style={{ padding: 24, textAlign: "center", color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
                         <span style={{ color: "var(--at-amber)" }}>●</span> LOADING...
                       </div>
                     ) : skillContent ? (
                       <pre style={{
                         margin: 0,
-                        fontSize: 12,
+                        fontSize: 13,
                         lineHeight: 1.6,
                         maxHeight: 480,
                         overflow: "auto",
@@ -175,7 +175,7 @@ export default function Skills() {
                         {skillContent.content}
                       </pre>
                     ) : (
-                      <div style={{ color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 11 }}>
+                      <div style={{ color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
                         ✕ FAILED TO LOAD
                       </div>
                     )}

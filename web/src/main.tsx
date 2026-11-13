@@ -27,7 +27,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             colorWarning: "#ffb547",
             colorInfo: "#4ad8e8",
             fontFamily: '"IBM Plex Sans", -apple-system, BlinkMacSystemFont, sans-serif',
-            fontSize: 14,
+            fontSize: 15,
             borderRadius: 2,
             wireframe: false,
           },

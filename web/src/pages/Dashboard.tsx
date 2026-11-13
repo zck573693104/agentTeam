@@ -57,7 +57,7 @@ function StatCard({ label, value, hint, accentColor, glow, delayClass }: StatCar
       {hint && (
         <div style={{
           fontFamily: "var(--at-font-mono)",
-          fontSize: 10,
+          fontSize: 12,
           color: "var(--at-text-faint)",
           letterSpacing: "0.1em",
           marginTop: 8,
@@ -76,14 +76,14 @@ export default function Dashboard() {
 
   if (loading && !data) {
     return (
-      <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+      <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
         <span style={{ color: "var(--at-amber)" }}>●</span> INITIALIZING TELEMETRY...
       </div>
     );
   }
   if (error && !data) {
     return (
-      <div style={{ padding: 40, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+      <div style={{ padding: 40, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
         ✕ SIGNAL ERROR: {error}
       </div>
     );
@@ -119,7 +119,7 @@ export default function Dashboard() {
         <div>
           <div style={{
             fontFamily: "var(--at-font-mono)",
-            fontSize: 10,
+            fontSize: 12,
             color: "var(--at-amber)",
             letterSpacing: "0.24em",
             textTransform: "uppercase",
@@ -139,7 +139,7 @@ export default function Dashboard() {
           </h1>
           <div style={{
             fontFamily: "var(--at-font-mono)",
-            fontSize: 11,
+            fontSize: 13,
             color: "var(--at-text-faint)",
             marginTop: 6,
           }}>
@@ -200,7 +200,7 @@ export default function Dashboard() {
         <div className="at-panel at-fade-in at-fade-in-1" style={{ padding: 20 }}>
           <div className="at-section-title">Status Distribution · 状态分布</div>
           {statusData.length === 0 ? (
-            <div style={{ color: "var(--at-text-faint)", padding: 24, textAlign: "center", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+            <div style={{ color: "var(--at-text-faint)", padding: 24, textAlign: "center", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
               NO DATA
             </div>
           ) : (
@@ -255,20 +255,20 @@ export default function Dashboard() {
                       alignItems: "center",
                       gap: 10,
                       fontFamily: "var(--at-font-mono)",
-                      fontSize: 12,
+                      fontSize: 13,
                     }}>
                       <span style={{
                         width: 8,
                         height: 8,
                         background: colorMap[s.rawKey] || "#6b7785",
                       }} />
-                      <span style={{ color: "var(--at-text)", width: 80, fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                      <span style={{ color: "var(--at-text)", width: 80, fontSize: 13, letterSpacing: "0.08em", textTransform: "uppercase" }}>
                         {s.type}
                       </span>
                       <span style={{ color: "var(--at-text)", fontWeight: 600, width: 50, textAlign: "right" }}>
                         {s.value}
                       </span>
-                      <span style={{ color: "var(--at-text-faint)", fontSize: 10, width: 50, textAlign: "right" }}>
+                      <span style={{ color: "var(--at-text-faint)", fontSize: 12, width: 50, textAlign: "right" }}>
                         {pct}%
                       </span>
                       {/* 横向比例条 */}
@@ -297,7 +297,7 @@ export default function Dashboard() {
         <div className="at-panel at-fade-in at-fade-in-2" style={{ padding: 20 }}>
           <div className="at-section-title">Team Activity · 团队活跃度</div>
           {teamData.length === 0 ? (
-            <div style={{ color: "var(--at-text-faint)", padding: 24, textAlign: "center", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+            <div style={{ color: "var(--at-text-faint)", padding: 24, textAlign: "center", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
               NO TEAMS
             </div>
           ) : (
@@ -312,7 +312,7 @@ export default function Dashboard() {
                   }}>
                     <span style={{
                       fontFamily: "var(--at-font-mono)",
-                      fontSize: 10,
+                      fontSize: 12,
                       color: "var(--at-text-faint)",
                       width: 18,
                     }}>
@@ -320,7 +320,7 @@ export default function Dashboard() {
                     </span>
                     <span style={{
                       fontFamily: "var(--at-font-mono)",
-                      fontSize: 12,
+                      fontSize: 13,
                       color: "var(--at-text)",
                       width: 100,
                       overflow: "hidden",
@@ -349,7 +349,7 @@ export default function Dashboard() {
                         top: "50%",
                         transform: "translateY(-50%)",
                         fontFamily: "var(--at-font-mono)",
-                        fontSize: 10,
+                        fontSize: 12,
                         color: "var(--at-text)",
                         fontWeight: 600,
                         mixBlendMode: "difference",
@@ -388,7 +388,7 @@ export default function Dashboard() {
             textAlign: "center",
             color: "var(--at-text-faint)",
             fontFamily: "var(--at-font-mono)",
-            fontSize: 12,
+            fontSize: 13,
           }}>
             ◌ NO RUNS YET · 暂无执行记录
           </div>
@@ -402,7 +402,7 @@ export default function Dashboard() {
               padding: "10px 20px",
               background: "var(--at-bg-elev)",
               fontFamily: "var(--at-font-mono)",
-              fontSize: 10,
+              fontSize: 12,
               color: "var(--at-text-faint)",
               letterSpacing: "0.14em",
               textTransform: "uppercase",
@@ -440,13 +440,13 @@ export default function Dashboard() {
               >
                 <span style={{
                   fontFamily: "var(--at-font-mono)",
-                  fontSize: 11,
+                  fontSize: 13,
                   color: "var(--at-amber)",
                 }}>
                   {r.run_id.slice(0, 8)}
                 </span>
                 <span style={{
-                  fontSize: 13,
+                  fontSize: 14,
                   color: "var(--at-text)",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
@@ -456,7 +456,7 @@ export default function Dashboard() {
                 </span>
                 <span style={{
                   fontFamily: "var(--at-font-mono)",
-                  fontSize: 11,
+                  fontSize: 13,
                   color: "var(--at-text-dim)",
                 }}>
                   {r.team_name}
@@ -466,7 +466,7 @@ export default function Dashboard() {
                 </span>
                 <span style={{
                   fontFamily: "var(--at-font-mono)",
-                  fontSize: 10,
+                  fontSize: 12,
                   color: "var(--at-text-faint)",
                   textAlign: "right",
                 }}>

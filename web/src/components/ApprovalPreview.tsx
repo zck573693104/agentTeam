@@ -10,7 +10,7 @@ const DIFF_LINE_COLOR: Record<string, string> = {
 
 const MONO: React.CSSProperties = {
   fontFamily: "var(--at-font-mono)",
-  fontSize: 11,
+  fontSize: 13,
   lineHeight: 1.6,
   margin: 0,
   whiteSpace: "pre-wrap",
@@ -31,7 +31,7 @@ function PreviewHeader({ preview }: { preview: ApprovalPreviewData }) {
       gap: 8,
       marginBottom: 8,
       fontFamily: "var(--at-font-mono)",
-      fontSize: 10,
+      fontSize: 12,
       letterSpacing: "0.12em",
       color: "var(--at-text-faint)",
     }}>

@@ -147,12 +147,12 @@ export default function EvolutionHistory({
         expandedRowRender: (r: EvolutionRecord) => (
           <Descriptions column={1} bordered size="small">
             <Descriptions.Item label="Before">
-              <pre style={{ margin: 0, fontSize: 12, whiteSpace: "pre-wrap" }}>
+              <pre style={{ margin: 0, fontSize: 13, whiteSpace: "pre-wrap" }}>
                 {r.before_value || "-"}
               </pre>
             </Descriptions.Item>
             <Descriptions.Item label="After">
-              <pre style={{ margin: 0, fontSize: 12, whiteSpace: "pre-wrap" }}>
+              <pre style={{ margin: 0, fontSize: 13, whiteSpace: "pre-wrap" }}>
                 {r.after_value || "-"}
               </pre>
             </Descriptions.Item>
@@ -161,7 +161,7 @@ export default function EvolutionHistory({
                 <pre
                   style={{
                     margin: 0,
-                    fontSize: 12,
+                    fontSize: 13,
                     whiteSpace: "pre-wrap",
                     color: "#666",
                   }}

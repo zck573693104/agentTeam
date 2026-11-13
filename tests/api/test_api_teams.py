@@ -163,3 +163,115 @@ def test_update_team_name_mismatch_returns_400():
         "skills": [],
     })
     assert resp.status_code == 400
+
+
+# —— GET /api/teams/{name}/members/status 成员情况 ——
+
+def _make_app_with_repos(tmp_path):
+    """轻量 app + 真实 run/audit repo(临时库),用于成员情况聚合测试。"""
+    import threading
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from agentteam.storage.db import init_db
+    from agentteam.storage.runs import RunRepo
+    from agentteam.storage.audit import AuditRepo
+    from agentteam.storage.teams import TeamRepo
+
+    conn = init_db(str(tmp_path / "member_status.db"))
+    lock = threading.Lock()
+    run_repo = RunRepo(conn, lock=lock)
+    audit_repo = AuditRepo(conn, lock=lock)
+    team_store = TeamStore(repo=TeamRepo(conn, lock=lock))
+
+    app = FastAPI()
+    app.include_router(teams_router(
+        team_store, None, run_repo=run_repo, audit_repo=audit_repo,
+    ))
+    return TestClient(app), run_repo, audit_repo
+
+
+def test_member_status_team_not_found(tmp_path):
+    """成员情况:团队不存在返回 404。"""
+    client, _, _ = _make_app_with_repos(tmp_path)
+    resp = client.get("/api/teams/nope/members/status")
+    assert resp.status_code == 404
+
+
+def test_member_status_without_activity(tmp_path):
+    """成员情况:无运行记录时成员各项为 0/null,但配置成员仍列出。"""
+    client, _, _ = _make_app_with_repos(tmp_path)
+    client.post("/api/teams", json=_team_json())
+    resp = client.get("/api/teams/dev/members/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["team"] == "dev"
+    names = [m["name"] for m in body["members"]]
+    # 旧 schema leader+workers 转换后:coder 是唯一 worker 叶子(leader 是 supervisor)
+    assert "coder" in names
+    coder = next(m for m in body["members"] if m["name"] == "coder")
+    assert coder["role"] == "worker"
+    assert coder["runs_participated"] == 0
+    assert coder["starts"] == 0
+    assert coder["failures"] == 0
+    assert coder["last_active_at"] is None
+    assert coder["last_run_id"] is None
+
+
+def test_member_status_with_activity(tmp_path):
+    """成员情况:聚合 worker_start/worker_end 事件(参与数/开工数/失败数/最近活跃)。"""
+    import json
+    client, run_repo, audit_repo = _make_app_with_repos(tmp_path)
+    client.post("/api/teams", json=_team_json())
+
+    # 两个 run:coder 在两个 run 都开工;run1 失败、run2 成功
+    run1 = run_repo.create_run("dev", "task1")
+    audit_repo.add_event(run1, "run_start", "system")
+    audit_repo.add_event(run1, "worker_start", "coder")
+    audit_repo.add_event(
+        run1, "worker_end", "coder",
+        {"answer_length": 0, "has_evidence": False, "failure": True},
+    )
+    run2 = run_repo.create_run("dev", "task2")
+    audit_repo.add_event(run2, "worker_start", "coder")
+    audit_repo.add_event(
+        run2, "worker_end", "coder",
+        {"answer_length": 120, "has_evidence": True, "failure": False},
+    )
+
+    resp = client.get("/api/teams/dev/members/status")
+    assert resp.status_code == 200
+    coder = next(
+        m for m in resp.json()["members"] if m["name"] == "coder"
+    )
+    assert coder["runs_participated"] == 2
+    assert coder["starts"] == 2
+    assert coder["failures"] == 1
+    assert coder["last_run_id"] == run2  # id DESC 扫描,最近活跃是 run2
+    assert coder["last_active_at"]
+
+
+def test_member_activity_by_team_max_events(tmp_path):
+    """member_activity_by_team:max_events 限制扫描行数(取最新优先)。"""
+    client, run_repo, audit_repo = _make_app_with_repos(tmp_path)
+    client.post("/api/teams", json=_team_json())
+    run_id = run_repo.create_run("dev", "task")
+    for _ in range(5):
+        audit_repo.add_event(run_id, "worker_start", "coder")
+    rows = audit_repo.member_activity_by_team("dev", max_events=2)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "coder"
+    assert rows[0]["starts"] == 2  # 只扫到最新 2 条事件
+
+
+def test_register_team_worker_role_optional():
+    """worker 缺 role 字段时回退为成员名(兼容 Web 表单精简 payload)。"""
+    client = TestClient(_make_app())
+    payload = _team_json()
+    del payload["workers"][0]["role"]
+    resp = client.post("/api/teams", json=payload)
+    assert resp.status_code == 200
+    resp = client.get("/api/teams/dev")
+    assert resp.status_code == 200
+    # 转成 root 树后 role 固定为 worker(旧 schema 的 role 只是展示标签)
+    assert resp.json()["root"]["children"][0]["role"] == "worker"

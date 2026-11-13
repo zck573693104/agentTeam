@@ -67,6 +67,56 @@ def teams_router(
             _note_policy_expiry(name, team, run_repo, audit_repo)
         return {"name": team.name}
 
+    # —— 成员情况: 配置成员 × 近期运行活动的聚合视图 ——
+
+    @router.get("/{name}/members/status")
+    def member_status(name: str, max_events: int = 2000):
+        """成员运行情况:每成员近期参与 run 数、开工数、失败数、最近活跃时间。
+
+        成员名单来自团队配置(root 树的 worker 叶子),活动数据聚合自
+        run_events 的 worker_start/worker_end 事件(actor = agent.name)。
+        无运行记录的成员各项为 0/null,一并返回便于前端对齐展示。
+        """
+        team = store.get(name)
+        if team is None:
+            raise HTTPException(status_code=404, detail=f"Team '{name}' not found")
+
+        activity = {}
+        if audit_repo is not None:
+            for row in audit_repo.member_activity_by_team(name, max_events=max_events):
+                activity[row["name"]] = row
+
+        # 复用前端同款叶子收集逻辑:supervisor 子树展开,TeamRef 记为 subteam
+        from agentteam.domain.agent import TeamRef
+
+        members: list[dict] = []
+
+        def _collect(node) -> None:
+            if isinstance(node, TeamRef):
+                members.append({"name": node.alias or node.name, "role": "subteam"})
+                return
+            if node.role == "worker":
+                members.append({"name": node.name, "role": "worker"})
+                return
+            for child in node.children or []:
+                _collect(child)
+
+        _collect(team.root)
+
+        out = []
+        for m in members:
+            a = activity.get(m["name"], {})
+            out.append({
+                "name": m["name"],
+                "role": m["role"],
+                "runs_participated": a.get("runs_participated", 0),
+                "starts": a.get("starts", 0),
+                "failures": a.get("failures", 0),
+                "last_active_at": a.get("last_active_at"),
+                "last_run_id": a.get("last_run_id"),
+            })
+        return {"team": name, "members": out}
+
     # —— 记忆层: 团队跨 run 记忆的查看与清理 ——
 
     @router.get("/{name}/memories")

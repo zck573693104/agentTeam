@@ -1,18 +1,14 @@
 import { useState } from "react";
-import {
-  Input,
-  Modal,
-  Popconfirm,
-  Tabs,
-  message,
-} from "antd";
+import { Popconfirm, Tabs, message } from "antd";
 import { useFetch } from "../hooks/useFetch";
 import { api, type AgentNode, type Team, type TeamRefNode } from "../api/client";
 import EvolutionHistory from "../components/EvolutionHistory";
 import TeamMemory from "../components/TeamMemory";
+import TeamFormModal from "../components/TeamFormModal";
+import MemberDetailDrawer from "../components/MemberDetailDrawer";
 import { PageHeader } from "./Runs";
 
-/** 收集 Agent 树中所有 worker 节点（叶子）。 */
+/** 收集 Agent 树中所有 worker 节点(叶子)。 */
 function collectWorkers(node: AgentNode | TeamRefNode): { name: string; role?: string }[] {
   if ("_type" in node) return [{ name: node.alias || node.name, role: "subteam" }];
   if (node.role === "worker") return [{ name: node.name, role: node.role }];
@@ -32,38 +28,36 @@ function renderAgentTree(node: AgentNode | TeamRefNode, depth = 0): string {
 
 export default function Teams() {
   const { data, loading, error, refetch } = useFetch<Team[]>("/api/teams");
-  const [modalOpen, setModalOpen] = useState(false);
-  const [jsonText, setJsonText] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingTeam, setEditingTeam] = useState<Team | null>(null);
+  const [drawerTeam, setDrawerTeam] = useState<string | null>(null);
 
   if (error && !data) return <div>错误: {error}</div>;
 
-  const handleRegister = async () => {
-    let team: Record<string, unknown>;
-    try {
-      team = JSON.parse(jsonText);
-    } catch {
-      message.error("JSON 格式错误");
-      return;
-    }
-    try {
-      setSubmitting(true);
-      await api("/api/teams", { method: "POST", body: JSON.stringify(team) });
-      message.success("注册成功");
-      setModalOpen(false);
-      setJsonText("");
-      refetch();
-    } catch (e) {
-      message.error((e as Error).message);
-    } finally {
-      setSubmitting(false);
-    }
+  const openCreate = () => {
+    setEditingTeam(null);
+    setFormOpen(true);
+  };
+
+  const openEdit = (team: Team) => {
+    setEditingTeam(team);
+    setFormOpen(true);
+  };
+
+  const handleFormSuccess = (name: string) => {
+    const wasCreate = editingTeam === null;
+    setFormOpen(false);
+    setEditingTeam(null);
+    refetch();
+    // 新增团队后直接打开成员明细,让成员情况立刻可见
+    if (wasCreate) setDrawerTeam(name);
   };
 
   const handleDelete = async (name: string) => {
     try {
       await api(`/api/teams/${name}`, { method: "DELETE" });
       message.success("删除成功");
+      if (drawerTeam === name) setDrawerTeam(null);
       refetch();
     } catch (e) {
       message.error((e as Error).message);
@@ -76,17 +70,17 @@ export default function Teams() {
         index="02 · TEAMS"
         title="团队配置"
         subtitle="Agent Squads"
-        action={<button className="at-btn-amber" onClick={() => setModalOpen(true)}>+ 注册团队</button>}
+        action={<button className="at-btn-amber" onClick={openCreate}>+ 注册团队</button>}
       />
 
       {error && (
-        <div style={{ padding: 24, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+        <div style={{ padding: 24, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
           ✕ SIGNAL ERROR: {error}
         </div>
       )}
 
       {loading && !data && (
-        <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 12, textAlign: "center" }}>
+        <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 13, textAlign: "center" }}>
           <span style={{ color: "var(--at-amber)" }}>●</span> LOADING TEAMS...
         </div>
       )}
@@ -97,7 +91,7 @@ export default function Teams() {
           textAlign: "center",
           color: "var(--at-text-faint)",
           fontFamily: "var(--at-font-mono)",
-          fontSize: 12,
+          fontSize: 13,
         }}>
           ◌ NO TEAMS · 暂无团队配置
         </div>
@@ -118,7 +112,7 @@ export default function Teams() {
               className={`at-panel at-panel-corners at-fade-in at-fade-in-${Math.min(idx + 1, 4)}`}
               style={{ padding: 18 }}
             >
-              {/* 卡片头:名称 + 删除 */}
+              {/* 卡片头:名称 + 编辑/删除 */}
               <div style={{
                 display: "flex",
                 justifyContent: "space-between",
@@ -128,7 +122,7 @@ export default function Teams() {
                 <div>
                   <div style={{
                     fontFamily: "var(--at-font-mono)",
-                    fontSize: 9,
+                    fontSize: 12,
                     color: "var(--at-text-faint)",
                     letterSpacing: "0.2em",
                     marginBottom: 4,
@@ -145,15 +139,18 @@ export default function Teams() {
                     {team.name}
                   </div>
                 </div>
-                <Popconfirm title="确定删除?" onConfirm={() => handleDelete(team.name)}>
-                  <button className="at-link" style={{ color: "var(--at-red)" }}>✕ DEL</button>
-                </Popconfirm>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <button className="at-link" onClick={() => openEdit(team)}>✎ EDIT</button>
+                  <Popconfirm title="确定删除?" onConfirm={() => handleDelete(team.name)}>
+                    <button className="at-link" style={{ color: "var(--at-red)" }}>✕ DEL</button>
+                  </Popconfirm>
+                </div>
               </div>
 
               {/* 描述 */}
               <div style={{
                 fontFamily: "var(--at-font-sans)",
-                fontSize: 13,
+                fontSize: 14,
                 color: "var(--at-text-dim)",
                 marginBottom: 14,
                 minHeight: 20,
@@ -174,7 +171,7 @@ export default function Teams() {
               }}>
                 <div>
                   <div className="at-stat-label" style={{ marginBottom: 4 }}>Root</div>
-                  <div style={{ fontFamily: "var(--at-font-mono)", fontSize: 12, color: "var(--at-text)" }}>
+                  <div style={{ fontFamily: "var(--at-font-mono)", fontSize: 13, color: "var(--at-text)" }}>
                     {team.root.role}
                   </div>
                 </div>
@@ -182,7 +179,7 @@ export default function Teams() {
                   <div className="at-stat-label" style={{ marginBottom: 4 }}>Workers</div>
                   <div style={{ fontFamily: "var(--at-font-mono)", fontSize: 16, color: "var(--at-green)", fontWeight: 700 }}>
                     {workerCount}
-                    {hasSubteam && <span style={{ color: "var(--at-text-faint)", fontSize: 10 }}> +sub</span>}
+                    {hasSubteam && <span style={{ color: "var(--at-text-faint)", fontSize: 12 }}> +sub</span>}
                   </div>
                 </div>
               </div>
@@ -199,25 +196,36 @@ export default function Teams() {
                 </div>
               )}
 
-              {/* worker 列表 */}
+              {/* worker 列表:点击成员行打开明细抽屉 */}
               <div style={{ marginBottom: 14 }}>
                 <div className="at-stat-label" style={{ marginBottom: 6 }}>Members</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                   {workers.slice(0, 5).map((w, i) => (
-                    <div key={i} style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      fontFamily: "var(--at-font-mono)",
-                      fontSize: 11,
-                    }}>
-                      <span style={{ color: "var(--at-text-faint)", width: 18 }}>
+                    <div
+                      key={i}
+                      onClick={() => setDrawerTeam(team.name)}
+                      title="查看成员明细与运行情况"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        fontFamily: "var(--at-font-mono)",
+                        fontSize: 13,
+                        padding: "3px 6px",
+                        margin: "0 -6px",
+                        borderRadius: 2,
+                        cursor: "pointer",
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.background = "var(--at-bg-deep)"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                    >
+                      <span style={{ color: "var(--at-text-faint)", width: 20 }}>
                         {String(i + 1).padStart(2, "0")}
                       </span>
                       <span style={{ color: "var(--at-text)" }}>{w.name}</span>
                       <span style={{
                         color: w.role === "subteam" ? "var(--at-blue)" : "var(--at-green)",
-                        fontSize: 9,
+                        fontSize: 12,
                         letterSpacing: "0.1em",
                         textTransform: "uppercase",
                       }}>
@@ -226,9 +234,13 @@ export default function Teams() {
                     </div>
                   ))}
                   {workers.length > 5 && (
-                    <div style={{ color: "var(--at-text-faint)", fontSize: 10, fontFamily: "var(--at-font-mono)", marginTop: 2 }}>
-                      + {workers.length - 5} more
-                    </div>
+                    <button
+                      className="at-link"
+                      style={{ marginTop: 4, fontFamily: "var(--at-font-mono)" }}
+                      onClick={() => setDrawerTeam(team.name)}
+                    >
+                      + {workers.length - 5} more · 查看全部成员明细
+                    </button>
                   )}
                 </div>
               </div>
@@ -238,7 +250,7 @@ export default function Teams() {
                 <summary style={{
                   cursor: "pointer",
                   fontFamily: "var(--at-font-mono)",
-                  fontSize: 10,
+                  fontSize: 12,
                   color: "var(--at-text-faint)",
                   letterSpacing: "0.12em",
                   textTransform: "uppercase",
@@ -246,7 +258,7 @@ export default function Teams() {
                   ▾ Agent Tree
                 </summary>
                 <pre style={{
-                  fontSize: 11,
+                  fontSize: 13,
                   marginTop: 8,
                   padding: 10,
                   background: "var(--at-bg-deep)",
@@ -265,7 +277,7 @@ export default function Teams() {
                   <summary style={{
                     cursor: "pointer",
                     fontFamily: "var(--at-font-mono)",
-                    fontSize: 10,
+                    fontSize: 12,
                     color: "var(--at-amber)",
                     letterSpacing: "0.12em",
                     textTransform: "uppercase",
@@ -292,7 +304,7 @@ export default function Teams() {
                 <summary style={{
                   cursor: "pointer",
                   fontFamily: "var(--at-font-mono)",
-                  fontSize: 10,
+                  fontSize: 12,
                   color: "var(--at-amber)",
                   letterSpacing: "0.12em",
                   textTransform: "uppercase",
@@ -308,22 +320,19 @@ export default function Teams() {
         })}
       </div>
 
-      <Modal
-        title="注册团队"
-        open={modalOpen}
-        onOk={handleRegister}
-        onCancel={() => setModalOpen(false)}
-        confirmLoading={submitting}
-        okText="注册"
-        cancelText="取消"
-      >
-        <Input.TextArea
-          value={jsonText}
-          onChange={(e) => setJsonText(e.target.value)}
-          placeholder={'粘贴 Team JSON，如: {"name": "dev", "description": "...", ...}'}
-          rows={12}
-        />
-      </Modal>
+      {/* 新建/编辑团队表单 */}
+      <TeamFormModal
+        open={formOpen}
+        editing={editingTeam}
+        onClose={() => { setFormOpen(false); setEditingTeam(null); }}
+        onSuccess={handleFormSuccess}
+      />
+
+      {/* 成员明细 + 成员情况抽屉 */}
+      <MemberDetailDrawer
+        teamName={drawerTeam}
+        onClose={() => setDrawerTeam(null)}
+      />
     </div>
   );
 }

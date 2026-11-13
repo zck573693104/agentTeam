@@ -129,7 +129,7 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
             alignItems: "center",
             gap: 6,
             fontFamily: "var(--at-font-mono)",
-            fontSize: 10,
+            fontSize: 12,
             color: statusConfig.color,
             letterSpacing: "0.1em",
           }}>
@@ -148,7 +148,7 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
           textAlign: "center",
           color: "var(--at-text-faint)",
           fontFamily: "var(--at-font-mono)",
-          fontSize: 12,
+          fontSize: 13,
         }}>
           ◌ WAITING FOR EVENTS · 等待事件...
         </div>
@@ -173,7 +173,7 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
                 <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
                   <span style={{
                     fontFamily: "var(--at-font-mono)",
-                    fontSize: 10,
+                    fontSize: 12,
                     color: color,
                     fontWeight: 600,
                     letterSpacing: "0.1em",
@@ -184,7 +184,7 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
                   {e.timestamp && (
                     <span style={{
                       fontFamily: "var(--at-font-mono)",
-                      fontSize: 9,
+                      fontSize: 12,
                       color: "var(--at-text-faint)",
                       letterSpacing: "0.08em",
                     }}>
@@ -196,7 +196,7 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
                   <div style={{
                     color: "var(--at-amber)",
                     fontFamily: "var(--at-font-mono)",
-                    fontSize: 11,
+                    fontSize: 13,
                     marginTop: 4,
                   }}>
                     ⚠ 等待审批决策...
@@ -207,7 +207,7 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
                     cursor: "pointer",
                     color: "var(--at-text-faint)",
                     fontFamily: "var(--at-font-mono)",
-                    fontSize: 10,
+                    fontSize: 12,
                     letterSpacing: "0.1em",
                     textTransform: "uppercase",
                   }}>
@@ -215,7 +215,7 @@ export default function SSEViewer({ runId, refreshKey, onReconnect }: SSEViewerP
                   </summary>
                   <pre style={{
                     marginTop: 6,
-                    fontSize: 11,
+                    fontSize: 13,
                     padding: 10,
                     background: "var(--at-bg-deep)",
                     border: "1px solid var(--at-border)",

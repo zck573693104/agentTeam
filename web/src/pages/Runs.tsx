@@ -29,7 +29,7 @@ export function PageHeader({
       <div>
         <div style={{
           fontFamily: "var(--at-font-mono)",
-          fontSize: 10,
+          fontSize: 12,
           color: "var(--at-amber)",
           letterSpacing: "0.24em",
           textTransform: "uppercase",
@@ -66,7 +66,7 @@ export default function Runs() {
 
   if (error && !data) {
     return (
-      <div style={{ padding: 40, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+      <div style={{ padding: 40, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
         ✕ SIGNAL ERROR: {error}
       </div>
     );
@@ -110,7 +110,7 @@ export default function Runs() {
             textAlign: "center",
             color: "var(--at-text-faint)",
             fontFamily: "var(--at-font-mono)",
-            fontSize: 12,
+            fontSize: 13,
           }}>
             ◌ NO RUNS · 暂无执行记录
           </div>
@@ -123,7 +123,7 @@ export default function Runs() {
               padding: "10px 20px",
               background: "var(--at-bg-elev)",
               fontFamily: "var(--at-font-mono)",
-              fontSize: 10,
+              fontSize: 12,
               color: "var(--at-text-faint)",
               letterSpacing: "0.14em",
               textTransform: "uppercase",
@@ -157,17 +157,17 @@ export default function Runs() {
                   e.currentTarget.style.boxShadow = "none";
                 }}
               >
-                <span style={{ fontFamily: "var(--at-font-mono)", fontSize: 11, color: "var(--at-amber)" }}>
+                <span style={{ fontFamily: "var(--at-font-mono)", fontSize: 13, color: "var(--at-amber)" }}>
                   {r.run_id.slice(0, 8)}
                 </span>
-                <span style={{ fontSize: 13, color: "var(--at-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <span style={{ fontSize: 14, color: "var(--at-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {r.task}
                 </span>
-                <span style={{ fontFamily: "var(--at-font-mono)", fontSize: 11, color: "var(--at-text-dim)" }}>
+                <span style={{ fontFamily: "var(--at-font-mono)", fontSize: 13, color: "var(--at-text-dim)" }}>
                   {r.team_name}
                 </span>
                 <span><StatusBadge status={r.status} /></span>
-                <span style={{ fontFamily: "var(--at-font-mono)", fontSize: 10, color: "var(--at-text-faint)", textAlign: "right" }}>
+                <span style={{ fontFamily: "var(--at-font-mono)", fontSize: 12, color: "var(--at-text-faint)", textAlign: "right" }}>
                   {new Date(r.created_at).toLocaleString("zh-CN", { hour12: false })}
                 </span>
               </div>
@@ -175,7 +175,7 @@ export default function Runs() {
           </>
         )}
         {loading && (
-          <div style={{ padding: 16, textAlign: "center", color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 11 }}>
+          <div style={{ padding: 16, textAlign: "center", color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
             <span style={{ color: "var(--at-amber)" }}>●</span> LOADING...
           </div>
         )}

@@ -167,6 +167,11 @@ export interface AgentNode {
   ref?: string | null;
   skills?: string[];
   version?: number;
+  /** Graph Engineering P3 Maker/Checker 独立审查模型/工具 */
+  review_model?: Record<string, any> | null;
+  review_tools?: string[];
+  /** Agent 级 MCP 挂载(编译期注册到 ToolRegistry) */
+  mcp_servers?: Record<string, any>[];
 }
 
 export interface TeamRefNode {
@@ -182,6 +187,23 @@ export interface Team {
   default_model: Record<string, any> | null;
   skills: string[];
   mcp_servers: Record<string, any>[];
+}
+
+// ---- 成员情况(GET /api/teams/{name}/members/status) ----
+
+export interface MemberStatus {
+  name: string;
+  role: "worker" | "subteam";
+  runs_participated: number;
+  starts: number;
+  failures: number;
+  last_active_at: string | null;
+  last_run_id: string | null;
+}
+
+export interface TeamMemberStatus {
+  team: string;
+  members: MemberStatus[];
 }
 
 // ---- SP7: Skills + Evolution ----

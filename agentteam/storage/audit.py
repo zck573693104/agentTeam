@@ -222,6 +222,71 @@ class AuditRepo(BaseSqliteRepo):
         )
         return {row["bucket"]: row["n"] for row in rows}
 
+    def member_activity_by_team(
+        self, team_name: str, max_events: int = 2000
+    ) -> list[dict[str, Any]]:
+        """按团队聚合成员(worker)运行情况,供「成员情况」展示。
+
+        JOIN runs/run_events 取该团队所有 run 的 worker_start/worker_end 事件
+        (actor = agent.name),按成员聚合:
+        - runs_participated:去重参与的 run 数
+        - starts:worker_start 次数(同 run 内可多次开工)
+        - failures:worker_end payload.failure=true 次数
+        - last_active_at / last_run_id:最近一次活跃时间与所属 run
+
+        返回按 last_active_at 倒序的成员列表;无运行记录时返回空列表。
+        max_events 限制扫描的事件行数,防大库全表拖慢。
+        """
+        rows = self._fetchall(
+            "SELECT e.run_id AS run_id, e.actor AS actor, e.event_type AS event_type, "
+            "e.timestamp AS ts, e.payload AS payload "
+            "FROM run_events e JOIN runs r ON e.run_id = r.id "
+            "WHERE r.team_name = ? AND e.event_type IN ('worker_start', 'worker_end') "
+            "ORDER BY e.id DESC LIMIT ?",
+            (team_name, max(1, max_events)),
+        )
+        # 倒序扫描(id DESC = 最新优先),首个遇到的即该成员最近活跃
+        members: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            actor = row["actor"] or ""
+            if not actor:
+                continue
+            m = members.get(actor)
+            if m is None:
+                m = members[actor] = {
+                    "name": actor,
+                    "runs_participated": set(),
+                    "starts": 0,
+                    "failures": 0,
+                    "last_active_at": None,
+                    "last_run_id": None,
+                }
+            if row["event_type"] == "worker_start":
+                m["starts"] += 1
+            else:  # worker_end
+                try:
+                    payload = json.loads(row["payload"] or "{}")
+                except json.JSONDecodeError:
+                    payload = {}
+                if payload.get("failure"):
+                    m["failures"] += 1
+            m["runs_participated"].add(row["run_id"])
+            if m["last_active_at"] is None:
+                m["last_active_at"] = row["ts"]
+                m["last_run_id"] = row["run_id"]
+        result = []
+        for m in members.values():
+            result.append({
+                "name": m["name"],
+                "runs_participated": len(m["runs_participated"]),
+                "starts": m["starts"],
+                "failures": m["failures"],
+                "last_active_at": m["last_active_at"],
+                "last_run_id": m["last_run_id"],
+            })
+        result.sort(key=lambda m: m["last_active_at"] or "", reverse=True)
+        return result
+
 
 # P-B3: event_type → chain 推断表
 # 调用链(call):run 生命周期 + agent 节点进出

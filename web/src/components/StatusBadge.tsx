@@ -36,7 +36,7 @@ export default function StatusBadge({ status }: { status: string }) {
       alignItems: "center",
       gap: 8,
       fontFamily: "var(--at-font-mono)",
-      fontSize: 11,
+      fontSize: 13,
       fontWeight: 500,
       letterSpacing: "0.08em",
       color: config.textColor,

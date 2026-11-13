@@ -110,14 +110,14 @@ function NavButton({ item, active }: { item: NavItem; active: boolean }) {
         }
       }}
     >
-      <span style={{ color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 10 }}>
+      <span style={{ color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
         {item.index}
       </span>
       <span style={{ color: active ? "var(--at-amber)" : "var(--at-text-faint)" }}>{item.icon}</span>
       <span style={{ flex: 1 }}>
         <div style={{
           fontFamily: "var(--at-font-mono)",
-          fontSize: 11,
+          fontSize: 13,
           fontWeight: 600,
           letterSpacing: "0.14em",
           lineHeight: 1.2,
@@ -126,7 +126,7 @@ function NavButton({ item, active }: { item: NavItem; active: boolean }) {
         </div>
         <div style={{
           fontFamily: "var(--at-font-sans)",
-          fontSize: 10,
+          fontSize: 12,
           color: "var(--at-text-faint)",
           marginTop: 2,
         }}>
@@ -189,7 +189,7 @@ export default function App() {
             </span>
             <span style={{
               fontFamily: "var(--at-font-mono)",
-              fontSize: 10,
+              fontSize: 12,
               color: "var(--at-text-faint)",
               letterSpacing: "0.16em",
             }}>
@@ -198,7 +198,7 @@ export default function App() {
           </div>
           <div style={{
             fontFamily: "var(--at-font-mono)",
-            fontSize: 9,
+            fontSize: 12,
             color: "var(--at-text-faint)",
             letterSpacing: "0.2em",
             marginTop: 6,
@@ -218,7 +218,7 @@ export default function App() {
             <span className="at-dot at-dot-running" />
             <span style={{
               fontFamily: "var(--at-font-mono)",
-              fontSize: 9,
+              fontSize: 12,
               color: "var(--at-green)",
               letterSpacing: "0.12em",
             }}>
@@ -232,7 +232,7 @@ export default function App() {
           <div style={{
             padding: "0 18px 10px",
             fontFamily: "var(--at-font-mono)",
-            fontSize: 9,
+            fontSize: 12,
             color: "var(--at-text-faint)",
             letterSpacing: "0.22em",
             textTransform: "uppercase",
@@ -253,7 +253,7 @@ export default function App() {
           padding: "14px 18px",
           borderTop: "1px solid var(--at-border)",
           fontFamily: "var(--at-font-mono)",
-          fontSize: 9,
+          fontSize: 12,
           color: "var(--at-text-faint)",
           letterSpacing: "0.1em",
         }}>

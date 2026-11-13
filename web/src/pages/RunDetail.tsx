@@ -39,21 +39,21 @@ export default function RunDetail() {
 
   if (loading && (!run || run.run_id !== runId)) {
     return (
-      <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+      <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
         <span style={{ color: "var(--at-amber)" }}>●</span> LOADING RUN...
       </div>
     );
   }
   if (error && (!run || run.run_id !== runId)) {
     return (
-      <div style={{ padding: 40, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+      <div style={{ padding: 40, color: "var(--at-red)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
         ✕ SIGNAL ERROR: {error}
       </div>
     );
   }
   if (!run) {
     return (
-      <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>
+      <div style={{ padding: 40, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
         ✕ RUN NOT FOUND
       </div>
     );
@@ -128,7 +128,7 @@ export default function RunDetail() {
         gap: 8,
         marginBottom: 14,
         fontFamily: "var(--at-font-mono)",
-        fontSize: 10,
+        fontSize: 12,
         color: "var(--at-text-faint)",
         letterSpacing: "0.1em",
         textTransform: "uppercase",
@@ -178,7 +178,7 @@ export default function RunDetail() {
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
-            fontSize: 12,
+            fontSize: 13,
           }}>
             <div>
               <span style={{ color: "var(--at-amber)", fontWeight: 600, letterSpacing: "0.1em" }}>
@@ -238,7 +238,7 @@ export default function RunDetail() {
           <div className="at-stat-label">Created</div>
           <div style={{
             fontFamily: "var(--at-font-mono)",
-            fontSize: 12,
+            fontSize: 13,
             color: "var(--at-text)",
             marginTop: 6,
           }}>
@@ -249,7 +249,7 @@ export default function RunDetail() {
           <div className="at-stat-label">Ended</div>
           <div style={{
             fontFamily: "var(--at-font-mono)",
-            fontSize: 12,
+            fontSize: 13,
             color: run.ended_at ? "var(--at-text)" : "var(--at-text-faint)",
             marginTop: 6,
           }}>
@@ -265,7 +265,7 @@ export default function RunDetail() {
         <div className="at-section-title">Task · 任务描述</div>
         <div style={{
           fontFamily: "var(--at-font-sans)",
-          fontSize: 14,
+          fontSize: 15,
           color: "var(--at-text)",
           lineHeight: 1.6,
           padding: 12,
@@ -280,7 +280,7 @@ export default function RunDetail() {
           <div style={{
             marginTop: 10,
             fontFamily: "var(--at-font-mono)",
-            fontSize: 10,
+            fontSize: 12,
             color: "var(--at-text-faint)",
             letterSpacing: "0.06em",
           }}>
@@ -296,7 +296,7 @@ export default function RunDetail() {
           <div className="at-section-title">Follow-up · 追问直通</div>
           <div style={{
             fontFamily: "var(--at-font-mono)",
-            fontSize: 10,
+            fontSize: 12,
             color: "var(--at-text-faint)",
             marginBottom: 12,
             letterSpacing: "0.06em",
@@ -316,7 +316,7 @@ export default function RunDetail() {
                   padding: "6px 16px",
                   cursor: "pointer",
                   fontFamily: "var(--at-font-mono)",
-                  fontSize: 11,
+                  fontSize: 13,
                   letterSpacing: "0.1em",
                   textTransform: "uppercase",
                 }}
@@ -372,7 +372,7 @@ export default function RunDetail() {
                   padding: "14px 22px",
                   cursor: "pointer",
                   fontFamily: "var(--at-font-mono)",
-                  fontSize: 11,
+                  fontSize: 13,
                   fontWeight: 600,
                   letterSpacing: "0.16em",
                   textTransform: "uppercase",
@@ -400,7 +400,7 @@ export default function RunDetail() {
                   textAlign: "center",
                   color: "var(--at-text-faint)",
                   fontFamily: "var(--at-font-mono)",
-                  fontSize: 12,
+                  fontSize: 13,
                 }}>
                   ◌ NO APPROVAL RECORDS
                 </div>
@@ -416,7 +416,7 @@ export default function RunDetail() {
                         padding: "12px 8px",
                         borderBottom: idx === (approvals || []).length - 1 ? "none" : "1px solid var(--at-border-soft)",
                         fontFamily: "var(--at-font-mono)",
-                        fontSize: 11,
+                        fontSize: 13,
                       }}
                     >
                       <span style={{ color: "var(--at-amber)" }}>{a.id.slice(0, 8)}</span>

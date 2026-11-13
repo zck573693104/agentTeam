@@ -74,7 +74,7 @@ body {
     var(--at-bg-deep);
   background-size: 100% 100%, 100% 100%, 32px 32px, 32px 32px, 100% 100%;
   background-attachment: fixed;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -120,7 +120,7 @@ body::before {
 
 .at-stat-label {
   font-family: var(--at-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--at-text-faint);
   letter-spacing: 0.12em;
@@ -211,7 +211,7 @@ body::before {
 /* 章节标题:左侧 amber 短竖线 */
 .at-section-title {
   font-family: var(--at-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--at-text-dim);
   letter-spacing: 0.16em;
@@ -234,7 +234,7 @@ body::before {
   display: inline-flex;
   align-items: center;
   font-family: var(--at-font-mono);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.08em;
   padding: 2px 8px;
@@ -250,7 +250,7 @@ body::before {
   border: 1px solid var(--at-amber);
   color: var(--at-amber);
   font-family: var(--at-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -268,7 +268,7 @@ body::before {
 /* 链接式按钮 */
 .at-link {
   font-family: var(--at-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--at-amber);
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -310,7 +310,7 @@ body::before {
 }
 .ant-card-head-title {
   font-family: var(--at-font-mono) !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   font-weight: 600 !important;
   letter-spacing: 0.14em !important;
   text-transform: uppercase !important;
@@ -328,7 +328,7 @@ body::before {
   background: var(--at-bg-elev) !important;
   color: var(--at-text-faint) !important;
   font-family: var(--at-font-mono) !important;
-  font-size: 10px !important;
+  font-size: 12px !important;
   font-weight: 600 !important;
   letter-spacing: 0.12em !important;
   text-transform: uppercase !important;
@@ -340,7 +340,7 @@ body::before {
   color: var(--at-text) !important;
   border-bottom: 1px solid var(--at-border-soft) !important;
   padding: 10px 12px !important;
-  font-size: 13px !important;
+  font-size: 14px !important;
   transition: background 0.12s ease;
 }
 .ant-table-tbody > tr:hover > td {
@@ -373,7 +373,7 @@ body::before {
   border-color: var(--at-border) !important;
   color: var(--at-text) !important;
   font-family: var(--at-font-mono) !important;
-  font-size: 13px !important;
+  font-size: 14px !important;
 }
 .ant-input:focus,
 .ant-input-affix-wrapper:focus,
@@ -396,7 +396,7 @@ body::before {
   font-weight: 600 !important;
   letter-spacing: 0.06em !important;
   text-transform: uppercase !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   box-shadow: none !important;
 }
 .ant-btn-primary:hover:not(:disabled) {
@@ -409,7 +409,7 @@ body::before {
   border-color: var(--at-border) !important;
   color: var(--at-text-dim) !important;
   font-family: var(--at-font-mono) !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   letter-spacing: 0.06em !important;
   text-transform: uppercase !important;
 }
@@ -440,7 +440,7 @@ body::before {
 .ant-descriptions-bordered .ant-descriptions-item-label {
   color: var(--at-text-faint) !important;
   font-family: var(--at-font-mono) !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   letter-spacing: 0.08em !important;
   text-transform: uppercase !important;
 }
@@ -449,7 +449,7 @@ body::before {
 .ant-tabs-tab {
   color: var(--at-text-dim) !important;
   font-family: var(--at-font-mono) !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   letter-spacing: 0.1em !important;
   text-transform: uppercase !important;
 }
@@ -477,7 +477,7 @@ body::before {
 /* Statistic */
 .ant-statistic-title {
   font-family: var(--at-font-mono) !important;
-  font-size: 10px !important;
+  font-size: 12px !important;
   font-weight: 500 !important;
   color: var(--at-text-faint) !important;
   letter-spacing: 0.14em !important;
@@ -492,7 +492,7 @@ body::before {
 }
 
 /* Badge 文本 */
-.ant-badge-status-text { color: var(--at-text-dim) !important; font-family: var(--at-font-mono) !important; font-size: 12px !important; }
+.ant-badge-status-text { color: var(--at-text-dim) !important; font-family: var(--at-font-mono) !important; font-size: 13px !important; }
 
 /* Pre 代码块 */
 pre, code {
@@ -504,7 +504,7 @@ pre {
   border: 1px solid var(--at-border) !important;
   padding: 12px !important;
   border-radius: 2px !important;
-  font-size: 12px !important;
+  font-size: 13px !important;
   line-height: 1.6 !important;
 }
 
@@ -515,7 +515,7 @@ pre {
   color: var(--at-text) !important;
   border: 1px solid var(--at-border) !important;
   font-family: var(--at-font-mono) !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
 }
 .ant-tooltip-arrow::before,
 .ant-popover-arrow::before { background: var(--at-bg-elev) !important; }
@@ -524,7 +524,7 @@ pre {
 .ant-form-item-label > label {
   color: var(--at-text-dim) !important;
   font-family: var(--at-font-mono) !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   letter-spacing: 0.08em !important;
   text-transform: uppercase !important;
 }

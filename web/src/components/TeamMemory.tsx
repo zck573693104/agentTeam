@@ -30,7 +30,7 @@ export default function TeamMemory({
         padding: 16,
         color: "var(--at-text-faint)",
         fontFamily: "var(--at-font-mono)",
-        fontSize: 11,
+        fontSize: 13,
       }}>
         LOADING MEMORIES...
       </div>
@@ -42,7 +42,7 @@ export default function TeamMemory({
         padding: 16,
         color: "var(--at-red)",
         fontFamily: "var(--at-font-mono)",
-        fontSize: 11,
+        fontSize: 13,
       }}>
         ✕ {error}
       </div>
@@ -56,7 +56,7 @@ export default function TeamMemory({
         padding: "20px 16px",
         color: "var(--at-text-faint)",
         fontFamily: "var(--at-font-mono)",
-        fontSize: 11,
+        fontSize: 13,
         textAlign: "center",
       }}>
         ◌ 暂无记忆 · run 完成后自动蒸馏团队经验
@@ -79,7 +79,7 @@ export default function TeamMemory({
             alignItems: "center",
             marginBottom: 6,
             fontFamily: "var(--at-font-mono)",
-            fontSize: 10,
+            fontSize: 12,
             color: "var(--at-text-faint)",
           }}>
             <span>
@@ -93,12 +93,12 @@ export default function TeamMemory({
               </span>
             </span>
             <Popconfirm title="删除这条记忆?" onConfirm={() => handleDelete(m.id)}>
-              <button className="at-link" style={{ color: "var(--at-red)", fontSize: 10 }}>✕</button>
+              <button className="at-link" style={{ color: "var(--at-red)", fontSize: 12 }}>✕</button>
             </Popconfirm>
           </div>
           <div style={{
             fontFamily: "var(--at-font-sans)",
-            fontSize: 12,
+            fontSize: 13,
             color: "var(--at-text)",
             lineHeight: 1.5,
           }}>
@@ -109,7 +109,7 @@ export default function TeamMemory({
               margin: "6px 0 0",
               paddingLeft: 18,
               fontFamily: "var(--at-font-sans)",
-              fontSize: 11,
+              fontSize: 13,
               color: "var(--at-text-dim)",
               lineHeight: 1.6,
             }}>
@@ -126,7 +126,7 @@ export default function TeamMemory({
               gap: 4,
             }}>
               {m.meta.files.map((f, i) => (
-                <span key={i} className="at-tag" style={{ color: "var(--at-blue)", fontSize: 10 }}>
+                <span key={i} className="at-tag" style={{ color: "var(--at-blue)", fontSize: 12 }}>
                   {f}
                 </span>
               ))}
