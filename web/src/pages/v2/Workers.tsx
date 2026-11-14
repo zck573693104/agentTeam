@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Form, Input, InputNumber, Modal, Select, message, Popconfirm } from "antd";
 import { useFetch } from "../../hooks/useFetch";
 import { v2Delete, v2Post, v2Put, type V2Worker } from "../../api/v2";
-import { PageHeader } from "../Runs";
+import { PageHeader } from "../../components/PageHeader";
 
 function WorkerModal({ open, editing, onClose, onDone }: {
   open: boolean;
@@ -131,7 +131,7 @@ export default function V2Workers() {
   return (
     <div>
       <PageHeader
-        index="09 · V2 WORKERS"
+        index="05 · V2 WORKERS"
         title="工人池"
         subtitle="Worker Pool"
         action={

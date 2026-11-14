@@ -1,4 +1,4 @@
-/** v2 控制台 API client(dsh 式工单中心;类型与后端 agentteam/v2 响应对齐)。 */
+/** 控制台 API client(v2 内核;类型与后端 agentteam/v2 响应对齐)。 */
 
 import { api } from "./client";
 
@@ -127,7 +127,7 @@ export interface V2Evaluation {
 }
 
 // ---- 通用 ----
-const BASE = "/api/v2";
+const BASE = "/api";
 export const v2Get = <T>(path: string) => api<T>(BASE + path);
 export const v2Post = <T>(path: string, body: unknown) =>
   api<T>(BASE + path, { method: "POST", body: JSON.stringify(body) });

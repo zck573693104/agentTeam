@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Form, Input, Modal, Select, message, Popconfirm } from "antd";
 import { useFetch } from "../../hooks/useFetch";
 import { v2Delete, v2Post, type V2Source } from "../../api/v2";
-import { PageHeader } from "../Runs";
+import { PageHeader } from "../../components/PageHeader";
 
 function SourceModal({ open, onClose, onDone }: {
   open: boolean; onClose: () => void; onDone: () => void;
@@ -91,7 +91,7 @@ export default function V2Sources() {
   return (
     <div>
       <PageHeader
-        index="10 · V2 SOURCES"
+        index="06 · V2 SOURCES"
         title="入站源"
         subtitle="Inbound Sources"
         action={<button className="at-btn-amber" onClick={() => setModalOpen(true)}>+ 添加 Source</button>}

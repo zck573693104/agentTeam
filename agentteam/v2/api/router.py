@@ -23,6 +23,11 @@ def build_v2_router(v2: V2Components) -> APIRouter:
     router.include_router(sources_router(v2))
     router.include_router(stream_router(v2))
 
+    @router.get("/skills")
+    def list_skills():
+        """可用技能(skills/ 目录 .md 文件名;worker.skills 引用)。"""
+        return {"skills": v2.skill_loader.list_available()}
+
     @router.get("/health")
     def health():
         return {

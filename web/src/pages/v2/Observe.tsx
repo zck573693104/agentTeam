@@ -3,7 +3,7 @@ import { useState } from "react";
 import { message, Popconfirm } from "antd";
 import { useFetch } from "../../hooks/useFetch";
 import { v2Post, type V2Evaluation } from "../../api/v2";
-import { PageHeader } from "../Runs";
+import { PageHeader } from "../../components/PageHeader";
 
 function fmtTime(iso: string | null): string {
   if (!iso) return "—";
@@ -57,7 +57,7 @@ export default function V2Observe() {
   return (
     <div>
       <PageHeader
-        index="08 · V2 OBSERVE"
+        index="04 · V2 OBSERVE"
         title="观察模式"
         subtitle="Would-Accept Reviews"
         action={<button className="at-btn-amber" onClick={refetch}>⟳ 刷新</button>}

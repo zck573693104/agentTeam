@@ -179,6 +179,8 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
         "CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(status, next_retry_at)",
         "CREATE INDEX IF NOT EXISTS idx_outbox_ticket ON outbox(ticket_id, id)",
     ]),
+    # v2: WorkerDef 增加 MCP 挂载(presets 迁移需要;与 v1 MCPServer dict 同构)
+    (2, ["ALTER TABLE workers ADD COLUMN mcp_json TEXT NOT NULL DEFAULT '[]'"]),
 ]
 
 

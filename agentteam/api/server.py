@@ -1,257 +1,54 @@
-"""FastAPI app 工厂。"""
+"""FastAPI app 工厂(v2 内核:dsh 式 Ticket/Router/Worker Session)。"""
 from __future__ import annotations
 
-import threading
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from langgraph.checkpoint.sqlite import SqliteSaver
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
-from agentteam.api.events import EventBus
-from agentteam.api.routes.admin import admin_router
-from agentteam.api.routes.dashboard import dashboard_router
-from agentteam.api.routes.evolution import evolution_router
-from agentteam.api.routes.library import library_router
-from agentteam.api.routes.runs import runs_router
-from agentteam.api.routes.skills import skills_router
-from agentteam.api.routes.teams import teams_router
-from agentteam.api.run_manager import RunManager
-from agentteam.api.store import TeamStore
 from agentteam.config import get_settings
-from agentteam.domain.library import AgentLibrary
 from agentteam.logging_config import get_logger, init_logging
-from agentteam.models.provider import ModelProvider, ModelRef
-from agentteam.notify import NotificationService
-from agentteam.runtime.evolution import EvolutionEngine
-from agentteam.runtime.memory import MemoryEngine
-from agentteam.runtime.skills import SkillLoader
-from agentteam.storage.audit import AuditRepo
-from agentteam.storage.db import init_db
-from agentteam.storage.evolution import EvolutionRepo
-from agentteam.storage.library import LibraryRepo
-from agentteam.storage.memory import MemoryRepo
-from agentteam.storage.runs import RunRepo
-from agentteam.storage.teams import TeamRepo
 from agentteam.tools.registry import ToolRegistry
+from agentteam.v2.api.deps import create_v2_components
+from agentteam.v2.api.router import build_v2_router
 
 logger = get_logger("api.server")
 
-# 哨兵：web_dist 参数未显式传入时使用此值,区分"用默认路径"和"显式禁用挂载"。
+# 哨兵:web_dist 参数未显式传入时使用默认路径,区分"默认"与"显式禁用挂载"。
 _DEFAULT: object = object()
-
-# 默认前端静态文件目录(生产构建产物)。计算一次,避免每次 create_app 都 resolve。
 _DEFAULT_WEB_DIST = Path(__file__).resolve().parent.parent.parent / "web" / "dist"
 
 
 def create_app(
     db_path: str | None = None,
-    model_provider: ModelProvider | None = None,
+    model_provider=None,
     tool_registry: ToolRegistry | None = None,
-    agent_library: AgentLibrary | None = None,
     skills_dir: Path | None = None,
     web_dist: Path | None | object = _DEFAULT,
     log_level: str | None = None,
-    v2_db_path: str | None = None,
 ) -> FastAPI:
-    # 从集中式 Settings 读取配置(env_prefix=AGENTTEAM_ 自动覆盖)
+    """构建 v2 应用:Ticket/Attention/Thread/Source 全套 API + SSE + SPA 静态托管。"""
     settings = get_settings()
-    # 初始化 logging:显式 log_level 优先,否则用 Settings.log_level
     init_logging(level=log_level or settings.log_level)
-    # 解析 DB 路径:显式参数优先,否则用 Settings.db_path
     if db_path is None:
         db_path = settings.db_path
-    logger.info("starting AgentTeam, db_path=%s", db_path)
-    conn = init_db(db_path)
+    logger.info("starting AgentTeam v2, db_path=%s", db_path)
 
-    import os as _os
-
-    # BUG-07:用 lifespan 在 app shutdown 时显式 close conn,
-    # 避免 Windows 上 SQLite 文件锁残留(原实现 conn 仅在 app GC 时释放)。
-    # 注意:只有 `with TestClient(app):` 或真实 uvicorn 启停才触发 lifespan;
-    # 直接 TestClient(app) 不触发(与原行为一致,不影响现有测试)。
-    #
-    # 同时调用 run_manager.shutdown():优雅关闭后台线程池,
-    # 确保正在执行的 run 任务有机会完成,避免 daemon 线程被强杀
-    # 导致 audit event 丢失或 SQLite 写入半截。
-    @asynccontextmanager
-    async def lifespan(app):
-        # SP12b: outbox worker 随服务起停;stop 在 run_manager 之后,
-        # 让终态通知有机会 enqueue 并在 shutdown 等待窗口内发出
-        outbox_worker.start()
-        # v2 内核: 调度器随服务起停(dsh 式 Ticket/Router/Worker Session)
-        v2.scheduler.start()
-        v2.outbox_worker.start()
-        # P3: SourceDaemon 常驻轮询(poll 型入站源;webhook 型由 HTTP 驱动)
-        await v2.source_daemon.start()
-        yield
-        await v2.source_daemon.stop()
-        v2.outbox_worker.stop()
-        v2.scheduler.shutdown(wait=True)
-        run_manager.shutdown(wait=True)
-        outbox_worker.stop()
-        conn.close()
-        v2.conn.close()
-
-    app = FastAPI(title="AgentTeam", lifespan=lifespan)
-
-    # 共享锁：SqliteSaver / RunRepo / AuditRepo 共用同一 sqlite3.Connection，
-    # 必须用同一把锁串行化所有连接访问，否则多线程下会触发
-    # sqlite3.InterfaceError: bad parameter or other API misuse。
-    conn_lock = threading.Lock()
-    run_repo = RunRepo(conn, lock=conn_lock)
-    audit_repo = AuditRepo(conn, lock=conn_lock)
-    team_repo = TeamRepo(conn, lock=conn_lock)
-    library_repo = LibraryRepo(conn, lock=conn_lock)
-    team_store = TeamStore(repo=team_repo)
-    event_bus = EventBus()
-
-    saver = SqliteSaver(conn)
-    saver.lock = conn_lock  # 让 SqliteSaver 也用同一把锁
-    # 防御:若 langgraph 改名 lock 属性则 saver.lock 不会指向 conn_lock,
-    # 此时 SqliteSaver 会用自己内部的锁,与其他 repo 不互斥,多线程下触发
-    # sqlite3.InterfaceError。用显式 raise 而非 assert(避免 python -O 被剥离)。
-    if saver.lock is not conn_lock:
-        raise RuntimeError(
-            "SqliteSaver.lock does not share conn_lock; "
-            "langgraph API may have changed."
-        )
-    saver.setup()
-
-    mp = model_provider or ModelProvider()
-    tr = tool_registry or ToolRegistry()
-    lib = agent_library or AgentLibrary(repo=library_repo)
-    # 容器/服务部署下 uvicorn --factory 没法传参，技能目录走环境变量；
-    # 未设置时保持 None（SP7 单测依赖「无 skills_dir → /api/skills 为空」）。
     if skills_dir is None:
-        _skills_env = _os.environ.get("AGENTTEAM_SKILLS_DIR", "")
+        _skills_env = os.environ.get("AGENTTEAM_SKILLS_DIR", "")
         skills_dir = Path(_skills_env) if _skills_env else None
-    skill_loader = SkillLoader(skills_dir)
 
-    # 插件自动发现:注册内置工具 + entry_points 声明的第三方工具/preset/skill。
-    # 修复 incidental bug:此前 create_app 不调 register_builtin_skills,
-    # 导致 read_file/search_web 等内置工具在 API 服务端未注册,agent.tools
-    # 引用它们时运行时 KeyError。仅在新建 registry 时发现;调用方传入预置
-    # registry(如测试 mock)时跳过自动发现,保持调用方控制。
-    if tool_registry is None:
-        from agentteam.plugins import discover_all
-        discover_all(tr)
-
-    # SP7b 自进化引擎（SP8 合并时被治理面重构误删，此处恢复接线）：
-    # run 终态后异步触发 4 维度进化（prompt/params/skill_gen/skill_select），
-    # 失败静默隔离，不影响主流程；前端 Teams 页 EvolutionHistory 消费其账本。
-    evolution_repo = EvolutionRepo(conn, lock=conn_lock)
-    evolution_engine = EvolutionEngine(
-        model_provider=mp,
-        agent_library=lib,
-        evolution_repo=evolution_repo,
-        run_repo=run_repo,
-        audit_repo=audit_repo,
-        default_model=ModelRef("qwen", "qwen-max"),
-        skill_loader=skill_loader,
-        skills_dir=skills_dir,
-    )
-
-    # 记忆层: run 终态后蒸馏团队记忆(MemoryEngine),新 run 启动时注入
-    # leader 上下文(RunManager._build_memory_context)。失败静默隔离,
-    # 不影响主流程;与 evolution 同一个收敛点,对所有团队统一生效。
-    memory_repo = MemoryRepo(conn, lock=conn_lock)
-    memory_engine = MemoryEngine(
-        model_provider=mp,
-        memory_repo=memory_repo,
-        run_repo=run_repo,
-        audit_repo=audit_repo,
-        default_model=ModelRef("qwen", "qwen-max"),
-    )
-
-    # SP12b: IM 通知 outbox(先存后发/退避重试/同 run 串行/重启续发)。
-    # NotificationService 只落库,OutboxWorker 后台消费;lifespan 负责起停。
-    from agentteam.notify.outbox import OutboxWorker
-    from agentteam.storage.notify import NotifyOutboxRepo
-
-    notify_outbox_repo = NotifyOutboxRepo(conn, lock=conn_lock)
-    outbox_worker = OutboxWorker(
-        notify_outbox_repo,
-        retry_max=settings.notify_retry_max,
-        backoff_base=settings.notify_backoff_base,
-        send_timeout=settings.notify_timeout_seconds,
-    )
-
-    run_manager = RunManager(
-        run_repo, audit_repo, event_bus,
-        checkpointer=saver, evolution_engine=evolution_engine,
-        memory_engine=memory_engine,
-        notifier=NotificationService(run_repo, team_store, outbox=notify_outbox_repo),
-    )
-
-    app.include_router(teams_router(
-        team_store, memory_repo, run_repo=run_repo, audit_repo=audit_repo,
-    ))
-    app.include_router(
-        runs_router(
-            run_manager, team_store, mp, tr, run_repo, audit_repo, event_bus,
-            checkpointer=saver, agent_library=lib, skill_loader=skill_loader,
-            notify_outbox_repo=notify_outbox_repo,
-        )
-    )
-
-    # SP12c: 事件驱动 Trigger(对标 DeepSeek Super-agent 事件驱动设计)。
-    # 入站 webhook 经 Fast/Slow Path 两级过滤命中规则后,走与人工提交
-    # 完全相同的 submit_run 流程(配额/审计),triggered_by_user
-    # 记 "trigger:<规则名>"。Slow Path 需要模型 Key,无 Key 静默跳过。
-    from agentteam.api.routes.runs import RunSubmitError, submit_run
-    from agentteam.api.routes.triggers import triggers_router
-    from agentteam.storage.triggers import TriggerRepo
-    from agentteam.triggers import TriggerEngine
-
-    trigger_repo = TriggerRepo(conn, lock=conn_lock)
-
-    def _trigger_run_starter(team_name: str, task: str, triggered_by_user: str) -> str:
-        team = team_store.get(team_name)
-        if team is None:
-            raise RunSubmitError(404, f"Team '{team_name}' not found")
-        return submit_run(
-            team=team, task=task, triggered_by_user=triggered_by_user,
-            team_store=team_store,
-            run_repo=run_repo, audit_repo=audit_repo, event_bus=event_bus,
-            run_manager=run_manager,
-            model_provider=mp, tool_registry=tr,
-            checkpointer=saver, agent_library=lib,
-            skill_loader=skill_loader,
-        )
-
-    trigger_engine = TriggerEngine(
-        trigger_repo=trigger_repo,
-        model_provider=mp,
-        run_starter=_trigger_run_starter,
-        audit_repo=audit_repo,
-        default_model=ModelRef("qwen", "qwen-max"),
-    )
-    app.include_router(triggers_router(trigger_repo, trigger_engine, team_store))
-
-    app.include_router(dashboard_router(run_repo, audit_repo))
-    app.include_router(library_router(lib))
-    app.include_router(skills_router(skill_loader))
-    app.include_router(evolution_router(evolution_repo, lib))
-    app.include_router(admin_router(team_store, lib))
-
-    # ---- v2 内核(dsh 式 Ticket/Router/Worker Session)并行挂载 ----
-    # 独立 DB(默认 v1 路径同名 +_v2 后缀,测试自动隔离);工作区默认在
-    # v2 db 同目录 workspaces/ 下。P5 收尾切换后 v1 内核删除、/api/v2 → /api。
-    from agentteam.v2.api.deps import create_v2_components
-    from agentteam.v2.api.router import build_v2_router
-
-    if v2_db_path is None:
-        _v1p = Path(db_path)
-        v2_db_path = str(_v1p.with_name(_v1p.stem + "_v2.db"))
-    _v2_ws = settings.v2_workspace_root or str(Path(v2_db_path).parent / "workspaces")
     v2 = create_v2_components(
-        db_path=v2_db_path,
-        workspace_root=Path(_v2_ws),
-        model_provider=mp,
-        tool_registry=tr,
+        db_path=db_path,
+        workspace_root=(
+            Path(settings.v2_workspace_root) if settings.v2_workspace_root
+            else Path(db_path).parent / "workspaces"
+        ),
+        model_provider=model_provider,
+        tool_registry=tool_registry,
         skills_dir=skills_dir,
         default_provider=settings.v2_default_provider,
         default_model_name=settings.v2_default_model,
@@ -261,13 +58,29 @@ def create_app(
         notify_retry_max=settings.notify_retry_max,
         notify_backoff_base=settings.notify_backoff_base,
         notify_timeout_seconds=settings.notify_timeout_seconds,
+        source_poll_interval=settings.v2_source_poll_interval,
     )
-    app.include_router(build_v2_router(v2), prefix="/api/v2")
+    # 内置工具自动发现(仅新建 registry 时;调用方传入的 registry 保持其控制权)
+    if tool_registry is None:
+        from agentteam.plugins import discover_all
+        discover_all(v2.tool_registry)
 
-    # 挂载前端静态文件(生产模式)。
-    # - web_dist=_DEFAULT(默认): 使用 _DEFAULT_WEB_DIST,目录存在才挂载
-    # - web_dist=None: 显式禁用挂载(用于测试)
-    # - web_dist=<Path>: 使用调用者指定的目录,目录存在才挂载
+    @asynccontextmanager
+    async def lifespan(app):
+        # 后台组件随服务起停:调度器 → 出站 Outbox → 入站 SourceDaemon
+        v2.scheduler.start()
+        v2.outbox_worker.start()
+        await v2.source_daemon.start()
+        yield
+        await v2.source_daemon.stop()
+        v2.outbox_worker.stop()
+        v2.scheduler.shutdown(wait=True)
+        v2.conn.close()
+
+    app = FastAPI(title="AgentTeam", lifespan=lifespan)
+    app.include_router(build_v2_router(v2), prefix="/api")
+
+    # 前端静态托管(SPA 回退:/v2/* 等前端路由刷新直达时回退 index.html)
     if web_dist is _DEFAULT:
         web_dist_path: Path | None = _DEFAULT_WEB_DIST
     elif web_dist is None:
@@ -275,9 +88,6 @@ def create_app(
     else:
         web_dist_path = web_dist  # type: ignore[assignment]
 
-    # SPA 回退：前端路由(/teams、/runs 等)刷新或直达时，StaticFiles 找不到
-    # 对应文件会 404，导致页面白屏（页面级交互验证发现）。非 API/非资产路径
-    # 的 404 回退到 index.html，交给 React Router 处理。
     class _SPAStaticFiles(StaticFiles):
         async def get_response(self, path: str, scope):
             try:

@@ -1,9 +1,4 @@
 import { Link, Route, Routes, useLocation } from "react-router-dom";
-import Dashboard from "./pages/Dashboard";
-import Skills from "./pages/Skills";
-import Teams from "./pages/Teams";
-import Runs from "./pages/Runs";
-import RunDetail from "./pages/RunDetail";
 import V2Attention from "./pages/v2/Attention";
 import V2Tickets from "./pages/v2/Tickets";
 import V2TicketDetail from "./pages/v2/TicketDetail";
@@ -11,6 +6,7 @@ import V2Threads from "./pages/v2/Threads";
 import V2Observe from "./pages/v2/Observe";
 import V2Workers from "./pages/v2/Workers";
 import V2Sources from "./pages/v2/Sources";
+import V2Skills from "./pages/v2/Skills";
 
 /**
  * 自定义侧栏导航 — 替代 antd Layout/Sider/Menu。
@@ -31,65 +27,10 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  {
-    key: "/",
-    index: "01",
-    label: "OVERVIEW",
-    sublabel: "全局态势",
-    path: "/",
-    icon: (
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
-        <rect x="1.5" y="1.5" width="5" height="5" />
-        <rect x="9.5" y="1.5" width="5" height="5" />
-        <rect x="1.5" y="9.5" width="5" height="5" />
-        <rect x="9.5" y="9.5" width="5" height="5" />
-      </svg>
-    ),
-  },
-  {
-    key: "/teams",
-    index: "02",
-    label: "TEAMS",
-    sublabel: "团队配置",
-    path: "/teams",
-    icon: (
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
-        <circle cx="5" cy="5" r="2" />
-        <circle cx="11" cy="5" r="2" />
-        <path d="M1 13c0-2.2 1.8-4 4-4s4 1.8 4 4" />
-        <path d="M9 13c0-2.2 1.8-4 4-4" opacity="0.5" />
-      </svg>
-    ),
-  },
-  {
-    key: "/skills",
-    index: "03",
-    label: "SKILLS",
-    sublabel: "技能库",
-    path: "/skills",
-    icon: (
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
-        <path d="M2 3h12v10H2z" />
-        <path d="M2 6h12M5 3v10M9 3v10" />
-      </svg>
-    ),
-  },
-  {
-    key: "/runs",
-    index: "04",
-    label: "RUNS",
-    sublabel: "执行记录",
-    path: "/runs",
-    icon: (
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
-        <polygon points="4,2 13,8 4,14" />
-      </svg>
-    ),
-  },
   // ---- V2 控制台(dsh 式工单中心;P5 切换后接管导航) ----
   {
     key: "/v2/attention",
-    index: "05",
+    index: "01",
     label: "INBOX · V2",
     sublabel: "注意件收件箱",
     path: "/v2/attention",
@@ -103,7 +44,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     key: "/v2/tickets",
-    index: "06",
+    index: "02",
     label: "TICKETS · V2",
     sublabel: "工单看板",
     path: "/v2/tickets",
@@ -116,7 +57,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     key: "/v2/threads",
-    index: "07",
+    index: "03",
     label: "THREADS · V2",
     sublabel: "入站线程",
     path: "/v2/threads",
@@ -128,7 +69,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     key: "/v2/observe",
-    index: "08",
+    index: "04",
     label: "OBSERVE · V2",
     sublabel: "观察模式",
     path: "/v2/observe",
@@ -141,7 +82,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     key: "/v2/workers",
-    index: "09",
+    index: "05",
     label: "WORKERS · V2",
     sublabel: "工人池",
     path: "/v2/workers",
@@ -154,7 +95,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     key: "/v2/sources",
-    index: "10",
+    index: "06",
     label: "SOURCES · V2",
     sublabel: "入站源",
     path: "/v2/sources",
@@ -162,6 +103,19 @@ const NAV_ITEMS: NavItem[] = [
       <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
         <path d="M8 14V7M8 7c-3 0-4-3-4-3M8 7c3 0 4-3 4-3" />
         <circle cx="8" cy="14" r="1.2" />
+      </svg>
+    ),
+  },
+  {
+    key: "/v2/skills",
+    index: "07",
+    label: "SKILLS · V2",
+    sublabel: "技能库",
+    path: "/v2/skills",
+    icon: (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <path d="M2 3h12v10H2z" />
+        <path d="M2 6h12M5 3v10M9 3v10" />
       </svg>
     ),
   },
@@ -368,12 +322,8 @@ export default function App() {
         overflow: "auto",
       }}>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/teams" element={<Teams />} />
-          <Route path="/skills" element={<Skills />} />
-          <Route path="/runs" element={<Runs />} />
-          <Route path="/runs/:runId" element={<RunDetail />} />
-          {/* ---- V2 控制台(dsh 式工单中心) ---- */}
+          {/* ---- 控制台(dsh 式工单中心) ---- */}
+          <Route path="/" element={<V2Attention />} />
           <Route path="/v2/attention" element={<V2Attention />} />
           <Route path="/v2/tickets" element={<V2Tickets />} />
           <Route path="/v2/tickets/:ticketId" element={<V2TicketDetail />} />
@@ -381,6 +331,7 @@ export default function App() {
           <Route path="/v2/observe" element={<V2Observe />} />
           <Route path="/v2/workers" element={<V2Workers />} />
           <Route path="/v2/sources" element={<V2Sources />} />
+          <Route path="/v2/skills" element={<V2Skills />} />
         </Routes>
       </main>
     </div>

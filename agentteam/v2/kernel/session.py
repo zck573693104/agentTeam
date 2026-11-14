@@ -124,6 +124,13 @@ class WorkerSession:
         self._pop_follow_ups = pop_follow_ups or (lambda: [])
 
         # —— 工具:workspace 文件工具(每 ticket 隔离) + 注册表非文件工具 ——
+        # MCP 挂载:worker 声明的 mcp_servers 注册进注册表(幂等,带缓存),再按名取用
+        from agentteam.domain.mcp_server import MCPServer
+        for m in worker.mcp_servers:
+            try:
+                tool_registry.register_mcp_tools(MCPServer(**m))
+            except Exception as exc:  # MCP 启动失败不阻塞会话,工具缺失时 worker 自纠
+                logger.warning("mcp register failed for %s/%s: %s", worker.name, m.get("name"), exc)
         self._tools: list = list(make_file_tools(workspace_dir))
         extra_names = [n for n in worker.tools if n not in FILE_TOOL_NAMES]
         if extra_names:

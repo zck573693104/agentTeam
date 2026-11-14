@@ -7,7 +7,7 @@ import { Input, Modal, message } from "antd";
 import { Link } from "react-router-dom";
 import { useFetch } from "../../hooks/useFetch";
 import { v2Post, type V2Ticket } from "../../api/v2";
-import { PageHeader } from "../Runs";
+import { PageHeader } from "../../components/PageHeader";
 
 const COLUMNS: { status: string; label: string; color: string }[] = [
   { status: "pending", label: "待执行", color: "var(--at-gray)" },
@@ -113,7 +113,7 @@ export default function V2Tickets() {
   return (
     <div>
       <PageHeader
-        index="06 · V2 TICKETS"
+        index="02 · V2 TICKETS"
         title="工单看板"
         subtitle="Ticket Board"
         action={<button className="at-btn-amber" onClick={() => setModalOpen(true)}>+ 新请求</button>}

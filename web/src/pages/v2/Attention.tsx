@@ -10,7 +10,7 @@ import { Input, Popconfirm, Tabs, message } from "antd";
 import { Link } from "react-router-dom";
 import { useFetch } from "../../hooks/useFetch";
 import { v2Post, type V2Attention } from "../../api/v2";
-import { PageHeader } from "../Runs";
+import { PageHeader } from "../../components/PageHeader";
 
 function fmtTime(iso: string | null): string {
   if (!iso) return "—";
@@ -141,7 +141,7 @@ export default function V2Attention() {
   return (
     <div>
       <PageHeader
-        index="05 · V2 ATTENTION"
+        index="01 · V2 ATTENTION"
         title="注意件收件箱"
         subtitle="Human Inbox"
         action={

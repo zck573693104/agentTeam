@@ -19,6 +19,8 @@ class WorkerDef:
     model: dict[str, Any] | None = None
     tools: list[str] = field(default_factory=list)   # 工具名(read_file 等文件工具按 workspace 注入,不必声明)
     skills: list[str] = field(default_factory=list)
+    # MCP 挂载(MCPServer dict 同构;session 启动时注册到 ToolRegistry,tool 名 mcp:{name}:*)
+    mcp_servers: list[dict] = field(default_factory=list)
     # P1 审批门:需要人工批准的工具名;["*"] = 全部工具需批准;空 = 免审批
     approval_targets: list[str] = field(default_factory=list)
     max_iterations: int = 10
@@ -31,6 +33,7 @@ class WorkerDef:
             "model": self.model,
             "tools": list(self.tools),
             "skills": list(self.skills),
+            "mcp_servers": list(self.mcp_servers),
             "approval_targets": list(self.approval_targets),
             "max_iterations": self.max_iterations,
             "enabled": self.enabled,
@@ -44,6 +47,7 @@ class WorkerDef:
             model=d.get("model"),
             tools=list(d.get("tools", [])),
             skills=list(d.get("skills", [])),
+            mcp_servers=list(d.get("mcp_servers", [])),
             approval_targets=list(d.get("approval_targets", [])),
             max_iterations=int(d.get("max_iterations", 10)),
             enabled=bool(d.get("enabled", True)),
@@ -60,6 +64,7 @@ def worker_from_row(row) -> WorkerDef:
         model=json.loads(row["model_json"]) if row["model_json"] else None,
         tools=json.loads(row["tools_json"] or "[]"),
         skills=json.loads(row["skills_json"] or "[]"),
+        mcp_servers=json.loads(row["mcp_json"] or "[]"),
         approval_targets=json.loads(row["approval_json"] or "[]"),
         max_iterations=int(row["max_iterations"]),
         enabled=bool(row["enabled"]),

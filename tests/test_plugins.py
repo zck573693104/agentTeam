@@ -162,28 +162,18 @@ def test_discover_presets_returns_entry_points(monkeypatch):
 
 
 def test_discover_all_end_to_end(monkeypatch):
-    """discover_all 注册工具 + 合并 preset 到 PRESET_REGISTRY。"""
-    # 重置 PRESET_REGISTRY 测试隔离
-    from agentteam.presets import PRESET_REGISTRY
-    original_registry = dict(PRESET_REGISTRY)
+    """discover_all 注册内置工具(v2 预设走文件系统,不走 PRESET_REGISTRY)。"""
+    # 模拟 entry_points 全空
+    def fake_entry_points(group=None):
+        if group is None:
+            return {}
+        return []
+    import agentteam.plugins as plugins_mod
+    monkeypatch.setattr(plugins_mod, "entry_points", fake_entry_points)
 
-    try:
-        # 模拟 entry_points 全空
-        def fake_entry_points(group=None):
-            if group is None:
-                return {}
-            return []
-        import agentteam.plugins as plugins_mod
-        monkeypatch.setattr(plugins_mod, "entry_points", fake_entry_points)
+    registry = ToolRegistry()
+    discover_all(registry)
 
-        registry = ToolRegistry()
-        discover_all(registry)
-
-        # 内置工具已注册
-        assert "read_file" in registry.list_names()
-        # PRESET_REGISTRY 未被破坏
-        assert "enterprise_dev" in PRESET_REGISTRY
-    finally:
-        # 恢复 PRESET_REGISTRY(虽然本测试没改,但保险)
-        PRESET_REGISTRY.clear()
-        PRESET_REGISTRY.update(original_registry)
+    # 内置工具已注册
+    assert "read_file" in registry.list_names()
+    assert "write_file" in registry.list_names()

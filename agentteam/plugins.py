@@ -123,14 +123,11 @@ def discover_skill_dirs() -> list[str]:
 
 
 def discover_all(registry: ToolRegistry) -> None:
-    """启动时统一调用:注册工具 + 发现 preset + 发现 skill 提供者。
+    """启动时统一调用:注册工具 + 发现第三方 preset/skill entry_points。
 
     供 create_app 在 ToolRegistry 实例化后调用。失败不抛异常(已内部捕获)。
+    v2 内置预设走文件系统(agentteam/v2/presets),不走 entry_points 合并。
     """
     discover_tools(registry)
-    # 把第三方 preset 合并进 PRESET_REGISTRY(内置优先)
-    from agentteam.presets import PRESET_REGISTRY
-    for name, path in discover_presets().items():
-        if name not in PRESET_REGISTRY:
-            PRESET_REGISTRY[name] = path
+    discover_presets()
     discover_skill_dirs()

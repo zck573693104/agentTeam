@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Input, message } from "antd";
 import { useFetch } from "../../hooks/useFetch";
 import { v2Post, type V2Thread } from "../../api/v2";
-import { PageHeader } from "../Runs";
+import { PageHeader } from "../../components/PageHeader";
 
 export default function V2Threads() {
   const { data: threads, refetch } = useFetch<V2Thread[]>("/api/v2/threads");
@@ -25,7 +25,7 @@ export default function V2Threads() {
 
   return (
     <div>
-      <PageHeader index="07 · V2 THREADS" title="线程" subtitle="Inbound Threads" />
+      <PageHeader index="03 · V2 THREADS" title="线程" subtitle="Inbound Threads" />
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 14, alignItems: "start" }}>
         <div className="at-panel" style={{ padding: 14 }}>
           <div className="at-stat-label">Threads · {threads?.length ?? 0}</div>

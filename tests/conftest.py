@@ -1,24 +1,15 @@
-import sqlite3
+"""共享测试夹具:FakeLLM/FakeModelProvider(v2 内核的窄模型接口)。"""
 from pathlib import Path
 
 import pytest
 
 
-@pytest.fixture
-def tmp_db(tmp_path: Path) -> sqlite3.Connection:
-    """提供一个临时 SQLite 连接，测试结束自动关闭。"""
-    from agentteam.storage.db import init_db
-
-    conn = init_db(tmp_path / "test.db")
-    yield conn
-    conn.close()
-
-
 class FakeLLM:
     """测试用假 LLM。
 
-    invoke() 按顺序返回 invoke_responses 中的元素；
-    with_structured_output().invoke() 按顺序返回 structured_responses 中的元素。
+    invoke() 按顺序返回 invoke_responses;with_structured_output().invoke()
+    按顺序返回 structured_responses。窄接口(invoke/bind_tools/
+    with_structured_output)与生产 ModelProvider 契约对齐。
     """
 
     def __init__(self) -> None:
@@ -56,7 +47,7 @@ class FakeLLM:
 
 
 class FakeModelProvider:
-    """测试用模型提供者，按 model name 映射到不同 FakeLLM。"""
+    """按 model name 映射 FakeLLM 的测试提供者。"""
 
     def __init__(self, llm_by_model_name: dict[str, FakeLLM]) -> None:
         self._map = llm_by_model_name
@@ -71,20 +62,16 @@ def fake_llm() -> FakeLLM:
 
 
 @pytest.fixture
-def fake_trace_writer():
-    from agentteam.runtime.trace import FakeTraceWriter
-    return FakeTraceWriter()
-
-
-@pytest.fixture
 def fake_mcp_loader():
-    """返回一个 fake MCP loader，产出指定的 fake 工具。"""
+    """fake MCP loader:产出指定工具列表。"""
     from langchain_core.tools import StructuredTool
 
     def _loader(tools=None):
         tools = tools or []
+
         def loader(server):
             return list(tools)
+
         return loader
 
     return _loader

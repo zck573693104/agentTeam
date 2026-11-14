@@ -1,29 +1,14 @@
-"""集中式配置管理(pydantic-settings)。
-
-把散落在各模块的 `os.environ.get("AGENTTEAM_...")` 收敛到一处,
-提供类型校验、默认值、运行时单例缓存,避免:
-- 字符串/数字类型转换重复(`int(os.environ.get(...))` 散布)
-- 默认值分散(同一参数在不同模块有不同默认值的隐患)
-- 测试 mock 困难(单点注入 Settings 实例 vs 全局 env var monkeypatch)
-
-设计:
-- Settings 用 pydantic-settings BaseSettings,自动从环境变量读取
-- env_prefix="AGENTTEAM_",字段名 lowercase(如 max_run_workers → AGENTTEAM_MAX_RUN_WORKERS)
-- get_settings() 单例:首次调用构造,后续复用;测试可用 override_settings() 上下文重置
-
-用法:
-    from agentteam.config import get_settings
-    settings = get_settings()
-    print(settings.max_run_workers)  # int,已校验
+"""集中式配置管理(pydantic-settings,v2 内核)。
 
 字段对应环境变量(均有默认值,零配置可启动):
-- AGENTTEAM_DB_PATH: SQLite 数据库路径(默认 "data/agentteam.db")
-- AGENTTEAM_LOG_LEVEL: 日志级别(默认 "WARNING")
-- AGENTTEAM_LOG_FORMAT: "text" 或 "json"(默认 "text")
-- AGENTTEAM_EVENT_QUEUE_SIZE: EventBus 每订阅者队列上限(默认 1000)
-- AGENTTEAM_MAX_RUN_WORKERS: run 线程池大小(默认 32)
-- AGENTTEAM_MAX_EVOLUTION_WORKERS: evolution 线程池大小(默认 4)
-- AGENTTEAM_INTERRUPTED_TTL_SECONDS: interrupted run 内存态 TTL(默认 21600=6h,0 禁用)
+- AGENTTEAM_DB_PATH: SQLite 数据库路径(默认 "data/agentteam_v2.db")
+- AGENTTEAM_LOG_LEVEL / AGENTTEAM_LOG_FORMAT
+- AGENTTEAM_EVENT_QUEUE_SIZE: EventBus 每订阅者队列上限
+- AGENTTEAM_V2_MAX_SESSION_WORKERS: 同时执行的 Ticket 数上限
+- AGENTTEAM_V2_DEFAULT_PROVIDER / AGENTTEAM_V2_DEFAULT_MODEL: 默认模型
+- AGENTTEAM_V2_WORKSPACE_ROOT: 工单工作区根目录(空 = db 同目录 workspaces/)
+- AGENTTEAM_V2_SOURCE_POLL_INTERVAL: SourceDaemon 轮询间隔秒
+- AGENTTEAM_NOTIFY_*: IM 出站 webhook(outbox 先存后发)
 """
 from __future__ import annotations
 
@@ -35,146 +20,69 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """AgentTeam 全局配置。
-
-    所有字段从环境变量 AGENTTEAM_<UPPER_NAME> 读取,
-    缺省值保证零配置可启动。
-    """
+    """AgentTeam v2 全局配置(env_prefix=AGENTTEAM_)。"""
 
     model_config = SettingsConfigDict(
         env_prefix="AGENTTEAM_",
         case_sensitive=False,
-        extra="ignore",  # 忽略未声明的 AGENTTEAM_* 变量,向前兼容
+        extra="ignore",
     )
 
     # 存储与日志
     db_path: str = Field(
-        default="data/agentteam.db",
-        description="SQLite 数据库文件路径",
+        default="data/agentteam_v2.db",
+        description="SQLite 数据库文件路径(v2 内核)",
     )
-    log_level: str = Field(
-        default="WARNING",
-        description="日志级别(DEBUG/INFO/WARNING/ERROR)",
-    )
-    log_format: str = Field(
-        default="text",
-        description="日志格式:text 或 json",
-    )
+    log_level: str = Field(default="WARNING", description="日志级别")
+    log_format: str = Field(default="text", description="日志格式:text 或 json")
 
     # 事件总线
     event_queue_size: int = Field(
-        default=1000,
-        ge=1,
+        default=1000, ge=1,
         description="EventBus 每订阅者队列上限,满时丢弃最旧事件",
     )
 
-    # 后台线程池
-    max_run_workers: int = Field(
-        default=32,
-        ge=1,
-        description="run 执行线程池大小(防高并发下线程爆炸)",
+    # v2 内核
+    v2_max_session_workers: int = Field(
+        default=8, ge=1,
+        description="worker session 线程池大小(同时执行的 Ticket 数上限)",
     )
-    max_evolution_workers: int = Field(
-        default=4,
-        ge=1,
-        description="evolution 触发线程池大小(独立小池,避免占满 run 池)",
+    v2_default_provider: str = Field(
+        default="qwen",
+        description="默认模型 provider(Router 与未指定模型的 worker 使用)",
     )
-
-    # interrupted run 内存态 TTL
-    interrupted_ttl_seconds: int = Field(
-        default=6 * 3600,
-        ge=0,
-        description="interrupted run 超过该秒数未被 resume 则驱逐内存态;0 禁用",
+    v2_default_model: str = Field(
+        default="qwen-max",
+        description="默认模型名",
     )
-    interrupted_sweep_interval_seconds: int = Field(
-        default=600,
-        ge=0,
-        description="interrupted run 清理任务执行间隔(秒);0 禁用后台定时清理(仅在 shutdown 时清理)",
-    )
-
-    # 安全与鉴权(P-A2 对标阿里云 AgentTeams "访问控制")
-    auth_enabled: bool = Field(
-        default=False,
-        description="启用 API Key 鉴权(开发态默认关闭,生产部署建议开启)",
-    )
-    auth_api_keys: str = Field(
+    v2_workspace_root: str = Field(
         default="",
-        description="合法 API Key 列表,逗号分隔;auth_enabled=true 时请求需带 X-API-Key header 匹配其中之一",
+        description="工单工作区根目录;空 = db 同目录下的 workspaces/",
     )
-    secret_key: str = Field(
-        default="",
-        description="凭证加密主密钥(32 字节 hex/base64);空则退化为明文模式(开发态兼容)",
+    v2_source_poll_interval: float = Field(
+        default=10.0, ge=1,
+        description="SourceDaemon 轮询间隔(秒)",
     )
 
-    # IM 通知(P-A5 落地,对标 AgentTeams "IM 原生")
+    # IM 通知出站(Outbox: 先存后发,退避重试)
     notify_webhook_url: str = Field(
         default="",
-        description="全局默认 IM webhook 地址(飞书/企业微信/钉钉 bot);Team.webhook_url 优先于它",
+        description="IM webhook 地址(飞书/企业微信/钉钉 bot);空 = 关闭外发",
     )
     notify_provider: str = Field(
         default="generic",
         description="webhook 消息格式:feishu / wecom / dingtalk / generic",
     )
     console_url: str = Field(
-        default="http://127.0.0.1:8040",
+        default="http://127.0.0.1:8000",
         description="控制台外部可达地址,通知消息里的跳转链接以它为基准",
     )
-    notify_timeout_seconds: float = Field(
-        default=5.0,
-        ge=0,
-        description="webhook POST 超时秒数",
-    )
-    # SP12b: outbox 重试策略(先存后发,退避重试,连续失败置 dropped 可查回执)
+    notify_timeout_seconds: float = Field(default=5.0, ge=0, description="webhook POST 超时秒数")
     notify_retry_max: int = Field(
-        default=5,
-        ge=1,
-        description="单条通知连续失败多少次后置 dropped(保留 last_error 审计)",
+        default=5, ge=1, description="单条通知连续失败多少次后置 dropped(保留 last_error 审计)",
     )
     notify_backoff_base: float = Field(
-        default=5.0,
-        ge=0,
-        description="重试退避起点秒数,指数翻倍,上限 300s",
-    )
-
-    # 跨 run 记忆层(蒸馏 + 注入)
-    memory_enabled: bool = Field(
-        default=True,
-        description="启用跨 run 记忆层(run 终态后 LLM 蒸馏团队记忆,并在后续 run 注入 leader 上下文)",
-    )
-    memory_max_entries: int = Field(
-        default=8,
-        ge=1,
-        description="每次注入 leader 上下文的最近记忆条数上限",
-    )
-    memory_inject_budget_tokens: int = Field(
-        default=600,
-        ge=0,
-        description="记忆注入的 token 预算(chars/4 估算);0 禁用注入(蒸馏仍进行)",
-    )
-
-    # SP12c: 事件驱动 Trigger(Slow Path 开关)
-    triggers_slow_path_enabled: bool = Field(
-        default=True,
-        description="允许触发规则走 Slow Path(LLM 语义判定);False 时只走 Fast Path 确定性条件",
-    )
-
-    # ---- v2 内核(dsh 式 Ticket/Router/Worker Session) ----
-    v2_workspace_root: str = Field(
-        default="",
-        description="v2 工单工作区根目录;空 = v2 db 同目录下的 workspaces/",
-    )
-    v2_max_session_workers: int = Field(
-        default=8,
-        ge=1,
-        description="v2 worker session 线程池大小(同时执行的 Ticket 数上限)",
-    )
-    v2_default_provider: str = Field(
-        default="qwen",
-        description="v2 默认模型 provider(Router 与未指定模型的 worker 使用)",
-    )
-    v2_default_model: str = Field(
-        default="qwen-max",
-        description="v2 默认模型名",
+        default=5.0, ge=0, description="重试退避起点秒数,指数翻倍,上限 300s",
     )
 
 
@@ -182,11 +90,7 @@ _settings_instance: Settings | None = None
 
 
 def get_settings() -> Settings:
-    """获取全局 Settings 单例。
-
-    首次调用时从环境变量构造,之后复用同一实例。
-    测试可用 override_settings() 或直接重置 _settings_instance=None 强制重建。
-    """
+    """获取全局 Settings 单例(测试可用 override_settings 覆盖)。"""
     global _settings_instance
     if _settings_instance is None:
         _settings_instance = Settings()
@@ -195,17 +99,10 @@ def get_settings() -> Settings:
 
 @contextmanager
 def override_settings(**overrides) -> Iterator[Settings]:
-    """测试用:临时覆盖部分配置,上下文退出后恢复。
-
-    示例:
-        with override_settings(max_run_workers=2) as s:
-            assert s.max_run_workers == 2
-        # 退出后恢复原值
-    """
+    """测试用:临时覆盖部分配置,上下文退出后恢复。"""
     global _settings_instance
     original = _settings_instance
     base = original or Settings()
-    # 用 model_copy + 字段覆盖构造新实例,不读环境变量(避免测试 env 污染)
     new = base.model_copy(update=overrides)
     _settings_instance = new
     try:

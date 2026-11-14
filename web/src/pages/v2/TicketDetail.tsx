@@ -7,7 +7,7 @@ import { Input, Popconfirm, message } from "antd";
 import { Link, useParams } from "react-router-dom";
 import { useFetch } from "../../hooks/useFetch";
 import { v2Post, type V2Event, type V2Message, type V2Session, type V2Ticket } from "../../api/v2";
-import { PageHeader } from "../Runs";
+import { PageHeader } from "../../components/PageHeader";
 
 const STATUS_COLOR: Record<string, string> = {
   pending: "var(--at-gray)", running: "var(--at-green)",
@@ -132,7 +132,7 @@ export default function V2TicketDetail() {
   return (
     <div>
       <PageHeader
-        index="06 · V2 TICKET"
+        index="02 · V2 TICKET"
         title={ticket.title || ticket.id.slice(0, 8)}
         subtitle="Ticket Detail"
         action={
