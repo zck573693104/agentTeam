@@ -108,6 +108,7 @@ class WorkerSession:
         pipeline: ToolPipeline | None = None,
         default_model: ModelRef | None = None,
         is_cancelled: Callable[[str], bool] | None = None,
+        pop_follow_ups: Callable[[], list[tuple[str, str]]] | None = None,
     ) -> None:
         self.ticket = ticket
         self.session_id = session_id
@@ -120,6 +121,7 @@ class WorkerSession:
         self.attention_repo = attention_repo
         self.bus = bus
         self._is_cancelled = is_cancelled or (lambda _tid: False)
+        self._pop_follow_ups = pop_follow_ups or (lambda: [])
 
         # —— 工具:workspace 文件工具(每 ticket 隔离) + 注册表非文件工具 ——
         self._tools: list = list(make_file_tools(workspace_dir))
@@ -228,6 +230,13 @@ class WorkerSession:
             if self._is_cancelled(self.ticket.id):
                 self.session_repo.cas_status(self.session_id, SessionStatus.RUNNING, SessionStatus.CANCELLED)
                 return SessionResult(status=SessionStatus.CANCELLED)
+            # 追问直通(dsh Subscription fan-out): 迭代边界注入,只入不回
+            for text, by in self._pop_follow_ups():
+                if not text:
+                    continue
+                follow = HumanMessage(content=f"【追问·{by}】{text}")
+                _persist_message(self.message_repo, self.session_id, follow)
+                messages.append(follow)
             self.session_repo.set_iterations(self.session_id, iteration)
             ai: AIMessage = self.llm.invoke(messages)
             _persist_message(self.message_repo, self.session_id, ai)

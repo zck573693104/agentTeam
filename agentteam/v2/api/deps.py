@@ -10,9 +10,12 @@ from agentteam.models.provider import ModelProvider, ModelRef
 from agentteam.tools.registry import ToolRegistry
 from agentteam.v2.kernel.scheduler import Scheduler
 from agentteam.v2.kernel.skills import SkillLoader
+from agentteam.v2.notify.outbox import OutboxWorker
 from agentteam.v2.storage.attentions import AttentionRepo
 from agentteam.v2.storage.db import init_db
 from agentteam.v2.storage.events import EventBus, EventRepo
+from agentteam.v2.storage.outbox import OutboxRepo
+from agentteam.v2.storage.threads import SubscriptionRepo, ThreadRepo
 from agentteam.v2.storage.tickets import MessageRepo, SessionRepo, TicketRepo
 from agentteam.v2.storage.workers import WorkerRepo
 
@@ -34,6 +37,10 @@ class V2Components:
     message_repo: MessageRepo
     event_repo: EventRepo
     attention_repo: AttentionRepo
+    thread_repo: ThreadRepo
+    subscription_repo: SubscriptionRepo
+    outbox_repo: OutboxRepo
+    outbox_worker: OutboxWorker
     bus: EventBus
     scheduler: Scheduler
     default_model: ModelRef
@@ -49,6 +56,11 @@ def create_v2_components(
     default_provider: str = "qwen",
     default_model_name: str = "qwen-max",
     max_session_workers: int = 8,
+    notify_webhook_url: str = "",
+    console_url: str = "",
+    notify_retry_max: int = 5,
+    notify_backoff_base: float = 5.0,
+    notify_timeout_seconds: float = 5.0,
 ) -> V2Components:
     """装配 v2 全部组件(独立 DB;model_provider/tool_registry 可与 v1 共享实例)。"""
     conn = init_db(db_path)
@@ -64,6 +76,9 @@ def create_v2_components(
     message_repo = MessageRepo(conn, lock=lock)
     event_repo = EventRepo(conn, lock=lock)
     attention_repo = AttentionRepo(conn, lock=lock)
+    thread_repo = ThreadRepo(conn, lock=lock)
+    subscription_repo = SubscriptionRepo(conn, lock=lock)
+    outbox_repo = OutboxRepo(conn, lock=lock)
     bus = EventBus()
 
     scheduler = Scheduler(
@@ -74,12 +89,21 @@ def create_v2_components(
         model_provider=mp, tool_registry=tr, skill_loader=skill_loader,
         workspace_root=workspace_root, default_model=default_model,
         max_session_workers=max_session_workers,
+        thread_repo=thread_repo, subscription_repo=subscription_repo,
+        outbox_repo=outbox_repo if notify_webhook_url else None,
+        notify_webhook_url=notify_webhook_url, console_url=console_url,
+    )
+    outbox_worker = OutboxWorker(
+        outbox_repo, retry_max=notify_retry_max, backoff_base=notify_backoff_base,
+        send_timeout=notify_timeout_seconds,
     )
     return V2Components(
         conn=conn, lock=lock, model_provider=mp, tool_registry=tr,
         skill_loader=skill_loader, worker_repo=worker_repo,
         ticket_repo=ticket_repo, session_repo=session_repo,
         message_repo=message_repo, event_repo=event_repo,
-        attention_repo=attention_repo, bus=bus,
+        attention_repo=attention_repo, thread_repo=thread_repo,
+        subscription_repo=subscription_repo, outbox_repo=outbox_repo,
+        outbox_worker=outbox_worker, bus=bus,
         scheduler=scheduler, default_model=default_model,
     )

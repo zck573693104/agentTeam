@@ -13,10 +13,12 @@ def build_v2_router(v2: V2Components) -> APIRouter:
     from agentteam.v2.api.tickets import tickets_router
     from agentteam.v2.api.stream import stream_router
     from agentteam.v2.api.attentions import attentions_router
+    from agentteam.v2.api.threads import threads_router
 
     router.include_router(workers_router(v2))
     router.include_router(tickets_router(v2))
     router.include_router(attentions_router(v2))
+    router.include_router(threads_router(v2))
     router.include_router(stream_router(v2))
 
     @router.get("/health")

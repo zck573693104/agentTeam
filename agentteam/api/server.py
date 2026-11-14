@@ -83,7 +83,9 @@ def create_app(
         outbox_worker.start()
         # v2 内核: 调度器随服务起停(dsh 式 Ticket/Router/Worker Session)
         v2.scheduler.start()
+        v2.outbox_worker.start()
         yield
+        v2.outbox_worker.stop()
         v2.scheduler.shutdown(wait=True)
         run_manager.shutdown(wait=True)
         outbox_worker.stop()
@@ -251,6 +253,11 @@ def create_app(
         default_provider=settings.v2_default_provider,
         default_model_name=settings.v2_default_model,
         max_session_workers=settings.v2_max_session_workers,
+        notify_webhook_url=settings.notify_webhook_url,
+        console_url=settings.console_url,
+        notify_retry_max=settings.notify_retry_max,
+        notify_backoff_base=settings.notify_backoff_base,
+        notify_timeout_seconds=settings.notify_timeout_seconds,
     )
     app.include_router(build_v2_router(v2), prefix="/api/v2")
 

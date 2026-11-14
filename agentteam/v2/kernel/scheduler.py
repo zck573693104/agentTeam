@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import json
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -31,8 +32,11 @@ from agentteam.v2.kernel.router import Router
 from agentteam.v2.kernel.session import WorkerSession
 from agentteam.v2.kernel.skills import SkillLoader
 from agentteam.v2.kernel.workspace import WorkspaceManager
+from agentteam.v2.notify.outbox import format_message
 from agentteam.v2.storage.attentions import AttentionRepo
 from agentteam.v2.storage.events import EventBus, EventRepo
+from agentteam.v2.storage.outbox import OutboxRepo
+from agentteam.v2.storage.threads import SubscriptionRepo, ThreadRepo
 from agentteam.v2.storage.tickets import MessageRepo, SessionRepo, TicketRepo
 from agentteam.v2.storage.workers import WorkerRepo
 
@@ -40,6 +44,10 @@ logger = get_logger("v2.kernel.scheduler")
 
 # 人工决定语义 → attention.decide 记录值
 _DECISIONS = {"approve", "reject", "answer", "revoked"}
+# 需要外发 IM 通知的事件(dsh: 对外出口唯一——outbox 先存后发)
+_NOTIFY_EVENTS = frozenset({
+    ev.TICKET_STATUS_CHANGED, ev.TICKET_CANCELLED, ev.ATTENTION_CREATED,
+})
 
 
 class Scheduler:
@@ -59,6 +67,11 @@ class Scheduler:
         workspace_root: Path,
         default_model: ModelRef,
         max_session_workers: int = 8,
+        thread_repo: ThreadRepo | None = None,
+        subscription_repo: SubscriptionRepo | None = None,
+        outbox_repo: OutboxRepo | None = None,
+        notify_webhook_url: str = "",
+        console_url: str = "",
     ) -> None:
         self.tickets = ticket_repo
         self.sessions = session_repo
@@ -66,6 +79,11 @@ class Scheduler:
         self.events = event_repo
         self.attentions = attention_repo
         self.workers = worker_repo
+        self.threads = thread_repo
+        self.subscriptions = subscription_repo
+        self.outbox = outbox_repo
+        self.notify_webhook_url = notify_webhook_url
+        self.console_url = console_url
         self.bus = bus
         self.mp = model_provider
         self.registry = tool_registry
@@ -83,6 +101,7 @@ class Scheduler:
         self._lock = threading.Lock()
         self._cancelled: set[str] = set()  # ticket_ids 要求中断(协作式)
         self._policy_noted: dict[str, str] = {}  # ticket_id → 已注记的当前版本(防重复注记)
+        self._follow_ups: dict[str, list[tuple[str, str]]] = {}  # ticket_id → [(text, by)]
 
     # —— 生命周期 ——
     def start(self) -> None:
@@ -140,6 +159,9 @@ class Scheduler:
             ),
         )
         self.tickets.create(ticket)
+        # dsh Subscription: 线程来源的工单自动绑定(Ticket↔Thread 多对多)
+        if thread_id and self.subscriptions is not None:
+            self.subscriptions.bind(ticket.id, thread_id)
         self._emit(ticket.id, ev.TICKET_CREATED, actor=submitted_by, payload={
             "title": ticket.title, "task": ticket.task,
             "worker": ticket.worker_name, "via": decision.via,
@@ -156,6 +178,28 @@ class Scheduler:
             "worker": ticket.worker_name,
             "note": decision.note,
         }
+
+    # —— 追问直通(dsh Subscription fan-out: 人 → 认领 worker,只入不回) ——
+    def deliver_follow_up(self, ticket_id: str, text: str, by: str = "human") -> dict:
+        """同线程追问直达 worker 会话(过 Router)。
+
+        dsh 红线:消息必须显式指向工单(本 API 即显式寻址);只入不回——
+        worker 的回答仍走正常汇报链。终态工单不自动复活,提示重新提交。
+        """
+        ticket = self.tickets.get(ticket_id)
+        if ticket is None:
+            raise KeyError(f"ticket '{ticket_id}' not found")
+        if ticket.status.is_terminal():
+            raise RuntimeError(
+                "工单已终态;不自动复活(dsh: ended ticket → 请重新提交并明确续跑)"
+            )
+        with self._lock:
+            self._follow_ups.setdefault(ticket_id, []).append(((text or "").strip(), by))
+        self._emit(ticket_id, ev.FOLLOW_UP_DELIVERED, actor=by, payload={
+            "text": (text or "")[:500], "state": ticket.status.value,
+        })
+        self._wake.set()  # 若工单还在 pending 队列,唤醒调度
+        return {"ok": True, "state": ticket.status.value}
 
     # —— 取消(撤权) ——
     def cancel(self, ticket_id: str, by: str = "human") -> bool:
@@ -262,6 +306,18 @@ class Scheduler:
         envelope = self.events.insert(ticket_id, event_type, actor=actor,
                                       session_id=session_id, payload=payload)
         self.bus.publish(ticket_id, envelope)
+        # IM 出站(先存后发):关键事件进 outbox,OutboxWorker 消费
+        if self.outbox is not None and self.notify_webhook_url and event_type in _NOTIFY_EVENTS:
+            body = format_message(event_type, {**(payload or {}), "ticket_id": ticket_id},
+                                  self.console_url)
+            self.outbox.enqueue(ticket_id, event_type, self.notify_webhook_url,
+                                json.dumps(body, ensure_ascii=False))
+
+    def _pop_follow_ups(self, ticket_id: str) -> list[tuple[str, str]]:
+        """取走该工单积压的追问(session 在迭代边界消费)。"""
+        with self._lock:
+            items = self._follow_ups.pop(ticket_id, [])
+        return items
 
     def _dispatch_loop(self) -> None:
         while not self._stop_flag:
@@ -328,6 +384,7 @@ class Scheduler:
             attention_repo=self.attentions, bus=self.bus,
             default_model=self.default_model,
             is_cancelled=self.is_cancelled,
+            pop_follow_ups=lambda: self._pop_follow_ups(ticket.id),
         )
         if attention is not None:
             result = session.resume_after_decision(attention, decision or "answer", answer)

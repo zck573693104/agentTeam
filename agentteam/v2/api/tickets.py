@@ -74,4 +74,26 @@ def tickets_router(v2: V2Components) -> APIRouter:
             raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found")
         return v2.event_repo.list_after(ticket_id, after_id=after_id, limit=min(limit, 1000))
 
+    @router.post("/tickets/{ticket_id}/messages")
+    def follow_up(ticket_id: str, body: dict):
+        """追问直通(dsh Subscription fan-out): 显式指向工单,直达 worker,只入不回。"""
+        text = body.get("text", "")
+        if not text.strip():
+            raise HTTPException(status_code=422, detail="text 必填")
+        try:
+            return v2.scheduler.deliver_follow_up(
+                ticket_id, text, by=body.get("by", "human"),
+            )
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+
+    @router.get("/tickets/{ticket_id}/notifications")
+    def ticket_notifications(ticket_id: str):
+        """IM 通知回执(outbox: status/attempts/last_error,SP12b 语义)。"""
+        if v2.ticket_repo.get(ticket_id) is None:
+            raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found")
+        return v2.outbox_repo.list_for_ticket(ticket_id)
+
     return router
