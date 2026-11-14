@@ -4,6 +4,13 @@ import Skills from "./pages/Skills";
 import Teams from "./pages/Teams";
 import Runs from "./pages/Runs";
 import RunDetail from "./pages/RunDetail";
+import V2Attention from "./pages/v2/Attention";
+import V2Tickets from "./pages/v2/Tickets";
+import V2TicketDetail from "./pages/v2/TicketDetail";
+import V2Threads from "./pages/v2/Threads";
+import V2Observe from "./pages/v2/Observe";
+import V2Workers from "./pages/v2/Workers";
+import V2Sources from "./pages/v2/Sources";
 
 /**
  * 自定义侧栏导航 — 替代 antd Layout/Sider/Menu。
@@ -79,6 +86,85 @@ const NAV_ITEMS: NavItem[] = [
       </svg>
     ),
   },
+  // ---- V2 控制台(dsh 式工单中心;P5 切换后接管导航) ----
+  {
+    key: "/v2/attention",
+    index: "05",
+    label: "INBOX · V2",
+    sublabel: "注意件收件箱",
+    path: "/v2/attention",
+    icon: (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <path d="M8 1.5l6.5 11h-13z" />
+        <path d="M8 6v3.5" opacity="0.7" />
+        <circle cx="8" cy="11" r="0.4" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
+    key: "/v2/tickets",
+    index: "06",
+    label: "TICKETS · V2",
+    sublabel: "工单看板",
+    path: "/v2/tickets",
+    icon: (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <rect x="1.5" y="2.5" width="13" height="11" />
+        <path d="M1.5 6h13M6 6v7.5" />
+      </svg>
+    ),
+  },
+  {
+    key: "/v2/threads",
+    index: "07",
+    label: "THREADS · V2",
+    sublabel: "入站线程",
+    path: "/v2/threads",
+    icon: (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <path d="M2 3h12M2 8h8M2 13h10" />
+      </svg>
+    ),
+  },
+  {
+    key: "/v2/observe",
+    index: "08",
+    label: "OBSERVE · V2",
+    sublabel: "观察模式",
+    path: "/v2/observe",
+    icon: (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" />
+        <circle cx="8" cy="8" r="1.8" />
+      </svg>
+    ),
+  },
+  {
+    key: "/v2/workers",
+    index: "09",
+    label: "WORKERS · V2",
+    sublabel: "工人池",
+    path: "/v2/workers",
+    icon: (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <circle cx="8" cy="4.5" r="2.5" />
+        <path d="M2.5 14c0-3 2.5-5 5.5-5s5.5 2 5.5 5" />
+      </svg>
+    ),
+  },
+  {
+    key: "/v2/sources",
+    index: "10",
+    label: "SOURCES · V2",
+    sublabel: "入站源",
+    path: "/v2/sources",
+    icon: (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <path d="M8 14V7M8 7c-3 0-4-3-4-3M8 7c3 0 4-3 4-3" />
+        <circle cx="8" cy="14" r="1.2" />
+      </svg>
+    ),
+  },
 ];
 
 function NavButton({ item, active }: { item: NavItem; active: boolean }) {
@@ -149,7 +235,9 @@ export default function App() {
   const location = useLocation();
   const selectedKey = location.pathname.startsWith("/runs/")
     ? "/runs"
-    : location.pathname;
+    : location.pathname.startsWith("/v2/tickets/")
+      ? "/v2/tickets"
+      : location.pathname;
 
   return (
     <div style={{
@@ -285,6 +373,14 @@ export default function App() {
           <Route path="/skills" element={<Skills />} />
           <Route path="/runs" element={<Runs />} />
           <Route path="/runs/:runId" element={<RunDetail />} />
+          {/* ---- V2 控制台(dsh 式工单中心) ---- */}
+          <Route path="/v2/attention" element={<V2Attention />} />
+          <Route path="/v2/tickets" element={<V2Tickets />} />
+          <Route path="/v2/tickets/:ticketId" element={<V2TicketDetail />} />
+          <Route path="/v2/threads" element={<V2Threads />} />
+          <Route path="/v2/observe" element={<V2Observe />} />
+          <Route path="/v2/workers" element={<V2Workers />} />
+          <Route path="/v2/sources" element={<V2Sources />} />
         </Routes>
       </main>
     </div>
