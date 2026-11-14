@@ -135,8 +135,11 @@ class Scheduler:
     def submit_request(
         self, text: str, submitted_by: str = "api",
         worker_name: str | None = None, thread_id: str | None = None,
+        mandate_basis: str = "explicit",
     ) -> dict:
-        """人/Source 的请求入口:Router 决策 → Ticket(pending) → 入队。"""
+        """人/Source 的请求入口:Router 决策 → Ticket(pending) → 入队。
+
+        mandate_basis: explicit(人经 API) | inferred(Source 入站 Eval 立项)。"""
         text = (text or "").strip()
         if not text:
             raise ValueError("request text is empty")
@@ -153,7 +156,7 @@ class Scheduler:
             worker_name=decision.worker_name,
             thread_id=thread_id,
             mandate=Mandate(
-                basis="explicit", submitted_by=submitted_by,
+                basis=mandate_basis, submitted_by=submitted_by,
                 policy_version=self._policy_version(),
                 scope=None,
             ),
@@ -200,6 +203,13 @@ class Scheduler:
         })
         self._wake.set()  # 若工单还在 pending 队列,唤醒调度
         return {"ok": True, "state": ticket.status.value}
+
+    def submit_from_source(self, text: str, source_name: str, thread_id: str | None = None) -> dict:
+        """Source 入站立项:inferred Mandate + Source 独立身份(身份分离铁律)。"""
+        return self.submit_request(
+            text, submitted_by=f"source:{source_name}",
+            thread_id=thread_id, mandate_basis="inferred",
+        )
 
     # —— 取消(撤权) ——
     def cancel(self, ticket_id: str, by: str = "human") -> bool:

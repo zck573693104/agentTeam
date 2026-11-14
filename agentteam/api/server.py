@@ -84,7 +84,10 @@ def create_app(
         # v2 内核: 调度器随服务起停(dsh 式 Ticket/Router/Worker Session)
         v2.scheduler.start()
         v2.outbox_worker.start()
+        # P3: SourceDaemon 常驻轮询(poll 型入站源;webhook 型由 HTTP 驱动)
+        await v2.source_daemon.start()
         yield
+        await v2.source_daemon.stop()
         v2.outbox_worker.stop()
         v2.scheduler.shutdown(wait=True)
         run_manager.shutdown(wait=True)
