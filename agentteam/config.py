@@ -158,6 +158,25 @@ class Settings(BaseSettings):
         description="允许触发规则走 Slow Path(LLM 语义判定);False 时只走 Fast Path 确定性条件",
     )
 
+    # ---- v2 内核(dsh 式 Ticket/Router/Worker Session) ----
+    v2_workspace_root: str = Field(
+        default="",
+        description="v2 工单工作区根目录;空 = v2 db 同目录下的 workspaces/",
+    )
+    v2_max_session_workers: int = Field(
+        default=8,
+        ge=1,
+        description="v2 worker session 线程池大小(同时执行的 Ticket 数上限)",
+    )
+    v2_default_provider: str = Field(
+        default="qwen",
+        description="v2 默认模型 provider(Router 与未指定模型的 worker 使用)",
+    )
+    v2_default_model: str = Field(
+        default="qwen-max",
+        description="v2 默认模型名",
+    )
+
 
 _settings_instance: Settings | None = None
 

@@ -54,6 +54,7 @@ def create_app(
     skills_dir: Path | None = None,
     web_dist: Path | None | object = _DEFAULT,
     log_level: str | None = None,
+    v2_db_path: str | None = None,
 ) -> FastAPI:
     # 从集中式 Settings 读取配置(env_prefix=AGENTTEAM_ 自动覆盖)
     settings = get_settings()
@@ -80,10 +81,14 @@ def create_app(
         # SP12b: outbox worker 随服务起停;stop 在 run_manager 之后,
         # 让终态通知有机会 enqueue 并在 shutdown 等待窗口内发出
         outbox_worker.start()
+        # v2 内核: 调度器随服务起停(dsh 式 Ticket/Router/Worker Session)
+        v2.scheduler.start()
         yield
+        v2.scheduler.shutdown(wait=True)
         run_manager.shutdown(wait=True)
         outbox_worker.stop()
         conn.close()
+        v2.conn.close()
 
     app = FastAPI(title="AgentTeam", lifespan=lifespan)
 
@@ -226,6 +231,28 @@ def create_app(
     app.include_router(skills_router(skill_loader))
     app.include_router(evolution_router(evolution_repo, lib))
     app.include_router(admin_router(team_store, lib))
+
+    # ---- v2 内核(dsh 式 Ticket/Router/Worker Session)并行挂载 ----
+    # 独立 DB(默认 v1 路径同名 +_v2 后缀,测试自动隔离);工作区默认在
+    # v2 db 同目录 workspaces/ 下。P5 收尾切换后 v1 内核删除、/api/v2 → /api。
+    from agentteam.v2.api.deps import create_v2_components
+    from agentteam.v2.api.router import build_v2_router
+
+    if v2_db_path is None:
+        _v1p = Path(db_path)
+        v2_db_path = str(_v1p.with_name(_v1p.stem + "_v2.db"))
+    _v2_ws = settings.v2_workspace_root or str(Path(v2_db_path).parent / "workspaces")
+    v2 = create_v2_components(
+        db_path=v2_db_path,
+        workspace_root=Path(_v2_ws),
+        model_provider=mp,
+        tool_registry=tr,
+        skills_dir=skills_dir,
+        default_provider=settings.v2_default_provider,
+        default_model_name=settings.v2_default_model,
+        max_session_workers=settings.v2_max_session_workers,
+    )
+    app.include_router(build_v2_router(v2), prefix="/api/v2")
 
     # 挂载前端静态文件(生产模式)。
     # - web_dist=_DEFAULT(默认): 使用 _DEFAULT_WEB_DIST,目录存在才挂载

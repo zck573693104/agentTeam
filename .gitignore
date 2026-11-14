@@ -45,3 +45,8 @@ Thumbs.db
 .env.local
 *.secret
 
+
+# v2 kernel (workspaces + WAL side files)
+workspaces/
+data/*.db-shm
+data/*.db-wal
