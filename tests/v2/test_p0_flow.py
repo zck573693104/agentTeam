@@ -1,6 +1,8 @@
 """P0 全链路流测试:请求 → Router → Ticket → Worker Session → 终态(FakeLLM,无真实 Key)。"""
 from __future__ import annotations
 
+import time
+
 from langchain_core.messages import AIMessage
 
 from agentteam.v2.domain import events as ev
@@ -123,6 +125,7 @@ def test_unknown_tool_self_correct(make_v2):
 
 
 def test_question_recorded_in_reply(make_v2):
+    """P1 语义:终答带 QUESTION → 转 Attention 等人,不落终态。"""
     llm = FakeLLM()
     llm.set_invoke_responses([
         AIMessage(content="方案已就绪\nQUESTION: 部署到哪个环境?"),
@@ -130,11 +133,16 @@ def test_question_recorded_in_reply(make_v2):
     v2 = make_v2({"qwen-max": llm})
     _add_worker(v2)
     resp = v2.scheduler.submit_request("准备部署", worker_name="coder")
-    t = wait_ticket_terminal(v2, resp["ticket_id"])
-    assert "QUESTION: 部署到哪个环境?" in t.result
-    ended = [e for e in v2.event_repo.list_after(resp["ticket_id"])
-             if e["type"] == ev.SESSION_ENDED]
-    assert ended[-1]["payload"]["question"] == "部署到哪个环境?"
+    tid = resp["ticket_id"]
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        t = v2.ticket_repo.get(tid)
+        if t and t.status == TicketStatus.WAITING_HUMAN:
+            break
+        time.sleep(0.05)
+    assert t.status == TicketStatus.WAITING_HUMAN
+    pendings = [a for a in v2.attention_repo.list_by_status("pending") if a["ticket_id"] == tid]
+    assert pendings and pendings[0]["payload"]["question"] == "部署到哪个环境?"
 
 
 def test_worker_missing_ticket_failed(make_v2):
@@ -174,6 +182,6 @@ def test_cancel_pending(make_v2):
     t2 = Ticket(id="tp", title="p", task="p", status=TicketStatus.PENDING,
                 worker_name="coder", mandate=Mandate(basis="explicit", policy_version="p"))
     v2.ticket_repo.create(t2)
-    assert v2.scheduler.cancel_pending("tp")
+    assert v2.scheduler.cancel("tp")
     assert v2.ticket_repo.get("tp").status == TicketStatus.CANCELLED
-    assert v2.scheduler.cancel_pending("tp") is False  # 不可重复取消
+    assert v2.scheduler.cancel("tp") is False  # 终态不可再撤权

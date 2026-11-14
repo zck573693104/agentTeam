@@ -1,13 +1,14 @@
 """Scheduler — Ticket 调度器(替代 v1 的 826 行 RunManager 上帝对象)。
 
-职责单一化(对照 v1 教训):
+职责单一化:
 - submit_request: Router 决策 → 建 Ticket → 入队
 - _dispatch_loop: 有界线程池抢占 pending Ticket(CAS 防双派工)
-- _execute_ticket: 建 Session + workspace → 运行 → 落终态
-- 崩溃恢复: 启动时重排 pending、孤儿 running session 标 failed
-- cancel(P1 完整撤权;P0 仅 pending)
+- _execute_ticket: 建 Session + workspace → 运行 → 终态/等待人
+- resume_attention: 人工决定后恢复会话(dsh: 审批 = 授权延续/终止)
+- cancel: 撤权(任意非终态;dsh: 人的停止 = revoked_by_human)
+- on_pool_changed: worker pool 配置热更新 → 在途 Ticket 记授权依据过期注记
 
-内存态只有一把锁 + 一个在跑集合;状态全在 SQLite(v1 教训:6 个 dict 全内存)。
+内存态:一把锁 + 在跑集合 + 撤权标记集合;状态全在 SQLite。
 """
 from __future__ import annotations
 
@@ -25,15 +26,20 @@ from agentteam.v2.domain.events import SessionStatus, TicketStatus
 from agentteam.v2.domain.mandate import Mandate, policy_version_for_pool
 from agentteam.v2.domain.ticket import Ticket
 from agentteam.v2.domain.worker import WorkerDef
-from agentteam.v2.kernel.router import DispatchDecision, Router
+from agentteam.v2.kernel.attention import AttentionRepo  # noqa: F401 (re-export)
+from agentteam.v2.kernel.router import Router
 from agentteam.v2.kernel.session import WorkerSession
 from agentteam.v2.kernel.skills import SkillLoader
 from agentteam.v2.kernel.workspace import WorkspaceManager
+from agentteam.v2.storage.attentions import AttentionRepo
 from agentteam.v2.storage.events import EventBus, EventRepo
 from agentteam.v2.storage.tickets import MessageRepo, SessionRepo, TicketRepo
 from agentteam.v2.storage.workers import WorkerRepo
 
 logger = get_logger("v2.kernel.scheduler")
+
+# 人工决定语义 → attention.decide 记录值
+_DECISIONS = {"approve", "reject", "answer", "revoked"}
 
 
 class Scheduler:
@@ -44,6 +50,7 @@ class Scheduler:
         session_repo: SessionRepo,
         message_repo: MessageRepo,
         event_repo: EventRepo,
+        attention_repo: AttentionRepo,
         worker_repo: WorkerRepo,
         bus: EventBus,
         model_provider: ModelProvider,
@@ -57,6 +64,7 @@ class Scheduler:
         self.sessions = session_repo
         self.messages = message_repo
         self.events = event_repo
+        self.attentions = attention_repo
         self.workers = worker_repo
         self.bus = bus
         self.mp = model_provider
@@ -73,6 +81,8 @@ class Scheduler:
         self._wake = threading.Event()
         self._stop_flag = False
         self._lock = threading.Lock()
+        self._cancelled: set[str] = set()  # ticket_ids 要求中断(协作式)
+        self._policy_noted: dict[str, str] = {}  # ticket_id → 已注记的当前版本(防重复注记)
 
     # —— 生命周期 ——
     def start(self) -> None:
@@ -91,7 +101,8 @@ class Scheduler:
         self._pool.shutdown(wait=wait)
 
     def _recover(self) -> None:
-        """崩溃恢复:pending 重排;孤儿 running session 标 failed(v0 无跨进程恢复)。"""
+        """崩溃恢复:pending 重排;孤儿 running session 标 failed;
+        waiting_human 的 Attention 保留(重启后人工决定仍可恢复——transcript 在库)。"""
         for ticket_id in self.tickets.list_pending_ids():
             self._queue.put(ticket_id)
         for s in self.sessions.list_running():
@@ -113,7 +124,6 @@ class Scheduler:
         decision = self.router.decide(text, self.workers.list_all(), requested_worker=worker_name)
 
         if decision.action == "reply":
-            # 不立项:Router 直接答复(dsh: 不是所有消息都要变成工单)
             return {"action": "reply", "reply": decision.reply}
 
         ticket = Ticket(
@@ -147,14 +157,101 @@ class Scheduler:
             "note": decision.note,
         }
 
-    def cancel_pending(self, ticket_id: str, by: str = "human") -> bool:
-        """P0: 仅 pending 可取消;运行中撤权在 P1(cooperative cancel)。"""
-        ok = self.tickets.cas_status(ticket_id, TicketStatus.PENDING, TicketStatus.CANCELLED)
-        if ok:
-            self._emit(ticket_id, ev.TICKET_CANCELLED, actor=by, payload={
-                "revoked_by_human": True, "stage": "pending",
-            })
-        return ok
+    # —— 取消(撤权) ——
+    def cancel(self, ticket_id: str, by: str = "human") -> bool:
+        """撤权:dsh 语义「人的停止 = 撤权」;pending/running/waiting 均可。"""
+        ticket = self.tickets.get(ticket_id)
+        if ticket is None or ticket.status.is_terminal():
+            return False
+        ok = self.tickets.cancel(ticket_id)
+        if not ok:
+            return False
+        self._cancelled.add(ticket_id)
+        self._emit(ticket_id, ev.TICKET_CANCELLED, actor=by, payload={
+            "revoked_by_human": True, "from_status": ticket.status.value,
+        })
+        # waiting_human 的未决 Attention 一并撤销(不再可决定)
+        for att in self.attentions.list_by_status("pending"):
+            if att["ticket_id"] == ticket_id:
+                self.attentions.decide(att["id"], decision="revoked", decided_by=by,
+                                       reason="工单已撤权")
+                self._emit(ticket_id, ev.ATTENTION_DECIDED, actor=by, payload={
+                    "attention_id": att["id"], "decision": "revoked",
+                })
+        return True
+
+    def is_cancelled(self, ticket_id: str) -> bool:
+        return ticket_id in self._cancelled
+
+    # —— Attention 恢复(dsh: 审批 = 授权延续;回答 = 解除阻塞) ——
+    def resume_attention(
+        self, attention_id: str, decision: str, decided_by: str = "human",
+        answer: str | None = None, reason: str | None = None,
+    ) -> dict:
+        """人工决定一个 Attention 并恢复会话。
+
+        - approval + approve: 恢复会话并真实执行该工具
+        - approval + reject: 注入拒绝结果(worker 可改道)
+        - question + answer: 注入人工回答
+        终态工单/已撤权工单的 Attention 不可决定(409)。
+        """
+        if decision not in _DECISIONS:
+            raise ValueError(f"invalid decision: {decision}")
+        att = self.attentions.get(attention_id)
+        if att is None:
+            raise KeyError(f"attention '{attention_id}' not found")
+        if att["status"] != "pending":
+            raise RuntimeError(f"attention already decided: {att['decision']}")
+        ticket = self.tickets.get(att["ticket_id"])
+        if ticket is None or ticket.status.is_terminal():
+            raise RuntimeError(f"ticket is terminal ({ticket.status.value if ticket else 'gone'})")
+
+        if not self.attentions.decide(attention_id, decision=decision,
+                                      decided_by=decided_by, reason=reason):
+            raise RuntimeError("attention already decided (race)")
+        self._emit(ticket.id, ev.ATTENTION_DECIDED, actor=decided_by, session_id=att["session_id"],
+                   payload={"attention_id": attention_id, "decision": decision,
+                            "type": att["type"], "answer": (answer or "")[:500]})
+
+        # waiting_human → running;线程池恢复会话
+        self.sessions.cas_status(att["session_id"], SessionStatus.WAITING_HUMAN, SessionStatus.RUNNING)
+        self.tickets.cas_status(ticket.id, TicketStatus.WAITING_HUMAN, TicketStatus.RUNNING)
+        self._emit(ticket.id, ev.TICKET_STATUS_CHANGED, payload={"to": "running"})
+        self._pool.submit(
+            self._resume_session, ticket.id, attention_id, decision, answer,
+        )
+        return {"ok": True, "attention_id": attention_id, "decision": decision}
+
+    def _resume_session(
+        self, ticket_id: str, attention_id: str, decision: str, answer: str | None,
+    ) -> None:
+        attention = self.attentions.get(attention_id)
+        if attention is None:
+            return
+        self._run_session(self.tickets.get(ticket_id), session_id=attention["session_id"],
+                          attention=attention, decision=decision, answer=answer)
+
+    # —— worker pool 热更新(dsh: 变更通知到在途工单,不中断) ——
+    def on_pool_changed(self) -> int:
+        """worker pool 配置变化后,给在途 Ticket 记授权依据过期注记(每版本一次)。"""
+        current = self._policy_version()
+        noted = 0
+        for status in (TicketStatus.PENDING, TicketStatus.RUNNING, TicketStatus.WAITING_HUMAN):
+            for t in self.tickets.list_by_status(status):
+                if not (t.mandate and t.mandate.policy_version):
+                    continue
+                if t.mandate.policy_version == current:
+                    continue
+                if self._policy_noted.get(t.id) == current:
+                    continue  # 该版本已注记过
+                self._policy_noted[t.id] = current
+                self._emit(t.id, ev.POLICY_EXPIRED, payload={
+                    "run_policy_version": t.mandate.policy_version,
+                    "current_policy_version": current,
+                    "note": "工人池配置已热更新,该工单的授权依据已过期(不中断执行)",
+                })
+                noted += 1
+        return noted
 
     # —— 内部 ——
     def _policy_version(self) -> str:
@@ -180,7 +277,7 @@ class Scheduler:
     def _try_execute(self, ticket_id: str) -> None:
         ticket = self.tickets.get(ticket_id)
         if ticket is None or ticket.status != TicketStatus.PENDING:
-            return  # 已取消/已终态
+            return
         worker = self.workers.get(ticket.worker_name or "") if ticket.worker_name else None
         if worker is None or not worker.enabled:
             self.tickets.cas_status(
@@ -191,45 +288,67 @@ class Scheduler:
                 "to": "failed", "reason": "worker missing",
             })
             return
-        # CAS 抢占:pending → running(并发双派工由 CAS 拦截)
         if not self.tickets.cas_status(ticket_id, TicketStatus.PENDING, TicketStatus.RUNNING):
             return
         self._emit(ticket_id, ev.TICKET_STATUS_CHANGED, payload={"to": "running"})
-        self._pool.submit(self._execute_ticket, ticket_id, worker)
+        self._run_session(ticket, worker_name=worker.name)
 
-    def _execute_ticket(self, ticket_id: str, worker: WorkerDef) -> None:
-        ticket = self.tickets.get(ticket_id)
+    def _run_session(
+        self, ticket: Ticket | None, worker_name: str | None = None,
+        session_id: str | None = None,
+        attention: dict | None = None, decision: str | None = None,
+        answer: str | None = None,
+    ) -> None:
+        """执行(或恢复)一个会话;在线程池内运行。"""
         if ticket is None:
             return
-        session_id = uuid4().hex
-        workspace = self.workspaces.for_ticket(ticket_id)
-        model_dict = worker.model or {
-            "provider": self.default_model.provider, "name": self.default_model.name,
-        }
-        self.sessions.create(
-            session_id, ticket_id, worker.name, str(workspace),
-            worker.max_iterations, model_dict,
-        )
+        if worker_name:
+            worker = self.workers.get(worker_name)
+        else:
+            worker = self.workers.get(ticket.worker_name or "")
+        if worker is None:
+            return
+        if session_id is None:
+            session_id = uuid4().hex
+            workspace = self.workspaces.for_ticket(ticket.id)
+            model_dict = worker.model or {
+                "provider": self.default_model.provider, "name": self.default_model.name,
+            }
+            self.sessions.create(
+                session_id, ticket.id, worker.name, str(workspace),
+                worker.max_iterations, model_dict,
+            )
         session = WorkerSession(
             ticket=ticket, session_id=session_id, worker=worker,
-            workspace_dir=workspace,
+            workspace_dir=Path(self.sessions.get(session_id)["workspace_dir"]),
             model_provider=self.mp, tool_registry=self.registry,
             skill_loader=self.skill_loader,
             ticket_repo=self.tickets, session_repo=self.sessions,
-            message_repo=self.messages, event_repo=self.events, bus=self.bus,
+            message_repo=self.messages, event_repo=self.events,
+            attention_repo=self.attentions, bus=self.bus,
             default_model=self.default_model,
+            is_cancelled=self.is_cancelled,
         )
-        result = session.run()
+        if attention is not None:
+            result = session.resume_after_decision(attention, decision or "answer", answer)
+        else:
+            result = session.run()
+
         if result.status == SessionStatus.DONE:
-            self.tickets.cas_status(
-                ticket_id, TicketStatus.RUNNING, TicketStatus.DONE, result=result.reply,
-            )
-            self._emit(ticket_id, ev.TICKET_STATUS_CHANGED, payload={"to": "done"})
+            self.tickets.cas_status(ticket.id, TicketStatus.RUNNING, TicketStatus.DONE, result=result.reply)
+            self._emit(ticket.id, ev.TICKET_STATUS_CHANGED, payload={"to": "done"})
         elif result.status == SessionStatus.FAILED:
-            self.tickets.cas_status(
-                ticket_id, TicketStatus.RUNNING, TicketStatus.FAILED, result=result.error,
-            )
-            self._emit(ticket_id, ev.TICKET_STATUS_CHANGED, payload={
+            self.tickets.cas_status(ticket.id, TicketStatus.RUNNING, TicketStatus.FAILED, result=result.error)
+            self._emit(ticket.id, ev.TICKET_STATUS_CHANGED, payload={
                 "to": "failed", "error": (result.error or "")[:300],
             })
-        # waiting_human(P1): ticket 保持 running→waiting_human 由 Attention 流程迁移
+        elif result.status == SessionStatus.WAITING_HUMAN:
+            self.tickets.cas_status(ticket.id, TicketStatus.RUNNING, TicketStatus.WAITING_HUMAN)
+            self._emit(ticket.id, ev.TICKET_STATUS_CHANGED, payload={
+                "to": "waiting_human", "attention_id": result.attention_id,
+            })
+        elif result.status == SessionStatus.CANCELLED:
+            # cancel() 已落状态;这里只补会话级事件
+            self._emit(ticket.id, ev.SESSION_ENDED, payload={
+                "status": "cancelled", "note": "revoked_by_human",
+            })

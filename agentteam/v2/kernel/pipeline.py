@@ -17,13 +17,14 @@ from agentteam.v2.storage.events import EventBus, EventRepo
 
 @dataclass
 class ToolContext:
-    """一次工具调用的上下文(session 级)。"""
+    """一次工具调用的上下文(session 级;tool_call_id 由 session 每次调用前更新)。"""
 
     ticket_id: str
     session_id: str
     worker_name: str
     workspace_dir: str
-    approval_targets: list[str] = field(default_factory=list)  # P1 审批门读取
+    approval_targets: list[str] = field(default_factory=list)  # 审批门读取
+    tool_call_id: str | None = None
 
 
 StageFn = Callable[[BaseTool, dict, "ToolContext", Callable[[dict], str]], str]

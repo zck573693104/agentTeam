@@ -90,6 +90,17 @@ class TicketRepo(BaseSqliteRepo):
         )
         return cur.rowcount > 0
 
+    def cancel(self, ticket_id: str) -> bool:
+        """撤权:任意非终态 → cancelled(dsh: 人的停止 = 撤权)。"""
+        now = _now()
+        cur = self._execute(
+            "UPDATE tickets SET status = 'cancelled', updated_at = ?, ended_at = ?, "
+            "result = COALESCE(result, 'revoked_by_human') "
+            "WHERE id = ? AND status IN ('pending','running','waiting_human')",
+            (now, now, ticket_id),
+        )
+        return cur.rowcount > 0
+
 
 class SessionRepo(BaseSqliteRepo):
     def create(

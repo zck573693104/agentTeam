@@ -10,6 +10,7 @@ from agentteam.models.provider import ModelProvider, ModelRef
 from agentteam.tools.registry import ToolRegistry
 from agentteam.v2.kernel.scheduler import Scheduler
 from agentteam.v2.kernel.skills import SkillLoader
+from agentteam.v2.storage.attentions import AttentionRepo
 from agentteam.v2.storage.db import init_db
 from agentteam.v2.storage.events import EventBus, EventRepo
 from agentteam.v2.storage.tickets import MessageRepo, SessionRepo, TicketRepo
@@ -32,6 +33,7 @@ class V2Components:
     session_repo: SessionRepo
     message_repo: MessageRepo
     event_repo: EventRepo
+    attention_repo: AttentionRepo
     bus: EventBus
     scheduler: Scheduler
     default_model: ModelRef
@@ -61,11 +63,13 @@ def create_v2_components(
     session_repo = SessionRepo(conn, lock=lock)
     message_repo = MessageRepo(conn, lock=lock)
     event_repo = EventRepo(conn, lock=lock)
+    attention_repo = AttentionRepo(conn, lock=lock)
     bus = EventBus()
 
     scheduler = Scheduler(
         ticket_repo=ticket_repo, session_repo=session_repo,
         message_repo=message_repo, event_repo=event_repo,
+        attention_repo=attention_repo,
         worker_repo=worker_repo, bus=bus,
         model_provider=mp, tool_registry=tr, skill_loader=skill_loader,
         workspace_root=workspace_root, default_model=default_model,
@@ -75,6 +79,7 @@ def create_v2_components(
         conn=conn, lock=lock, model_provider=mp, tool_registry=tr,
         skill_loader=skill_loader, worker_repo=worker_repo,
         ticket_repo=ticket_repo, session_repo=session_repo,
-        message_repo=message_repo, event_repo=event_repo, bus=bus,
+        message_repo=message_repo, event_repo=event_repo,
+        attention_repo=attention_repo, bus=bus,
         scheduler=scheduler, default_model=default_model,
     )

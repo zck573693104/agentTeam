@@ -23,7 +23,8 @@ def workers_router(v2: V2Components) -> APIRouter:
         if v2.worker_repo.get(w.name) is not None:
             raise HTTPException(status_code=400, detail=f"Worker already exists: {w.name}")
         v2.worker_repo.upsert(w)
-        return {"name": w.name}
+        noted = v2.scheduler.on_pool_changed()  # 配置热更新 → 在途工单授权注记
+        return {"name": w.name, "policy_expiry_noted": noted}
 
     @router.get("/{name}")
     def get_worker(name: str):
@@ -43,12 +44,14 @@ def workers_router(v2: V2Components) -> APIRouter:
         except KeyError as e:
             raise HTTPException(status_code=422, detail=f"missing field: {e}")
         v2.worker_repo.upsert(w)
-        return {"name": w.name}
+        noted = v2.scheduler.on_pool_changed()
+        return {"name": w.name, "policy_expiry_noted": noted}
 
     @router.delete("/{name}")
     def delete_worker(name: str):
         if not v2.worker_repo.delete(name):
             raise HTTPException(status_code=404, detail=f"Worker '{name}' not found")
+        v2.scheduler.on_pool_changed()
         return {"ok": True}
 
     return router

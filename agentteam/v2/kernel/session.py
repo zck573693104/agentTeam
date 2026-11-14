@@ -1,11 +1,12 @@
-"""Worker Session — 每 Ticket 一个会话的执行器(v2 内核的心脏,替代 langgraph 图)。
+"""Worker Session — 每 Ticket 一个会话的执行器(v2 内核的心脏)。
 
 设计:
 - 纯 Python ReAct 循环:system(+skills+纪律) + task → llm.bind_tools(tools).invoke
-  → 有 tool_calls 则执行并回灌 ToolMessage → 直到无 tool_calls(终答)或迭代耗尽
+  → 有 tool_calls 则经 pipeline 执行并回灌 ToolMessage → 直到终答/迭代耗尽
 - checkpoint = messages 表 transcript(每轮落库);恢复时从 transcript 重载续跑
-- 无 tool_calls 的终答解析 QUESTION 标记(P1 升级为 Attention;P0 记入轨迹)
-- 事件全落 events 表并扇出 SSE
+- Attention(P1): 审批门短路(AttentionNeeded)或终答 QUESTION → 会话转 waiting_human;
+  人工决定后 resume() 从 transcript 续跑
+- 撤权: is_cancelled 回调每轮检查;取消 = 中断 + 状态落库(dsh: 人的停止 = 撤权)
 
 拓扑红线(dsh):worker 只汇报进工单轨迹,不直接对人。
 """
@@ -13,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from langchain_core.messages import (
     AIMessage,
@@ -29,8 +30,10 @@ from agentteam.v2.domain import events as ev
 from agentteam.v2.domain.discipline import WORKER_DISCIPLINE, extract_question
 from agentteam.v2.domain.events import SessionStatus
 from agentteam.v2.domain.worker import WorkerDef
+from agentteam.v2.kernel.attention import AttentionNeeded, make_approval_gate_stage
 from agentteam.v2.kernel.pipeline import ToolPipeline, ToolContext, make_trace_stage
 from agentteam.v2.kernel.workspace import FILE_TOOL_NAMES, make_file_tools
+from agentteam.v2.storage.attentions import AttentionRepo
 from agentteam.v2.storage.events import EventBus, EventRepo
 from agentteam.v2.storage.tickets import MessageRepo, SessionRepo
 
@@ -43,6 +46,7 @@ class SessionResult:
     reply: str | None = None
     question: str | None = None
     error: str | None = None
+    attention_id: str | None = None
 
 
 def _message_from_row(row: dict[str, Any]):
@@ -83,7 +87,7 @@ def _persist_message(repo: MessageRepo, session_id: str, msg) -> None:
 
 
 class WorkerSession:
-    """一个 Ticket 的一个执行尝试。run() 返回终态,由 Scheduler 落 ticket 状态。"""
+    """一个 Ticket 的一个执行尝试。"""
 
     def __init__(
         self,
@@ -95,14 +99,15 @@ class WorkerSession:
         model_provider: ModelProvider,
         tool_registry: ToolRegistry,
         skill_loader,               # SkillLoader
-        ticket_repo: TicketRepo,
+        ticket_repo: TicketRepo,    # noqa: F821 (类型注解用,运行时仅存引用)
         session_repo: SessionRepo,
         message_repo: MessageRepo,
         event_repo: EventRepo,
+        attention_repo: AttentionRepo,
         bus: EventBus,
         pipeline: ToolPipeline | None = None,
         default_model: ModelRef | None = None,
-        resume: bool = False,
+        is_cancelled: Callable[[str], bool] | None = None,
     ) -> None:
         self.ticket = ticket
         self.session_id = session_id
@@ -112,17 +117,20 @@ class WorkerSession:
         self.session_repo = session_repo
         self.message_repo = message_repo
         self.event_repo = event_repo
+        self.attention_repo = attention_repo
         self.bus = bus
+        self._is_cancelled = is_cancelled or (lambda _tid: False)
 
-        # —— 工具:workspace 文件工具(每 ticket 隔离) + 注册表非文件工具,一次构建 ——
+        # —— 工具:workspace 文件工具(每 ticket 隔离) + 注册表非文件工具 ——
         self._tools: list = list(make_file_tools(workspace_dir))
         extra_names = [n for n in worker.tools if n not in FILE_TOOL_NAMES]
         if extra_names:
             self._tools.extend(tool_registry.get_tools(extra_names))
 
-        # —— pipeline:默认自带 trace stage;P1 外层再挂审批门 ——
+        # —— pipeline:trace + 审批门(外层),dsh: 审批 = 授权管理 ——
         self.pipeline = pipeline or ToolPipeline()
         if not self.pipeline._stages:
+            self.pipeline.add_stage(make_approval_gate_stage(attention_repo, event_repo, bus))
             self.pipeline.add_stage(make_trace_stage(event_repo, bus))
 
         # —— 模型 ——
@@ -130,14 +138,12 @@ class WorkerSession:
             (default_model or ModelRef("qwen", "qwen-max"))
         self.llm = model_provider.get_llm(ref).bind_tools(self._tools)
 
-        # —— 组装 system 消息(skills 注入格式沿用 v1) ——
         skills = skill_loader.load(worker.skills)
         skill_block = "\n\n".join(
             f'<skill name="{name}">\n{content}\n</skill>' for name, content in skills.items()
         )
         system_parts = [p for p in (worker.system_prompt, skill_block, WORKER_DISCIPLINE) if p]
         self._system_message = SystemMessage(content="\n\n".join(system_parts))
-        self._resume = resume
 
     # —— 事件辅助 ——
     def _emit(self, event_type: str, payload: dict, actor: str | None = None) -> None:
@@ -154,32 +160,74 @@ class WorkerSession:
             parts.append(f"【授权范围】{scope}(越界操作视为失败)")
         return HumanMessage(content="\n".join(parts))
 
+    def _tool_context(self, tool_call_id: str | None = None) -> ToolContext:
+        return ToolContext(
+            ticket_id=self.ticket.id,
+            session_id=self.session_id,
+            worker_name=self.worker.name,
+            workspace_dir=str(self.workspace_dir),
+            approval_targets=list(self.worker.approval_targets),
+            tool_call_id=tool_call_id,
+        )
+
+    # —— 入口 ——
     def run(self) -> SessionResult:
-        """执行到终态。异常不向外抛(转 failed + 事件),由 Scheduler 消费返回值。"""
+        """首次/续跑执行到终态或暂停。异常不外抛(转 failed + 事件)。"""
         try:
-            return self._run_inner()
-        except Exception as exc:  # 防御:模型/网络异常转 failed,不崩调度线程
+            rows = self.message_repo.list_for_session(self.session_id)
+            resumed = bool(rows)
+            if resumed:
+                messages = [_message_from_row(r) for r in rows]
+            else:
+                messages = [self._system_message, self._build_task_message()]
+                for m in messages:
+                    _persist_message(self.message_repo, self.session_id, m)
+            self._emit(ev.SESSION_STARTED, {"worker": self.worker.name, "resumed": resumed})
+            return self._loop(messages)
+        except AttentionNeeded as a:
+            # 审批门短路:transcript 已落库,人工决定后 resume 续跑
+            self.session_repo.cas_status(self.session_id, SessionStatus.RUNNING, SessionStatus.WAITING_HUMAN)
+            return SessionResult(status=SessionStatus.WAITING_HUMAN, attention_id=a.attention_id)
+        except Exception as exc:
             logger.exception("session %s crashed", self.session_id)
             self.session_repo.cas_status(self.session_id, SessionStatus.RUNNING, SessionStatus.FAILED)
             self._emit(ev.SESSION_ENDED, {"status": "failed", "error": str(exc)[:500]})
             return SessionResult(status=SessionStatus.FAILED, error=str(exc))
 
-    def _run_inner(self) -> SessionResult:
-        # —— transcript:恢复时重载,否则初始化 system+task ——
-        rows = self.message_repo.list_for_session(self.session_id)
-        if self._resume and rows:
-            messages = [_message_from_row(r) for r in rows]
-            self._emit(ev.SESSION_STARTED, {"worker": self.worker.name, "resumed": True})
-        else:
-            messages = [self._system_message, self._build_task_message()]
-            for m in messages:
-                _persist_message(self.message_repo, self.session_id, m)
-            self._emit(ev.SESSION_STARTED, {"worker": self.worker.name, "resumed": False})
+    def resume_after_decision(self, attention: dict, decision: str, answer: str | None) -> SessionResult:
+        """人工决定后恢复:按决定注入消息/执行工具,然后继续主循环。"""
+        # 会话转回 running(与注入消息同事务语义:先 cas 再改 transcript)
+        self.session_repo.cas_status(self.session_id, SessionStatus.WAITING_HUMAN, SessionStatus.RUNNING)
+        if attention["type"] == "approval" and decision == "approve":
+            # 授权延续:真正执行该工具(绕过审批门,但保留轨迹)
+            result = self._execute_approved_tool(attention)
+        elif attention["type"] == "approval":
+            result = f"人工拒绝: 该操作授权终止({(attention['payload'] or {}).get('tool')})"
+        else:  # question
+            result = f"【人工回答】{answer or '(空)'}"
+        self.message_repo.append(self.session_id, "tool" if attention["type"] == "approval" else "user",
+                                 result,
+                                 tool_call_id=(attention["payload"] or {}).get("tool_call_id")
+                                 if attention["type"] == "approval" else None)
+        if attention["type"] == "approval" and decision == "approve":
+            self._emit(ev.TOOL_RESULT, {
+                "tool": (attention["payload"] or {}).get("tool"),
+                "ok": not result.startswith("错误"),
+                "result_preview": result[:400],
+                "approved": True,
+                "approved_by": attention.get("decided_by") or "human",
+            })
+        return self.run()
 
+    # —— 主循环 ——
+    def _loop(self, messages: list) -> SessionResult:
         max_iterations = self.worker.max_iterations
         result = SessionResult(status=SessionStatus.FAILED, error="迭代耗尽")
 
         for iteration in range(1, max_iterations + 1):
+            if self._is_cancelled(self.ticket.id):
+                self.session_repo.cas_status(self.session_id, SessionStatus.RUNNING, SessionStatus.CANCELLED)
+                return SessionResult(status=SessionStatus.CANCELLED)
             self.session_repo.set_iterations(self.session_id, iteration)
             ai: AIMessage = self.llm.invoke(messages)
             _persist_message(self.message_repo, self.session_id, ai)
@@ -197,11 +245,25 @@ class WorkerSession:
                 })
                 continue
 
-            # —— 终答:解析 QUESTION(P1 转 Attention;P0 记入事件) ——
             reply = ai.content if isinstance(ai.content, str) else str(ai.content)
-            result = SessionResult(
-                status=SessionStatus.DONE, reply=reply, question=extract_question(reply),
-            )
+            question = extract_question(reply)
+            if question:
+                # dsh: Attention = 等待人的结构化问题(一次一个;会话已暂停故天然满足)
+                att = self.attention_repo.create(
+                    self.ticket.id, self.session_id, "question",
+                    {"question": question, "draft_reply": reply[:1000], "worker": self.worker.name},
+                )
+                envelope = self.event_repo.insert(
+                    self.ticket.id, ev.ATTENTION_CREATED, actor=self.worker.name,
+                    session_id=self.session_id,
+                    payload={"attention_id": att["id"], "type": "question", "question": question},
+                )
+                self.bus.publish(self.ticket.id, envelope)
+                self.session_repo.cas_status(self.session_id, SessionStatus.RUNNING, SessionStatus.WAITING_HUMAN)
+                return SessionResult(status=SessionStatus.WAITING_HUMAN,
+                                     reply=reply, question=question, attention_id=att["id"])
+
+            result = SessionResult(status=SessionStatus.DONE, reply=reply)
             self._emit(ev.SESSION_ITERATION, {"iteration": iteration, "final": True})
             break
 
@@ -214,16 +276,32 @@ class WorkerSession:
         })
         return result
 
+    # —— 工具执行 ——
     def _execute_tool(self, tc: dict) -> str:
-        """单工具调用(经 pipeline;未知工具返回错误文本让 worker 自纠)。"""
-        ctx = ToolContext(
-            ticket_id=self.ticket.id,
-            session_id=self.session_id,
-            worker_name=self.worker.name,
-            workspace_dir=str(self.workspace_dir),
-            approval_targets=list(self.worker.approval_targets),
-        )
         tool = next((t for t in self._tools if t.name == tc["name"]), None)
         if tool is None:
             return f"错误: 未知工具 '{tc['name']}'"
-        return self.pipeline.execute(tool, dict(tc["args"] or {}), ctx)
+        return self.pipeline.execute(tool, dict(tc["args"] or {}), self._tool_context(tc["id"]))
+
+    def _execute_approved_tool(self, attention: dict) -> str:
+        """审批通过后的真实执行(绕过审批门,保留轨迹)。"""
+        payload = attention.get("payload") or {}
+        tool_name = payload.get("tool")
+        tool = next((t for t in self._tools if t.name == tool_name), None)
+        if tool is None:
+            return f"错误: 未知工具 '{tool_name}'"
+        ctx = self._tool_context(payload.get("tool_call_id"))
+        envelope = self.event_repo.insert(
+            self.ticket.id, ev.TOOL_CALLED, actor=self.worker.name,
+            session_id=self.session_id,
+            payload={"tool": tool.name, "args": payload.get("args", {}), "worker": self.worker.name,
+                     "approved": True},
+        )
+        self.bus.publish(self.ticket.id, envelope)
+        try:
+            result = tool.invoke(dict(payload.get("args") or {}))
+            if not isinstance(result, str):
+                result = str(result)
+        except Exception as exc:
+            result = f"工具执行错误: {exc}"
+        return result

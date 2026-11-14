@@ -58,19 +58,14 @@ def tickets_router(v2: V2Components) -> APIRouter:
 
     @router.post("/tickets/{ticket_id}/cancel")
     def cancel_ticket(ticket_id: str, body: dict | None = None):
+        """撤权(dsh: 人的停止 = revoked_by_human);pending/running/waiting 均可。"""
         t = v2.ticket_repo.get(ticket_id)
         if t is None:
             raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found")
         by = (body or {}).get("by", "human")
-        if t.status == TicketStatus.PENDING:
-            if v2.scheduler.cancel_pending(ticket_id, by=by):
-                return {"ok": True, "stage": "pending"}
-            raise HTTPException(status_code=409, detail="ticket not cancellable in current state")
-        # 运行中/等待中撤权在 P1(cooperative cancel + Attention)
-        raise HTTPException(
-            status_code=409,
-            detail=f"运行中工单撤权将在 P1 提供;当前状态 {t.status.value}",
-        )
+        if v2.scheduler.cancel(ticket_id, by=by):
+            return {"ok": True, "revoked_by_human": True}
+        raise HTTPException(status_code=409, detail="ticket 已终态,不可撤权")
 
     @router.get("/tickets/{ticket_id}/events")
     def ticket_events(ticket_id: str, after_id: int = 0, limit: int = 500):
