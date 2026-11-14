@@ -185,3 +185,27 @@ def test_cancel_pending(make_v2):
     assert v2.scheduler.cancel("tp")
     assert v2.ticket_repo.get("tp").status == TicketStatus.CANCELLED
     assert v2.scheduler.cancel("tp") is False  # 终态不可再撤权
+
+
+def test_tickets_dispatched_concurrently(make_v2):
+    """回归:新工单经有界线程池并发执行(P1 曾退化为 dispatch 线程串行)。
+
+    三个会话必须同时到达 LLM invoke 点(Barrier)才算通过;
+    若退化为串行,barrier 超时 → 会话全部 failed。"""
+    import threading
+
+    class BarrierLLM(FakeLLM):
+        def __init__(self, parties: int) -> None:
+            super().__init__()
+            self._barrier = threading.Barrier(parties, timeout=10)
+
+        def invoke(self, messages, **kwargs):
+            self._barrier.wait()
+            return AIMessage(content="ok")
+
+    v2 = make_v2({"qwen-max": BarrierLLM(3)})
+    _add_worker(v2)
+    tids = [v2.scheduler.submit_request("x", worker_name="coder")["ticket_id"]
+            for _ in range(3)]
+    for tid in tids:
+        assert wait_ticket_terminal(v2, tid).status == TicketStatus.DONE

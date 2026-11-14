@@ -213,3 +213,49 @@ def test_thread_fanout_to_active_tickets(make_v2):
                      if e["type"] == ev.FOLLOW_UP_DELIVERED
                      and e["payload"].get("via") == "thread_fanout"]
     assert len(fanout_events) == 1
+
+
+# —— A1 预算闸门真实链路(模型 usage 计账 → 迭代边界检查) ——
+def test_budget_gate_pauses_and_double_resume(make_v2):
+    """真实闸门:第一轮 usage 12 > budget 10 → budget Attention;
+    approve → 预算翻倍 20 → 从 transcript 续跑 → done。"""
+    llm = FakeLLM()
+    llm.set_invoke_responses([
+        AIMessage(content="", tool_calls=[{
+            "name": "write_file",
+            "args": {"path": "a.txt", "content": "x"}, "id": "c1",
+        }], usage_metadata={"input_tokens": 8, "output_tokens": 4, "total_tokens": 12}),
+        AIMessage(content="预算加额后完成"),
+    ])
+    v2 = make_v2({"qwen-max": llm})
+    v2.worker_repo.upsert(WorkerDef(name="coder"))
+    resp = v2.scheduler.submit_request("x", worker_name="coder", budget_tokens=10)
+    tid = resp["ticket_id"]
+    att = _wait_attention_type(v2, tid, "budget")
+    assert att["payload"]["used"] == 12
+    assert att["payload"]["limit"] == 10
+    v2.scheduler.resume_attention(att["id"], decision="approve", decided_by="boss")
+    assert v2.ticket_repo.get(tid).budget_tokens == 20
+    t = wait_ticket_terminal(v2, tid)
+    assert t.status == TicketStatus.DONE
+    assert t.result == "预算加额后完成"
+
+
+def test_budget_gate_reject_terminates(make_v2):
+    """真实闸门:超限 → budget Attention;reject → 工单 failed(预算耗尽终止)。"""
+    llm = FakeLLM()
+    llm.set_invoke_responses([
+        AIMessage(content="", tool_calls=[{
+            "name": "write_file",
+            "args": {"path": "a.txt", "content": "x"}, "id": "c1",
+        }], usage_metadata={"input_tokens": 8, "output_tokens": 4, "total_tokens": 12}),
+    ])
+    v2 = make_v2({"qwen-max": llm})
+    v2.worker_repo.upsert(WorkerDef(name="coder"))
+    resp = v2.scheduler.submit_request("x", worker_name="coder", budget_tokens=10)
+    tid = resp["ticket_id"]
+    att = _wait_attention_type(v2, tid, "budget")
+    v2.scheduler.resume_attention(att["id"], decision="reject", decided_by="boss")
+    t = wait_ticket_terminal(v2, tid)
+    assert t.status == TicketStatus.FAILED
+    assert "预算耗尽" in (t.result or "")

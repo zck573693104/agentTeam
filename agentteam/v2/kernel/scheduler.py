@@ -2,8 +2,8 @@
 
 职责单一化:
 - submit_request: Router 决策 → 建 Ticket → 入队
-- _dispatch_loop: 有界线程池抢占 pending Ticket(CAS 防双派工)
-- _execute_ticket: 建 Session + workspace → 运行 → 终态/等待人
+- _dispatch_loop: 校验 pending Ticket → 提交有界线程池(不执行)
+- _start_session: 池内 CAS 占坑(PENDING→RUNNING)→ 建 Session + workspace → 运行 → 终态/等待人
 - resume_attention: 人工决定后恢复会话(dsh: 审批 = 授权延续/终止)
 - cancel: 撤权(任意非终态;dsh: 人的停止 = revoked_by_human)
 - on_pool_changed: worker pool 配置热更新 → 在途 Ticket 记授权依据过期注记
@@ -366,9 +366,13 @@ class Scheduler:
                     ticket_id = self._queue.get_nowait()
                 except queue.Empty:
                     break
-                self._try_execute(ticket_id)
+                try:
+                    self._try_execute(ticket_id)
+                except Exception:
+                    logger.exception("dispatch ticket %s failed", ticket_id)
 
     def _try_execute(self, ticket_id: str) -> None:
+        """派工前置校验(worker 存在且启用);执行体提交有界线程池。"""
         ticket = self.tickets.get(ticket_id)
         if ticket is None or ticket.status != TicketStatus.PENDING:
             return
@@ -382,10 +386,18 @@ class Scheduler:
                 "to": "failed", "reason": "worker missing",
             })
             return
+        # 池满时任务在池队列排队,工单保持 pending(崩溃后 _recover 可重排)
+        self._pool.submit(self._start_session, ticket_id)
+
+    def _start_session(self, ticket_id: str) -> None:
+        """线程池内占坑(CAS 防双派工)后执行;已被取消/重复派工则放弃。"""
+        ticket = self.tickets.get(ticket_id)
+        if ticket is None or ticket.status != TicketStatus.PENDING:
+            return
         if not self.tickets.cas_status(ticket_id, TicketStatus.PENDING, TicketStatus.RUNNING):
             return
         self._emit(ticket_id, ev.TICKET_STATUS_CHANGED, payload={"to": "running"})
-        self._run_session(ticket, worker_name=worker.name)
+        self._run_session(ticket, worker_name=ticket.worker_name)
 
     def _run_session(
         self, ticket: Ticket | None, worker_name: str | None = None,
@@ -393,7 +405,7 @@ class Scheduler:
         attention: dict | None = None, decision: str | None = None,
         answer: str | None = None,
     ) -> None:
-        """执行(或恢复)一个会话;在线程池内运行。"""
+        """执行(或恢复)一个会话;在线程池内运行,异常落为工单 failed(不得逃逸线程池)。"""
         if ticket is None:
             return
         if worker_name:
@@ -401,34 +413,47 @@ class Scheduler:
         else:
             worker = self.workers.get(ticket.worker_name or "")
         if worker is None:
+            # 占坑后工人被删除/禁用的竞态兜底(常规路径已在 _try_execute 拦截)
+            if self.tickets.cas_status(ticket.id, TicketStatus.RUNNING, TicketStatus.FAILED,
+                                       result=f"worker '{ticket.worker_name}' 不存在或已禁用"):
+                self._emit(ticket.id, ev.TICKET_STATUS_CHANGED,
+                           payload={"to": "failed", "reason": "worker missing"})
             return
-        if session_id is None:
-            session_id = uuid4().hex
-            # A2: git 仓库工单 → worktree 隔离(分支 agentteam/<ticket>);否则普通目录
-            workspace = self.workspaces.for_ticket(ticket.id, ticket.repo_path)
-            model_dict = worker.model or {
-                "provider": self.default_model.provider, "name": self.default_model.name,
-            }
-            self.sessions.create(
-                session_id, ticket.id, worker.name, str(workspace),
-                worker.max_iterations, model_dict,
+        try:
+            if session_id is None:
+                session_id = uuid4().hex
+                # A2: git 仓库工单 → worktree 隔离(分支 agentteam/<ticket>);否则普通目录
+                workspace = self.workspaces.for_ticket(ticket.id, ticket.repo_path)
+                model_dict = worker.model or {
+                    "provider": self.default_model.provider, "name": self.default_model.name,
+                }
+                self.sessions.create(
+                    session_id, ticket.id, worker.name, str(workspace),
+                    worker.max_iterations, model_dict,
+                )
+            session = WorkerSession(
+                ticket=ticket, session_id=session_id, worker=worker,
+                workspace_dir=Path(self.sessions.get(session_id)["workspace_dir"]),
+                model_provider=self.mp, tool_registry=self.registry,
+                skill_loader=self.skill_loader,
+                ticket_repo=self.tickets, session_repo=self.sessions,
+                message_repo=self.messages, event_repo=self.events,
+                attention_repo=self.attentions, bus=self.bus,
+                default_model=self.default_model,
+                is_cancelled=self.is_cancelled,
+                pop_follow_ups=lambda: self._pop_follow_ups(ticket.id),
             )
-        session = WorkerSession(
-            ticket=ticket, session_id=session_id, worker=worker,
-            workspace_dir=Path(self.sessions.get(session_id)["workspace_dir"]),
-            model_provider=self.mp, tool_registry=self.registry,
-            skill_loader=self.skill_loader,
-            ticket_repo=self.tickets, session_repo=self.sessions,
-            message_repo=self.messages, event_repo=self.events,
-            attention_repo=self.attentions, bus=self.bus,
-            default_model=self.default_model,
-            is_cancelled=self.is_cancelled,
-            pop_follow_ups=lambda: self._pop_follow_ups(ticket.id),
-        )
-        if attention is not None:
-            result = session.resume_after_decision(attention, decision or "answer", answer)
-        else:
-            result = session.run()
+            if attention is not None:
+                result = session.resume_after_decision(attention, decision or "answer", answer)
+            else:
+                result = session.run()
+        except Exception as exc:
+            logger.exception("ticket %s crashed outside session loop", ticket.id)
+            if self.tickets.cas_status(ticket.id, TicketStatus.RUNNING, TicketStatus.FAILED,
+                                       result=f"执行异常: {exc}"[:500]):
+                self._emit(ticket.id, ev.TICKET_STATUS_CHANGED,
+                           payload={"to": "failed", "error": str(exc)[:300]})
+            return
 
         if result.status == SessionStatus.DONE:
             self.tickets.cas_status(ticket.id, TicketStatus.RUNNING, TicketStatus.DONE, result=result.reply)

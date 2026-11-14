@@ -1,6 +1,6 @@
 """研发工人池 — v2 worker-pool 预设(由 v1 Agent 树压平:Router + 扁平工人池)。
 
-用法: 逐个 POST /api/v2/workers 注册 WORKERS;MCP 服务随 worker 挂载
+用法: 逐个 POST /api/workers 注册 WORKERS;MCP 服务随 worker 挂载
 (session 启动时注册到 ToolRegistry,工具名 mcp:{name}:*)。
 """
 from __future__ import annotations

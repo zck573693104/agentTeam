@@ -19,6 +19,8 @@ from agentteam.v2.domain.worker import WorkerDef
 
 logger = get_logger("v2.kernel.router")
 
+_NOTE_MAX_CHARS = 120  # 批注运行时上限(discipline「≤30 词」的硬约束兜底)
+
 
 class RouterDecision(BaseModel):
     """Router 结构化决策(with_structured_output schema)。"""
@@ -103,7 +105,7 @@ class Router:
                 return DispatchDecision(
                     action="dispatch", worker_name=decision.worker,
                     goal=decision.goal or text, acceptance=decision.acceptance,
-                    note=decision.note, via="llm",
+                    note=(decision.note or "")[:_NOTE_MAX_CHARS], via="llm",
                 )
             logger.warning("router picked unknown worker %r, fallback", decision.worker)
 
@@ -112,7 +114,7 @@ class Router:
                 and getattr(decision, "reply", ""):
             return DispatchDecision(
                 action="reply", worker_name=None, goal="", acceptance="",
-                note=decision.note, reply=decision.reply, via="llm",
+                note=(decision.note or "")[:_NOTE_MAX_CHARS], reply=decision.reply, via="llm",
             )
         fallback = enabled[0]
         return DispatchDecision(

@@ -5,7 +5,7 @@ Router(轻量模型) + coder/tester 两 worker:
 - tester: 只读 + web 搜索
 
 用法:
-    POST /api/v2/workers 逐个注册 WORKERS
+    POST /api/workers 逐个注册 WORKERS
     或 agentteam-v2-install-preset dev_pool(CLI,P5 提供)
 """
 from __future__ import annotations

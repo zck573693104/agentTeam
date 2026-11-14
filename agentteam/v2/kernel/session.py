@@ -229,7 +229,8 @@ class WorkerSession:
             self._emit(ev.SESSION_ENDED, {"status": "failed", "error": "预算耗尽,人工选择终止"})
             return SessionResult(status=SessionStatus.FAILED, error="预算耗尽,人工选择终止")
         if attention["type"] == "budget":
-            pass  # approve: 预算已由 scheduler 加额落库;继续主循环
+            # approve: 预算已由 scheduler 加额落库;无消息可注入,直接从 transcript 续跑
+            return self.run()
         elif attention["type"] == "approval" and decision == "approve":
             # 授权延续:真正执行该工具(绕过审批门,但保留轨迹)
             result = self._execute_approved_tool(attention)
@@ -267,8 +268,15 @@ class WorkerSession:
                 follow = HumanMessage(content=f"【追问·{by}】{text}")
                 _persist_message(self.message_repo, self.session_id, follow)
                 messages.append(follow)
+            # A1 预算闸门:上一轮计账超限 → 迭代边界暂停等人(此处 transcript 无悬空 tool_call,
+            # 恢复时 approve=预算翻倍续跑 / reject=终止)
+            if self._budget_exceeded():
+                return self._raise_budget_attention()
+            # A3 chain-of-recall:估算 token 超阈值 → 先压缩再调用(压缩自身也耗 token,故排在预算之后)
+            self._maybe_compact(messages)
             self.session_repo.set_iterations(self.session_id, iteration)
             ai: AIMessage = self.llm.invoke(messages)
+            self._account_tokens(ai)  # A1 计账(迭代边界统一检查)
             _persist_message(self.message_repo, self.session_id, ai)
             messages.append(ai)
 

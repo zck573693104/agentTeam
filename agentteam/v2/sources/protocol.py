@@ -9,11 +9,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Trigger(BaseModel):
-    """入站触发事件(不可变)。"""
+    """入站触发事件(不可变:frozen,外部入站数据禁止就地改写)。"""
+
+    model_config = ConfigDict(frozen=True)
 
     actor: str = Field(description="触发者(Source 自己的身份体系,不跨源映射)")
     thread_key: str = Field(description="线程键(同会话/同 issue 归一线程)")
