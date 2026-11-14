@@ -20,7 +20,7 @@ def test_init_db_idempotent(tmp_path):
     conn2 = init_db(db)
     v2 = conn2.execute("PRAGMA user_version").fetchone()[0]
     conn2.close()
-    assert v1 == v2 == 2  # v2 迁移: workers.mcp_json
+    assert v1 == v2 == 3  # v3 迁移: repo/budget/tokens/compacted
 
 
 def test_worker_repo_roundtrip(tmp_path):

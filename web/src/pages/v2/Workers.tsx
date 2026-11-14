@@ -114,7 +114,7 @@ function WorkerModal({ open, editing, onClose, onDone }: {
 }
 
 export default function V2Workers() {
-  const { data, loading, refetch } = useFetch<V2Worker[]>("/api/v2/workers");
+  const { data, loading, refetch } = useFetch<V2Worker[]>("/api/workers");
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<V2Worker | null>(null);
 
@@ -131,7 +131,7 @@ export default function V2Workers() {
   return (
     <div>
       <PageHeader
-        index="05 · V2 WORKERS"
+        index="06 · V2 WORKERS"
         title="工人池"
         subtitle="Worker Pool"
         action={

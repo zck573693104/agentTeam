@@ -1,4 +1,5 @@
 import { Link, Route, Routes, useLocation } from "react-router-dom";
+import V2Dashboard from "./pages/v2/Dashboard";
 import V2Attention from "./pages/v2/Attention";
 import V2Tickets from "./pages/v2/Tickets";
 import V2TicketDetail from "./pages/v2/TicketDetail";
@@ -27,10 +28,25 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
+  {
+    key: "/",
+    index: "01",
+    label: "OVERVIEW",
+    sublabel: "总览指挥台",
+    path: "/",
+    icon: (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <rect x="1.5" y="1.5" width="5" height="5" />
+        <rect x="9.5" y="1.5" width="5" height="5" />
+        <rect x="1.5" y="9.5" width="5" height="5" />
+        <rect x="9.5" y="9.5" width="5" height="5" />
+      </svg>
+    ),
+  },
   // ---- V2 控制台(dsh 式工单中心;P5 切换后接管导航) ----
   {
     key: "/v2/attention",
-    index: "01",
+    index: "02",
     label: "INBOX · V2",
     sublabel: "注意件收件箱",
     path: "/v2/attention",
@@ -44,7 +60,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     key: "/v2/tickets",
-    index: "02",
+    index: "03",
     label: "TICKETS · V2",
     sublabel: "工单看板",
     path: "/v2/tickets",
@@ -57,7 +73,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     key: "/v2/threads",
-    index: "03",
+    index: "04",
     label: "THREADS · V2",
     sublabel: "入站线程",
     path: "/v2/threads",
@@ -69,7 +85,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     key: "/v2/observe",
-    index: "04",
+    index: "05",
     label: "OBSERVE · V2",
     sublabel: "观察模式",
     path: "/v2/observe",
@@ -82,7 +98,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     key: "/v2/workers",
-    index: "05",
+    index: "06",
     label: "WORKERS · V2",
     sublabel: "工人池",
     path: "/v2/workers",
@@ -95,7 +111,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     key: "/v2/sources",
-    index: "06",
+    index: "07",
     label: "SOURCES · V2",
     sublabel: "入站源",
     path: "/v2/sources",
@@ -108,7 +124,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     key: "/v2/skills",
-    index: "07",
+    index: "08",
     label: "SKILLS · V2",
     sublabel: "技能库",
     path: "/v2/skills",
@@ -323,7 +339,7 @@ export default function App() {
       }}>
         <Routes>
           {/* ---- 控制台(dsh 式工单中心) ---- */}
-          <Route path="/" element={<V2Attention />} />
+          <Route path="/" element={<V2Dashboard />} />
           <Route path="/v2/attention" element={<V2Attention />} />
           <Route path="/v2/tickets" element={<V2Tickets />} />
           <Route path="/v2/tickets/:ticketId" element={<V2TicketDetail />} />

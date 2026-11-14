@@ -75,7 +75,7 @@ function SourceModal({ open, onClose, onDone }: {
 }
 
 export default function V2Sources() {
-  const { data, loading, refetch } = useFetch<V2Source[]>("/api/v2/sources");
+  const { data, loading, refetch } = useFetch<V2Source[]>("/api/sources");
   const [modalOpen, setModalOpen] = useState(false);
 
   const remove = async (name: string) => {
@@ -91,13 +91,13 @@ export default function V2Sources() {
   return (
     <div>
       <PageHeader
-        index="06 · V2 SOURCES"
+        index="07 · V2 SOURCES"
         title="入站源"
         subtitle="Inbound Sources"
         action={<button className="at-btn-amber" onClick={() => setModalOpen(true)}>+ 添加 Source</button>}
       />
       <div style={{ fontSize: 13, color: "var(--at-text-dim)", marginBottom: 14, fontFamily: "var(--at-font-mono)" }}>
-        webhook 入口: POST <span style={{ color: "var(--at-amber)" }}>/api/v2/sources/&lt;name&gt;/webhook</span>
+        webhook 入口: POST <span style={{ color: "var(--at-amber)" }}>/api/sources/&lt;name&gt;/webhook</span>
         (header X-Source-Secret);观察模式先记录 would-accept。
       </div>
       {loading && !data && (

@@ -40,7 +40,20 @@ class ThreadRepo(BaseSqliteRepo):
     def append_trigger(
         self, thread_id: str, actor: str, text: str, raw: dict | None = None,
     ) -> dict:
-        """入站事件 → Trigger(不可变,含 actor)。"""
+        """入站事件 → Trigger(不可变,含 actor)。
+
+        C10 轮询源去重: raw.external_id 存在时,同 external_id 不重复落库
+        (轮询游标重启回退会重发同事件),返回已有 trigger。
+        """
+        external_id = (raw or {}).get("external_id")
+        if external_id:
+            existing = self._fetchone(
+                "SELECT id, thread_id, actor, text, at FROM triggers "
+                "WHERE thread_id = ? AND json_extract(raw_json, '$.external_id') = ?",
+                (thread_id, external_id),
+            )
+            if existing:
+                return dict(existing)
         trigger_id = uuid4().hex
         now = _now()
         self._execute(

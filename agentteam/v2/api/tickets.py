@@ -1,5 +1,7 @@
-"""Ticket 路由:请求入口 / 看板 / 详情 / transcript / 取消。"""
+"""Ticket 路由:请求入口 / 看板 / 详情 / transcript / 变更集 / 取消。"""
 from __future__ import annotations
+
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
@@ -22,6 +24,8 @@ def tickets_router(v2: V2Components) -> APIRouter:
                 submitted_by=body.get("submitted_by", "api"),
                 worker_name=body.get("worker_name"),
                 thread_id=body.get("thread_id"),
+                repo_path=body.get("repo_path"),
+                budget_tokens=int(body.get("budget_tokens") or 0),
             )
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
@@ -88,6 +92,19 @@ def tickets_router(v2: V2Components) -> APIRouter:
             raise HTTPException(status_code=404, detail=str(e))
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e))
+
+    @router.get("/tickets/{ticket_id}/diff")
+    def ticket_diff(ticket_id: str):
+        """A2/B7: 工单变更集(git worktree 工单: 与基线分支的 stat+patch)。"""
+        t = v2.ticket_repo.get(ticket_id)
+        if t is None:
+            raise HTTPException(status_code=404, detail=f"Ticket '{ticket_id}' not found")
+        from agentteam.v2.kernel.workspace import ticket_change_set
+        sessions = v2.session_repo.list_for_ticket(ticket_id)
+        if not sessions:
+            raise HTTPException(status_code=409, detail="工单尚无会话")
+        workspace = sessions[-1]["workspace_dir"]
+        return ticket_change_set(Path(workspace), base_ref=None)
 
     @router.get("/tickets/{ticket_id}/notifications")
     def ticket_notifications(ticket_id: str):

@@ -6,7 +6,7 @@ export default function V2Skills() {
   const { data, loading } = useFetch<{ skills: string[] }>("/api/skills");
   return (
     <div>
-      <PageHeader index="06 · V2 SKILLS" title="技能库" subtitle="Skills" />
+      <PageHeader index="08 · V2 SKILLS" title="技能库" subtitle="Skills" />
       {loading && !data && (
         <div style={{ padding: 40, textAlign: "center", color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
           <span style={{ color: "var(--at-amber)" }}>●</span> LOADING...

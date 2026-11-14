@@ -28,6 +28,8 @@ export interface V2Ticket {
   status: "pending" | "running" | "waiting_human" | "done" | "failed" | "cancelled";
   worker_name: string | null;
   thread_id: string | null;
+  repo_path: string | null;      // A2: 关联 git 仓库(工作区为 worktree)
+  budget_tokens: number;         // A1: token 预算(0 = 不限额)
   mandate: V2Mandate | null;
   result: string | null;
   created_at: string;
@@ -44,6 +46,8 @@ export interface V2Session {
   status: string;
   iterations: number;
   max_iterations: number;
+  tokens_in: number;
+  tokens_out: number;
   created_at: string;
   updated_at: string;
 }
@@ -72,7 +76,7 @@ export interface V2Attention {
   id: string;
   ticket_id: string;
   session_id: string;
-  type: "approval" | "question";
+  type: "approval" | "question" | "budget";
   payload: {
     tool?: string;
     args?: Record<string, any>;
@@ -80,6 +84,9 @@ export interface V2Attention {
     question?: string;
     draft_reply?: string;
     decision_effect?: string;
+    diff?: string;
+    used?: number;
+    limit?: number;
   };
   status: "pending" | "decided";
   decision: string | null;
@@ -134,3 +141,27 @@ export const v2Post = <T>(path: string, body: unknown) =>
 export const v2Put = <T>(path: string, body: unknown) =>
   api<T>(BASE + path, { method: "PUT", body: JSON.stringify(body) });
 export const v2Delete = <T>(path: string) => api<T>(BASE + path, { method: "DELETE" });
+
+// ---- B8 Dashboard / B7 diff ----
+export interface V2Dashboard {
+  tickets: { by_status: Record<string, number>; total: number };
+  tokens_total: number;
+  workers: { total: number; enabled: number };
+  attentions_pending: number;
+  outbox: Record<string, number>;
+  sources: { total: number; enabled: number };
+  threads: number;
+  events_recent_1h: number;
+}
+
+export interface V2ChangeSet {
+  is_git: boolean;
+  base: string | null;
+  stat: string;
+  patch: string;
+  note?: string;
+}
+
+export const getDashboard = () => v2Get<V2Dashboard>("/dashboard");
+export const getTicketDiff = (ticketId: string) =>
+  v2Get<V2ChangeSet>(`/tickets/${ticketId}/diff`);

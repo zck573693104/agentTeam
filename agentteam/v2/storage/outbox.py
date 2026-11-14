@@ -39,6 +39,11 @@ class OutboxRepo(BaseSqliteRepo):
             (attempts, last_error[:500], row_id),
         )
 
+    def counts(self) -> dict[str, int]:
+        """B8 dashboard: outbox 各状态计数。"""
+        rows = self._fetchall("SELECT status, COUNT(*) AS n FROM outbox GROUP BY status")
+        return {r["status"]: r["n"] for r in rows}
+
     def list_for_ticket(self, ticket_id: str, limit: int = 100) -> list[dict]:
         rows = self._fetchall(
             "SELECT * FROM outbox WHERE ticket_id = ? ORDER BY id ASC LIMIT ?",

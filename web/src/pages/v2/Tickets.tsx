@@ -108,12 +108,12 @@ function TicketCard({ t }: { t: V2Ticket }) {
 
 export default function V2Tickets() {
   const [modalOpen, setModalOpen] = useState(false);
-  const { data, loading, refetch } = useFetch<V2Ticket[]>("/api/v2/tickets");
+  const { data, loading, refetch } = useFetch<V2Ticket[]>("/api/tickets");
 
   return (
     <div>
       <PageHeader
-        index="02 · V2 TICKETS"
+        index="03 · V2 TICKETS"
         title="工单看板"
         subtitle="Ticket Board"
         action={<button className="at-btn-amber" onClick={() => setModalOpen(true)}>+ 新请求</button>}

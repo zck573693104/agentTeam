@@ -23,6 +23,30 @@ def build_v2_router(v2: V2Components) -> APIRouter:
     router.include_router(sources_router(v2))
     router.include_router(stream_router(v2))
 
+    @router.get("/dashboard")
+    def dashboard():
+        """B8 总览: 工单/预算/worker/注意件/outbox/来源 速率与状态。"""
+        by_status = v2.ticket_repo.count_by_status()
+        return {
+            "tickets": {
+                "by_status": by_status,
+                "total": sum(by_status.values()),
+            },
+            "tokens_total": v2.event_repo.total_tokens(),
+            "workers": {
+                "total": len(v2.worker_repo.list_all()),
+                "enabled": len(v2.worker_repo.list_all(include_disabled=False)),
+            },
+            "attentions_pending": len(v2.attention_repo.list_by_status("pending")),
+            "outbox": v2.outbox_repo.counts(),
+            "sources": {
+                "total": len(v2.source_repo.list_all()),
+                "enabled": len([s for s in v2.source_repo.list_all() if s["enabled"]]),
+            },
+            "threads": len(v2.thread_repo.list_threads(limit=500)),
+            "events_recent_1h": v2.event_repo.recent_count(1.0),
+        }
+
     @router.get("/skills")
     def list_skills():
         """可用技能(skills/ 目录 .md 文件名;worker.skills 引用)。"""

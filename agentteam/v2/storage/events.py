@@ -61,6 +61,22 @@ class EventRepo(BaseSqliteRepo):
         )
         return row["m"] if row and row["m"] is not None else 0
 
+    def recent_count(self, hours: float = 1.0) -> int:
+        """B8 dashboard: 近 N 小时事件量(事件速率)。"""
+        row = self._fetchone(
+            "SELECT COUNT(*) AS n FROM events WHERE created_at >= "
+            "datetime('now', ?)",
+            (f"-{hours} hours",),
+        )
+        return row["n"]
+
+    def total_tokens(self) -> int:
+        """A1/B8: 全部会话 token 总量。"""
+        row = self._fetchone(
+            "SELECT COALESCE(SUM(tokens_in + tokens_out), 0) AS t FROM sessions"
+        )
+        return int(row["t"] or 0)
+
 
 class EventBus:
     """按 ticket 分主题的实时扇出(有界队列,满丢最旧并计数)。"""

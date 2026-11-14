@@ -136,6 +136,7 @@ class Scheduler:
         self, text: str, submitted_by: str = "api",
         worker_name: str | None = None, thread_id: str | None = None,
         mandate_basis: str = "explicit",
+        repo_path: str | None = None, budget_tokens: int = 0,
     ) -> dict:
         """人/Source 的请求入口:Router 决策 → Ticket(pending) → 入队。
 
@@ -155,6 +156,8 @@ class Scheduler:
             status=TicketStatus.PENDING,
             worker_name=decision.worker_name,
             thread_id=thread_id,
+            repo_path=repo_path,
+            budget_tokens=max(0, int(budget_tokens or 0)),
             mandate=Mandate(
                 basis=mandate_basis, submitted_by=submitted_by,
                 policy_version=self._policy_version(),
@@ -212,6 +215,26 @@ class Scheduler:
         )
 
     # —— 取消(撤权) ——
+    def fan_out_thread(self, thread_id: str, text: str, by: str = "source") -> int:
+        """A4 双向 pass-through(dsh): 同线程事件广播给全部活跃订阅工单。
+
+        worker 认领后同线程新事件直达 worker(不过 Router),多 worker
+        同线程时各自可见、冲突自查。终态工单跳过(不复活)。
+        """
+        delivered = 0
+        for ticket_id in self.subscriptions.tickets_for_thread(thread_id):
+            t = self.tickets.get(ticket_id)
+            if t is None or t.status.is_terminal():
+                continue
+            with self._lock:
+                self._follow_ups.setdefault(ticket_id, []).append((text, by))
+            self._emit(ticket_id, ev.FOLLOW_UP_DELIVERED, actor=by, payload={
+                "text": text[:500], "state": t.status.value, "via": "thread_fanout",
+            })
+            self._wake.set()
+            delivered += 1
+        return delivered
+
     def cancel(self, ticket_id: str, by: str = "human") -> bool:
         """撤权:dsh 语义「人的停止 = 撤权」;pending/running/waiting 均可。"""
         ticket = self.tickets.get(ticket_id)
@@ -267,6 +290,11 @@ class Scheduler:
                    payload={"attention_id": attention_id, "decision": decision,
                             "type": att["type"], "answer": (answer or "")[:500]})
 
+        # A1: budget+approve → 预算翻倍落库(授权延续)
+        if att["type"] == "budget" and decision == "approve":
+            ticket_obj = self.tickets.get(att["ticket_id"])
+            if ticket_obj and ticket_obj.budget_tokens:
+                self.tickets.update_budget(att["ticket_id"], ticket_obj.budget_tokens * 2)
         # waiting_human → running;线程池恢复会话
         self.sessions.cas_status(att["session_id"], SessionStatus.WAITING_HUMAN, SessionStatus.RUNNING)
         self.tickets.cas_status(ticket.id, TicketStatus.WAITING_HUMAN, TicketStatus.RUNNING)
@@ -376,7 +404,8 @@ class Scheduler:
             return
         if session_id is None:
             session_id = uuid4().hex
-            workspace = self.workspaces.for_ticket(ticket.id)
+            # A2: git 仓库工单 → worktree 隔离(分支 agentteam/<ticket>);否则普通目录
+            workspace = self.workspaces.for_ticket(ticket.id, ticket.repo_path)
             model_dict = worker.model or {
                 "provider": self.default_model.provider, "name": self.default_model.name,
             }

@@ -50,5 +50,5 @@ def make_v2(tmp_path: Path):
     yield _create
 
     for v2 in created:
-        v2.scheduler.shutdown(wait=False)
+        v2.scheduler.shutdown(wait=True)
         v2.conn.close()

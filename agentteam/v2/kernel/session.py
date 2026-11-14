@@ -33,6 +33,10 @@ from agentteam.v2.domain.worker import WorkerDef
 from agentteam.v2.kernel.attention import AttentionNeeded, make_approval_gate_stage
 from agentteam.v2.kernel.pipeline import ToolPipeline, ToolContext, make_trace_stage
 from agentteam.v2.kernel.workspace import FILE_TOOL_NAMES, make_file_tools
+
+# A3 chain-of-recall: 触发压缩的估算 token 阈值(chars/4)与保留消息数
+_COMPACT_THRESHOLD_CHARS = 60_000
+_COMPACT_KEEP_LAST = 8
 from agentteam.v2.storage.attentions import AttentionRepo
 from agentteam.v2.storage.events import EventBus, EventRepo
 from agentteam.v2.storage.tickets import MessageRepo, SessionRepo
@@ -146,6 +150,8 @@ class WorkerSession:
         ref = ModelRef(**worker.model) if worker.model else \
             (default_model or ModelRef("qwen", "qwen-max"))
         self.llm = model_provider.get_llm(ref).bind_tools(self._tools)
+        # A3 摘要用无工具绑定的裸模型(避免摘要轮误触发工具调用)
+        self._plain_llm = model_provider.get_llm(ref)
 
         skills = skill_loader.load(worker.skills)
         skill_block = "\n\n".join(
@@ -180,13 +186,24 @@ class WorkerSession:
         )
 
     # —— 入口 ——
+    def _reload_messages(self, rows: list[dict]) -> list:
+        """transcript 行 → langchain 消息;A3 压缩摘要行排在原 system 之后。"""
+        msgs = [_message_from_row(r) for r in rows]
+        summaries = [m for m in msgs
+                     if isinstance(m, SystemMessage) and str(m.content).startswith("【历史压缩")]
+        if not summaries:
+            return msgs
+        rest = [m for m in msgs if m not in summaries]
+        head, tail = rest[:1], rest[1:]
+        return head + summaries + tail
+
     def run(self) -> SessionResult:
         """首次/续跑执行到终态或暂停。异常不外抛(转 failed + 事件)。"""
         try:
             rows = self.message_repo.list_for_session(self.session_id)
             resumed = bool(rows)
             if resumed:
-                messages = [_message_from_row(r) for r in rows]
+                messages = self._reload_messages(rows)
             else:
                 messages = [self._system_message, self._build_task_message()]
                 for m in messages:
@@ -207,7 +224,13 @@ class WorkerSession:
         """人工决定后恢复:按决定注入消息/执行工具,然后继续主循环。"""
         # 会话转回 running(与注入消息同事务语义:先 cas 再改 transcript)
         self.session_repo.cas_status(self.session_id, SessionStatus.WAITING_HUMAN, SessionStatus.RUNNING)
-        if attention["type"] == "approval" and decision == "approve":
+        if attention["type"] == "budget" and decision == "reject":
+            self.session_repo.cas_status(self.session_id, SessionStatus.RUNNING, SessionStatus.FAILED)
+            self._emit(ev.SESSION_ENDED, {"status": "failed", "error": "预算耗尽,人工选择终止"})
+            return SessionResult(status=SessionStatus.FAILED, error="预算耗尽,人工选择终止")
+        if attention["type"] == "budget":
+            pass  # approve: 预算已由 scheduler 加额落库;继续主循环
+        elif attention["type"] == "approval" and decision == "approve":
             # 授权延续:真正执行该工具(绕过审批门,但保留轨迹)
             result = self._execute_approved_tool(attention)
         elif attention["type"] == "approval":
@@ -291,6 +314,74 @@ class WorkerSession:
             "error": result.error,
         })
         return result
+
+    # —— A1 预算 / A3 压缩 ——
+    def _account_tokens(self, ai: AIMessage) -> None:
+        """从模型响应提取 usage 并累加(各 provider 字段名不一,宽容解析)。"""
+        usage = getattr(ai, "usage_metadata", None) or {}
+        meta = getattr(ai, "response_metadata", None) or {}
+        tin = int(usage.get("input_tokens") or meta.get("prompt_tokens") or 0)
+        tout = int(usage.get("output_tokens") or meta.get("completion_tokens") or 0)
+        if tin or tout:
+            self.session_repo.add_tokens(self.session_id, tin, tout)
+
+    def _budget_exceeded(self) -> bool:
+        if not self.ticket.budget_tokens:
+            return False
+        total = self.ticket_repo.ticket_tokens(self.ticket.id)
+        return total > self.ticket.budget_tokens
+
+    def _raise_budget_attention(self) -> SessionResult:
+        used = self.ticket_repo.ticket_tokens(self.ticket.id)
+        att = self.attention_repo.create(
+            self.ticket.id, self.session_id, "budget",
+            {"used": used, "limit": self.ticket.budget_tokens,
+             "decision_effect": "approve = 预算翻倍继续;reject = 终止工单"},
+        )
+        envelope = self.event_repo.insert(
+            self.ticket.id, ev.ATTENTION_CREATED, actor=self.worker.name,
+            session_id=self.session_id,
+            payload={"attention_id": att["id"], "type": "budget",
+                     "used": used, "limit": self.ticket.budget_tokens},
+        )
+        self.bus.publish(self.ticket.id, envelope)
+        self.session_repo.cas_status(self.session_id, SessionStatus.RUNNING, SessionStatus.WAITING_HUMAN)
+        return SessionResult(status=SessionStatus.WAITING_HUMAN, attention_id=att["id"])
+
+    def _maybe_compact(self, messages: list) -> None:
+        """A3 chain-of-recall:估算 token 超阈值 → 蒸馏旧轮次(失败静默跳过)。"""
+        chars = sum(len(str(m.content)) for m in messages)
+        if chars < _COMPACT_THRESHOLD_CHARS:
+            return
+        summary = self._summarize_history(messages)
+        if not summary:
+            return
+        if self.message_repo.compact(self.session_id, _COMPACT_KEEP_LAST, summary):
+            rows = self.message_repo.list_for_session(self.session_id)
+            messages[:] = self._reload_messages(rows)
+            self._emit(ev.SESSION_ITERATION, {"compacted": True, "summary": summary[:300]})
+
+    def _summarize_history(self, messages: list) -> str | None:
+        """轻量模型蒸馏:任务目标/已完成步骤/关键工件/重要决定。失败返回 None。"""
+        transcript = chr(10).join(
+            "[" + type(m).__name__ + "] " + str(m.content)[:400] for m in messages[-40:]
+        )
+        prompt = (
+            "压缩以下 agent 会话历史为要点(不超过300字),保留:任务目标、已完成步骤、"
+            "关键工件路径、重要决定。直接输出要点:" + chr(10) + transcript
+        )
+        try:
+            resp = self._plain_llm.invoke(prompt)
+            text = resp.content if isinstance(resp.content, str) else str(resp.content)
+            return text[:2000] or None
+        except Exception:
+            tools_used = []
+            for m in messages:
+                if isinstance(m, AIMessage) and m.tool_calls:
+                    tools_used += [tc["name"] for tc in m.tool_calls]
+            if not tools_used:
+                return None
+            return "会话曾调用工具: " + str(sorted(set(tools_used))) + "(原文已压缩)"
 
     # —— 工具执行 ——
     def _execute_tool(self, tc: dict) -> str:

@@ -181,6 +181,14 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
     ]),
     # v2: WorkerDef 增加 MCP 挂载(presets 迁移需要;与 v1 MCPServer dict 同构)
     (2, ["ALTER TABLE workers ADD COLUMN mcp_json TEXT NOT NULL DEFAULT '[]'"]),
+    # v3: 预算治理 + worktree + token 记账 + transcript 压缩
+    (3, [
+        "ALTER TABLE tickets ADD COLUMN repo_path TEXT",            # 关联 git 仓库(A2 worktree)
+        "ALTER TABLE tickets ADD COLUMN budget_tokens INTEGER NOT NULL DEFAULT 0",  # 0 = 不限额
+        "ALTER TABLE sessions ADD COLUMN tokens_in INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE sessions ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE messages ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0",     # chain-of-recall
+    ]),
 ]
 
 

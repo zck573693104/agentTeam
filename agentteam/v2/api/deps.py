@@ -115,6 +115,7 @@ def create_v2_components(
         evaluation_repo=evaluation_repo, eval_engine=eval_engine,
         event_repo=event_repo, bus=bus,
         submit_from_source=scheduler.submit_from_source,
+        fanout=scheduler.fan_out_thread,
     )
     # poll 型源骨架(github/feishu)随库配置注册;webhook 型由 HTTP 驱动不进 daemon
     from agentteam.v2.sources.daemon import SourceDaemon

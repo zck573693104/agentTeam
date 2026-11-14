@@ -42,18 +42,42 @@ function AttentionCard({
   };
 
   const isApproval = att.type === "approval";
+  const isBudget = att.type === "budget";
   return (
     <div className="at-panel at-panel-corners" style={{ padding: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-        <span className="at-tag" style={{ color: isApproval ? "var(--at-red)" : "var(--at-amber)" }}>
-          {isApproval ? "审批 APPROVAL" : "提问 QUESTION"}
+        <span className="at-tag" style={{
+          color: isApproval || isBudget ? "var(--at-red)" : "var(--at-amber)",
+        }}>
+          {isApproval ? "审批 APPROVAL" : isBudget ? "预算 BUDGET" : "提问 QUESTION"}
         </span>
         <Link to={`/v2/tickets/${att.ticket_id}`} className="at-link" style={{ fontSize: 12 }}>
           工单 {att.ticket_id.slice(0, 8)} ↗
         </Link>
       </div>
 
-      {isApproval ? (
+      {isBudget ? (
+        <>
+          <div style={{ fontSize: 14, marginBottom: 6 }}>
+            Worker 的 Token 预算已耗尽:
+            <span style={{ color: "var(--at-red)" }}>
+              {((att.payload.used ?? 0) as number).toLocaleString()}
+            </span>
+            {" / "}{((att.payload.limit ?? 0) as number).toLocaleString()}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--at-text-faint)", marginBottom: 10 }}>
+            {att.payload.decision_effect || "approve = 预算翻倍继续;reject = 终止工单"}
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button className="at-btn-amber" disabled={busy} onClick={() => decide("approve")}>
+              ✓ 追加预算继续
+            </button>
+            <Popconfirm title="终止工单?(已产出保留)" onConfirm={() => decide("reject")}>
+              <button className="at-link" style={{ color: "var(--at-red)" }}>✕ 终止</button>
+            </Popconfirm>
+          </div>
+        </>
+      ) : isApproval ? (
         <>
           <div style={{ fontSize: 14, marginBottom: 6 }}>
             Worker <b style={{ fontFamily: "var(--at-font-mono)" }}>{att.payload.worker}</b>{" "}
@@ -64,6 +88,23 @@ function AttentionCard({
             border: "1px solid var(--at-border)", whiteSpace: "pre-wrap", maxHeight: 180, overflow: "auto" }}>
             {JSON.stringify(att.payload.args || {}, null, 2)}
           </pre>
+          {att.payload.diff && (
+            <>
+              <div className="at-stat-label" style={{ marginBottom: 4 }}>变更预览 (unified diff)</div>
+              <pre style={{ fontSize: 12, padding: 10, margin: "0 0 10px", background: "var(--at-bg-deep)",
+                border: "1px solid var(--at-border)", fontFamily: "var(--at-font-mono)",
+                maxHeight: 220, overflow: "auto" }}>
+                {att.payload.diff.split("\n").map((line: string, i: number) => (
+                  <div key={i} style={{
+                    color: line.startsWith("+") && !line.startsWith("+++") ? "var(--at-green)"
+                      : line.startsWith("-") && !line.startsWith("---") ? "var(--at-red)"
+                        : line.startsWith("@@") ? "var(--at-cyan)" : "var(--at-text-dim)",
+                    whiteSpace: "pre-wrap", wordBreak: "break-all",
+                  }}>{line}</div>
+                ))}
+              </pre>
+            </>
+          )}
           <div style={{ fontSize: 12, color: "var(--at-text-faint)", marginBottom: 10 }}>
             {att.payload.decision_effect || "approve = 授权延续并执行;reject = 该操作终止"}
           </div>
@@ -109,7 +150,7 @@ function AttentionCard({
 }
 
 function DecidedList() {
-  const { data } = useFetch<V2Attention[]>("/api/v2/attentions?status=decided");
+  const { data } = useFetch<V2Attention[]>("/api/attentions?status=decided");
   if (!data?.length) {
     return <div style={{ color: "var(--at-text-faint)", fontSize: 13, padding: 20, textAlign: "center" }}>
       ◌ 暂无已决定记录
@@ -136,12 +177,12 @@ function DecidedList() {
 }
 
 export default function V2Attention() {
-  const { data, loading, refetch } = useFetch<V2Attention[]>("/api/v2/attentions?status=pending");
+  const { data, loading, refetch } = useFetch<V2Attention[]>("/api/attentions?status=pending");
 
   return (
     <div>
       <PageHeader
-        index="01 · V2 ATTENTION"
+        index="02 · V2 ATTENTION"
         title="注意件收件箱"
         subtitle="Human Inbox"
         action={

@@ -52,12 +52,12 @@ function ReviewRow({ ev, onConfirmed }: { ev: V2Evaluation; onConfirmed: () => v
 
 export default function V2Observe() {
   const { data, loading, refetch } = useFetch<V2Evaluation[]>(
-    "/api/v2/sources/observe/reviews",
+    "/api/sources/observe/reviews",
   );
   return (
     <div>
       <PageHeader
-        index="04 · V2 OBSERVE"
+        index="05 · V2 OBSERVE"
         title="观察模式"
         subtitle="Would-Accept Reviews"
         action={<button className="at-btn-amber" onClick={refetch}>⟳ 刷新</button>}

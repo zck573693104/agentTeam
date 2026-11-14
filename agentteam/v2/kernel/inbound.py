@@ -33,6 +33,7 @@ class InboundEngine:
         event_repo: EventRepo,
         bus: EventBus,
         submit_from_source,  # Scheduler.submit_request 的 inferred 封装
+        fanout=None,         # Scheduler.fan_out_thread(A4 双向 pass-through)
     ) -> None:
         self.sources = source_repo
         self.threads = thread_repo
@@ -41,6 +42,7 @@ class InboundEngine:
         self.events = event_repo
         self.bus = bus
         self._submit = submit_from_source
+        self._fanout = fanout
 
     def handle(self, source_name: str, trigger: Trigger) -> dict:
         """入站事件 → gate → Eval → (auto 立项 | would_accept 观察 | rejected)。
@@ -55,6 +57,10 @@ class InboundEngine:
         trig = self.threads.append_trigger(
             thread["id"], trigger.actor, trigger.text, raw=trigger.raw,
         )
+        # A4 双向 pass-through: 同线程活跃工单的 worker 直接收到此事件
+        # (独立于 gate/Eval 流程;终态工单自动跳过)
+        if self._fanout is not None:
+            self._fanout(thread["id"], trigger.text, trigger.actor)
 
         # —— gate 程序快筛(毫秒级,不进 LLM) ——
         gate = Gate(src["config"])

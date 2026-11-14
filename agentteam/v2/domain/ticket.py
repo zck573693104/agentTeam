@@ -19,6 +19,8 @@ class Ticket:
     status: TicketStatus
     worker_name: str | None = None
     thread_id: str | None = None
+    repo_path: str | None = None     # 关联 git 仓库(A2: workspace 升级为 worktree)
+    budget_tokens: int = 0           # Token 预算(A1);0 = 不限额,超限转 Attention
     mandate: Mandate | None = None
     result: str | None = None
     created_at: str | None = None
@@ -33,6 +35,8 @@ class Ticket:
             "status": self.status.value,
             "worker_name": self.worker_name,
             "thread_id": self.thread_id,
+            "repo_path": self.repo_path,
+            "budget_tokens": self.budget_tokens,
             "mandate": self.mandate.to_dict() if self.mandate else None,
             "result": self.result,
             "created_at": self.created_at,
