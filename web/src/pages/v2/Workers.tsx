@@ -1,7 +1,7 @@
 /**
- * V2 工人池(树状 UI):工人按组织架构树挂载展示(P6 org_nodes),层级深度无上限。
- * - 部门色带 + 层级导引线 + 节点折叠(深树导航)
- * - 卡片悬浮态、空组虚线占位;未挂载工人独立分区
+ * V2 工人池(树状 UI · 下钻式):不一次性渲染整棵树,逐层下钻。
+ * - 根视图 = 部门列表;点部门 → 看直属组;点组 → 看小组/该层挂载工人
+ * - 面包屑逐级返回;工人卡片挂在「当前所在层」
  * 树本体的增删改在 /v2/org(组织架构页);本页专注「人挂在哪」。
  */
 import { useEffect, useState } from "react";
@@ -21,33 +21,23 @@ const KIND_TAG: Record<string, { label: string; color: string }> = {
   team: { label: "小组", color: "var(--at-amber)" },
 };
 
-/* —— 树 UI 样式(伪元素/悬浮态无法用内联样式,集中在此) —— */
-const TREE_CSS = `
-.wk-children { border-left: 2px solid var(--at-border-soft); margin-left: 11px; }
-.wk-node-row { position: relative; }
-.wk-node-row::before { content: ""; position: absolute; left: -12px; top: 50%;
-  width: 10px; height: 2px; background: var(--at-border-soft); }
+/* 下钻 UI 样式(悬浮态无法用内联样式,集中在此) */
+const DRILL_CSS = `
 .wk-card { transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
   border: 1px solid transparent; }
 .wk-card:hover { border-color: var(--at-amber-dim); transform: translateY(-1px);
   box-shadow: 0 2px 10px rgba(0,0,0,.35); }
+.wk-drill-row { transition: background .12s ease; cursor: pointer; }
+.wk-drill-row:hover { background: var(--at-bg-hover); }
+.wk-crumb { cursor: pointer; font-family: var(--at-font-mono); font-size: 13px; }
+.wk-crumb:hover { color: var(--at-amber); }
 .wk-empty { border: 1px dashed var(--at-border); color: var(--at-text-faint);
   font-size: 12px; padding: 10px 14px; font-family: var(--at-font-mono); }
-.wk-toggle { width: 16px; height: 16px; line-height: 14px; text-align: center;
-  color: var(--at-text-faint); cursor: pointer; user-select: none;
-  border: 1px solid var(--at-border); font-size: 10px;
-  font-family: var(--at-font-mono); background: var(--at-bg-deep); }
-.wk-toggle:hover { color: var(--at-amber); border-color: var(--at-amber-dim); }
 `;
 
 function memberCount(node: V2OrgNode, workersByNode: Record<string, V2Worker[]>): number {
   return (workersByNode[node.id]?.length ?? 0)
     + node.children.reduce((acc, c) => acc + memberCount(c, workersByNode), 0);
-}
-
-function collectIds(nodes: V2OrgNode[], acc: Set<string> = new Set()): Set<string> {
-  for (const n of nodes) { acc.add(n.id); collectIds(n.children || [], acc); }
-  return acc;
 }
 
 function WorkerCard({ w, allNodes, onEdit, onChanged }: {
@@ -109,85 +99,124 @@ function WorkerCard({ w, allNodes, onEdit, onChanged }: {
   );
 }
 
-function TreeNode({
-  node,
-  depth,
+/** 下钻视图:只渲染当前层的直属工人 + 下一层子节点行(点行继续下钻)。 */
+function DrillView({
+  tree,
   workersByNode,
+  path,
+  onNavigate,
   allNodes,
-  collapsed,
-  onToggle,
   onEdit,
   onChanged,
 }: {
-  node: V2OrgNode;
-  depth: number;
+  tree: V2OrgNode[];
   workersByNode: Record<string, V2Worker[]>;
+  path: string[];
+  onNavigate: (path: string[]) => void;
   allNodes: { id: string; label: string }[];
-  collapsed: Set<string>;
-  onToggle: (id: string) => void;
   onEdit: (w: V2Worker) => void;
   onChanged: () => void;
 }) {
-  const members = workersByNode[node.id] || [];
-  const children = node.children || [];
-  const total = memberCount(node, workersByNode);
-  const isOpen = !collapsed.has(node.id);
-  const tag = KIND_TAG[node.kind] || { label: node.kind, color: "var(--at-cyan)" };
-  const isRoot = depth === 0;
+  const nodesById = new Map<string, V2OrgNode>();
+  const index = (nodes: V2OrgNode[]) => {
+    for (const n of nodes) { nodesById.set(n.id, n); index(n.children || []); }
+  };
+  index(tree);
 
-  const header = (
-    <div className="wk-node-row" style={{
-      display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
-      padding: isRoot ? "10px 12px" : "8px 10px",
-      marginTop: isRoot ? 0 : 2,
-      background: isRoot ? "var(--at-bg-elev)" : "transparent",
-      borderLeft: isRoot ? "3px solid var(--at-amber)" : undefined,
-      borderRadius: isRoot ? 3 : 0,
-    }}>
-      {children.length > 0 ? (
-        <span className="wk-toggle" onClick={() => onToggle(node.id)}>{isOpen ? "−" : "+"}</span>
-      ) : (
-        <span style={{ width: 16 }} />
-      )}
-      <b style={{ fontSize: isRoot ? 15 : 13.5, color: isRoot ? "var(--at-text)" : "var(--at-text-dim)" }}>
-        {node.name}
-      </b>
-      <span className="at-tag" style={{ color: tag.color, fontSize: 11 }}>{tag.label}</span>
-      <span style={{
-        marginLeft: "auto", fontSize: 11, fontFamily: "var(--at-font-mono)",
-        color: total > 0 ? "var(--at-text-faint)" : "var(--at-text-faint)",
-      }}>
-        {total > 0 ? `${total} 人` : "空"}
-      </span>
-    </div>
-  );
+  // 容错:路径上有节点已被删 → 截断到最近有效层
+  const effPath: string[] = [];
+  for (const id of path) {
+    const node = nodesById.get(id);
+    if (!node) break;
+    const parentOk = effPath.length === 0
+      ? node.parent_id === null
+      : node.parent_id === effPath[effPath.length - 1];
+    if (!parentOk) break;
+    effPath.push(id);
+  }
+  const current = effPath.length ? nodesById.get(effPath[effPath.length - 1]) : null;
+  const children = current ? current.children || [] : tree;
+  const members = current ? (workersByNode[current.id] || []) : [];
+  const kindTag = current ? (KIND_TAG[current.kind] || { label: current.kind, color: "var(--at-cyan)" }) : null;
 
   return (
-    <div>
-      {header}
-      {isOpen && (
-        <>
-          <div style={{
-            marginLeft: depth === 0 ? 0 : (depth + 1) * 18,
-            display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))",
-            gap: 10, padding: "4px 10px 8px 14px",
-          }}>
-            {members.map((w) => (
-              <WorkerCard key={w.name} w={w} allNodes={allNodes} onEdit={onEdit} onChanged={onChanged} />
-            ))}
-            {members.length === 0 && children.length === 0 && (
-              <div className="wk-empty">◌ 空组 · 卡片可从下方「未挂载」换挂进来</div>
-            )}
+    <div className="at-panel at-panel-corners" style={{ padding: "12px 16px 16px" }}>
+      {/* 面包屑 */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        <span className="wk-crumb" style={{ color: effPath.length === 0 ? "var(--at-amber)" : "var(--at-text-faint)" }}
+          onClick={() => onNavigate([])}>▣ 全部部门</span>
+        {effPath.map((id, i) => {
+          const n = nodesById.get(id)!;
+          const isLast = i === effPath.length - 1;
+          return (
+            <span key={id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ color: "var(--at-text-faint)" }}>›</span>
+              <span className="wk-crumb"
+                style={{ color: isLast ? "var(--at-amber)" : "var(--at-text-faint)",
+                         fontWeight: isLast ? 600 : 400 }}
+                onClick={() => onNavigate(effPath.slice(0, i + 1))}>{n.name}</span>
+            </span>
+          );
+        })}
+        {current && (
+          <span style={{ marginLeft: 8, display: "flex", gap: 8, alignItems: "center" }}>
+            <span className="at-tag" style={{ color: kindTag!.color, fontSize: 11 }}>{kindTag!.label}</span>
+            <span style={{ fontSize: 11, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)" }}>
+              直挂 {members.length} · 下辖 {children.length} · 共 {memberCount(current, workersByNode)} 人
+            </span>
+          </span>
+        )}
+      </div>
+
+      {/* 当前层的直属工人 */}
+      <div style={{
+        display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))",
+        gap: 10, marginBottom: children.length > 0 ? 14 : 0,
+      }}>
+        {members.map((w) => (
+          <WorkerCard key={w.name} w={w} allNodes={allNodes} onEdit={onEdit} onChanged={onChanged} />
+        ))}
+      </div>
+
+      {/* 下一层子节点(点行下钻) */}
+      {children.length > 0 && (
+        <div style={{ borderTop: "1px solid var(--at-border-soft)", paddingTop: 8 }}>
+          <div className="at-stat-label" style={{ marginBottom: 6 }}>
+            {current ? `「${current.name}」下辖` : "选择部门进入"}
           </div>
-          <div className={children.length > 0 && depth >= 0 ? "wk-children" : ""}
-            style={{ marginLeft: depth === 0 ? 10 : 10 }}>
-            {children.map((c) => (
-              <TreeNode key={c.id} node={c} depth={depth + 1} workersByNode={workersByNode}
-                allNodes={allNodes} collapsed={collapsed} onToggle={onToggle}
-                onEdit={onEdit} onChanged={onChanged} />
-            ))}
-          </div>
-        </>
+          {children.map((c) => {
+            const direct = (workersByNode[c.id]?.length ?? 0);
+            const total = memberCount(c, workersByNode);
+            const tag = KIND_TAG[c.kind] || { label: c.kind, color: "var(--at-cyan)" };
+            return (
+              <div key={c.id} className="wk-drill-row" style={{
+                display: "flex", alignItems: "center", gap: 10,
+                padding: "9px 12px", borderBottom: "1px solid var(--at-border-soft)",
+              }} onClick={() => onNavigate([...effPath, c.id])}>
+                <span style={{ color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 12 }}>▸</span>
+                <b style={{ fontSize: 13.5 }}>{c.name}</b>
+                <span className="at-tag" style={{ color: tag.color, fontSize: 11 }}>{tag.label}</span>
+                <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)" }}>
+                  {total > 0 ? `直挂 ${direct} · 共 ${total} 人` : "空"}
+                </span>
+                <span style={{ color: "var(--at-text-faint)", fontSize: 12 }}>›</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* 空态 */}
+      {children.length === 0 && members.length === 0 && (
+        <div className="wk-empty" style={{ textAlign: "center", padding: 24 }}>
+          {current ? `「${current.name}」为叶子节点且无挂载工人 — 可在本页添加工人时选此节点,或在组织架构页加子级`
+            : "◌ 尚无组织节点 — 去「组织架构」页新增根部门"}
+        </div>
+      )}
+      {children.length === 0 && members.length > 0 && (
+        <div style={{ fontSize: 11, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", marginTop: 10 }}>
+          ▤ 已是最深层 · 以上为该节点全部挂载工人
+        </div>
       )}
     </div>
   );
@@ -277,7 +306,7 @@ function WorkerModal({ open, editing, nodeOptions, onClose, onDone }: {
             <InputNumber min={1} max={50} style={{ width: "100%" }} />
           </Form.Item>
           <Form.Item name="org_node_id" label="所属组织节点" style={{ flex: 1 }}>
-            <Select allowClear placeholder="可选;树状展示挂载位置"
+            <Select allowClear placeholder="可选;挂载到组织树任意层级"
               options={nodeOptions.map((n) => ({ value: n.id, label: n.label }))} />
           </Form.Item>
         </div>
@@ -313,19 +342,11 @@ export default function V2Workers() {
   const { data: workers, loading: wkLoading, refetch: refetchWorkers } = useFetch<V2Worker[]>("/api/workers");
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<V2Worker | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [path, setPath] = useState<string[]>([]);   // 下钻路径:根视图 = []
 
   const refetch = () => { refetchOrg(); refetchWorkers(); };
-  const toggle = (id: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  };
-  const allIds = collectIds(orgData?.tree || []);
 
-  // 树扁平化(编辑弹窗的所属节点选项,缩进表示层级)
+  // 树扁平化(编辑弹窗/换挂的所属节点选项,缩进表示层级)
   const nodeOptions: { id: string; label: string }[] = [];
   const flatten = (nodes: V2OrgNode[], depth: number) => {
     for (const n of nodes) {
@@ -343,21 +364,15 @@ export default function V2Workers() {
 
   return (
     <div>
-      <style>{TREE_CSS}</style>
+      <style>{DRILL_CSS}</style>
       <PageHeader
         index="06 · V2 WORKERS"
         title="工人池"
-        subtitle="Worker Pool · 组织树"
+        subtitle="Worker Pool · 逐层下钻"
         action={
-          <span style={{ display: "flex", gap: 10 }}>
-            <button className="at-link" style={{ fontSize: 12 }}
-              onClick={() => setCollapsed(new Set())}>展开全部</button>
-            <button className="at-link" style={{ fontSize: 12 }}
-              onClick={() => setCollapsed(new Set(allIds))}>收起全部</button>
-            <button className="at-btn-amber" onClick={() => { setEditing(null); setModalOpen(true); }}>
-              + 添加 worker
-            </button>
-          </span>
+          <button className="at-btn-amber" onClick={() => { setEditing(null); setModalOpen(true); }}>
+            + 添加 worker
+          </button>
         }
       />
       {loading && !orgData && (
@@ -366,21 +381,15 @@ export default function V2Workers() {
         </div>
       )}
       {orgData && (
-        <div className="at-panel at-panel-corners" style={{ padding: "8px 14px 12px" }}>
-          {(orgData.tree || []).map((n, i) => (
-            <div key={n.id} style={{ marginTop: i > 0 ? 10 : 0 }}>
-              <TreeNode node={n} depth={0} workersByNode={orgData.workers_by_node || {}}
-                allNodes={nodeOptions} collapsed={collapsed} onToggle={toggle}
-                onEdit={(w) => { setEditing(w); setModalOpen(true); }}
-                onChanged={refetch} />
-            </div>
-          ))}
-          {(orgData.tree || []).length === 0 && (
-            <div className="wk-empty" style={{ textAlign: "center", padding: 24 }}>
-              ◌ 尚无组织节点 — 去「组织架构」页新增根部门,或直接添加工人(落未挂载区)
-            </div>
-          )}
-        </div>
+        <DrillView
+          tree={orgData.tree || []}
+          workersByNode={orgData.workers_by_node || {}}
+          path={path}
+          onNavigate={setPath}
+          allNodes={nodeOptions}
+          onEdit={(w) => { setEditing(w); setModalOpen(true); }}
+          onChanged={refetch}
+        />
       )}
       {/* 未挂载工人 */}
       {orgData && unattached.length > 0 && (
