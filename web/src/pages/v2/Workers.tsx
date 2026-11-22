@@ -189,16 +189,19 @@ function WorkerCard({ w, allNodes, onEdit, onAssign, onChanged }: {
   );
 }
 
-/** 下钻视图:只渲染当前层的直属工人 + 下一层子节点行(点行继续下钻)。 */
+/** 下钻视图:只渲染当前层的直属工人 + 下一层子节点行(点行继续下钻)。
+ * 每个节点(当前层与子行)都可 ＋挂人(选已有工人)/ ＋新人(弹窗预选所属节点)。 */
 function DrillView({
   tree,
   workersByNode,
   path,
   onNavigate,
   allNodes,
+  allWorkers,
   onEdit,
   onAssignWorker,
   onAssignNode,
+  onNewWorker,
   onChanged,
 }: {
   tree: V2OrgNode[];
@@ -206,9 +209,11 @@ function DrillView({
   path: string[];
   onNavigate: (path: string[]) => void;
   allNodes: { id: string; label: string }[];
+  allWorkers: V2Worker[];
   onEdit: (w: V2Worker) => void;
   onAssignWorker: (w: V2Worker) => void;
   onAssignNode: (n: { id: string; name: string }) => void;
+  onNewWorker: (nodeId: string) => void;
   onChanged: () => void;
 }) {
   const nodesById = new Map<string, V2OrgNode>();
@@ -216,6 +221,28 @@ function DrillView({
     for (const n of nodes) { nodesById.set(n.id, n); index(n.children || []); }
   };
   index(tree);
+  const [pickerNode, setPickerNode] = useState<string | null>(null);  // 正在挂人的节点
+  const [busy, setBusy] = useState(false);
+
+  const attach = (nodeId: string, nodeName: string, workerName: string | undefined) => {
+    if (!workerName) return;
+    setBusy(true);
+    const w = allWorkers.find((x) => x.name === workerName);
+    if (!w) { setBusy(false); return; }
+    v2Put(`/workers/${workerName}`, { ...w, org_node_id: nodeId })
+      .then(() => { message.success(`已挂载 ${workerName} → ${nodeName}`); onChanged(); })
+      .catch((e) => message.error((e as Error).message))
+      .finally(() => { setBusy(false); setPickerNode(null); });
+  };
+  const attachSelect = (nodeId: string, nodeName: string, members: V2Worker[]) => (
+    <Select size="small" style={{ minWidth: 140 }} autoFocus placeholder="选择工人…"
+      value={undefined} disabled={busy}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(name) => attach(nodeId, nodeName, name)}
+      options={allWorkers
+        .filter((w) => !members.some((m) => m.name === w.name))
+        .map((w) => ({ value: w.name, label: w.name }))} />
+  );
 
   // 容错:路径上有节点已被删 → 截断到最近有效层
   const effPath: string[] = [];
@@ -258,6 +285,16 @@ function DrillView({
             <span style={{ fontSize: 11, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)" }}>
               直挂 {members.length} · 下辖 {children.length} · 共 {memberCount(current, workersByNode)} 人
             </span>
+            {pickerNode === current.id ? (
+              attachSelect(current.id, current.name, members)
+            ) : (
+              <>
+                <button className="at-link" style={{ color: "var(--at-green)", fontSize: 12 }}
+                  onClick={() => setPickerNode(current.id)}>＋挂人</button>
+                <button className="at-link" style={{ fontSize: 12 }}
+                  onClick={() => onNewWorker(current.id)}>＋新人</button>
+              </>
+            )}
           </span>
         )}
       </div>
@@ -293,6 +330,16 @@ function DrillView({
                 <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)" }}>
                   {total > 0 ? `直挂 ${direct} · 共 ${total} 人` : "空"}
                 </span>
+                {pickerNode === c.id ? (
+                  attachSelect(c.id, c.name, workersByNode[c.id] || [])
+                ) : (
+                  <>
+                    <button className="at-link" style={{ color: "var(--at-green)", fontSize: 12 }}
+                      onClick={(e) => { e.stopPropagation(); setPickerNode(c.id); }}>＋挂人</button>
+                    <button className="at-link" style={{ fontSize: 12 }}
+                      onClick={(e) => { e.stopPropagation(); onNewWorker(c.id); }}>＋新人</button>
+                  </>
+                )}
                 <button className="at-link" style={{ color: "var(--at-green)", fontSize: 12 }}
                   onClick={(e) => { e.stopPropagation(); onAssignNode({ id: c.id, name: c.name }); }}>
                   📋 指派
@@ -320,10 +367,11 @@ function DrillView({
   );
 }
 
-function WorkerModal({ open, editing, nodeOptions, onClose, onDone }: {
+function WorkerModal({ open, editing, nodeOptions, initialNode, onClose, onDone }: {
   open: boolean;
   editing: V2Worker | null;
   nodeOptions: { id: string; label: string }[];
+  initialNode?: string | null;
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -367,7 +415,7 @@ function WorkerModal({ open, editing, nodeOptions, onClose, onDone }: {
     }
   };
 
-  // 打开时回填(编辑模式;新建清空)
+  // 打开时回填(编辑模式;新建清空,预选指定节点)
   useEffect(() => {
     if (!open) return;
     if (editing) {
@@ -379,8 +427,9 @@ function WorkerModal({ open, editing, nodeOptions, onClose, onDone }: {
       });
     } else {
       form.resetFields();
+      if (initialNode) form.setFieldValue("org_node_id", initialNode);
     }
-  }, [open, editing, form]);
+  }, [open, editing, form, initialNode]);
 
   return (
     <Modal
@@ -440,6 +489,7 @@ export default function V2Workers() {
   const { data: workers, loading: wkLoading, refetch: refetchWorkers } = useFetch<V2Worker[]>("/api/workers");
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<V2Worker | null>(null);
+  const [newNode, setNewNode] = useState<string | null>(null);   // ＋新人:预选所属节点
   const [assignTarget, setAssignTarget] = useState<
     { worker?: V2Worker; node?: { id: string; name: string } } | null>(null);
   const [path, setPath] = useState<string[]>([]);   // 下钻路径:根视图 = []
@@ -487,9 +537,11 @@ export default function V2Workers() {
           path={path}
           onNavigate={setPath}
           allNodes={nodeOptions}
+          allWorkers={workers || []}
           onEdit={(w) => { setEditing(w); setModalOpen(true); }}
           onAssignWorker={(w) => setAssignTarget({ worker: w })}
           onAssignNode={(n) => setAssignTarget({ node: n })}
+          onNewWorker={(nodeId) => { setEditing(null); setNewNode(nodeId); setModalOpen(true); }}
           onChanged={refetch}
         />
       )}
@@ -515,8 +567,9 @@ export default function V2Workers() {
         open={modalOpen}
         editing={editing}
         nodeOptions={nodeOptions}
-        onClose={() => { setModalOpen(false); setEditing(null); }}
-        onDone={() => { setModalOpen(false); setEditing(null); refetch(); }}
+        initialNode={newNode}
+        onClose={() => { setModalOpen(false); setEditing(null); setNewNode(null); }}
+        onDone={() => { setModalOpen(false); setEditing(null); setNewNode(null); refetch(); }}
       />
       <AssignModal target={assignTarget} onClose={() => setAssignTarget(null)} />
     </div>
