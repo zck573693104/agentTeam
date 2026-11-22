@@ -5,6 +5,7 @@
  * 树本体的增删改在 /v2/org(组织架构页);本页专注「人挂在哪」。
  */
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { Form, Input, InputNumber, Modal, Popconfirm, Select, message } from "antd";
 import { useFetch } from "../../hooks/useFetch";
 import { v2Delete, v2Post, v2Put, type V2OrgNode, type V2Worker } from "../../api/v2";
@@ -40,10 +41,90 @@ function memberCount(node: V2OrgNode, workersByNode: Record<string, V2Worker[]>)
     + node.children.reduce((acc, c) => acc + memberCount(c, workersByNode), 0);
 }
 
-function WorkerCard({ w, allNodes, onEdit, onChanged }: {
+/** 指派弹窗:定向派工(explicit worker,绕过 Router 直达该工人)。 */
+function AssignModal({ worker, onClose }: {
+  worker: V2Worker | null;
+  onClose: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ticket_id: string; note: string } | null>(null);
+
+  const submit = async () => {
+    if (!text.trim() || !worker) return;
+    setBusy(true);
+    try {
+      const r = await v2Post<{ action: string; ticket_id?: string; note?: string }>(
+        "/requests", { text: text.trim(), worker_name: worker.name });
+      if (r.action === "dispatch" && r.ticket_id) {
+        setResult({ ticket_id: r.ticket_id, note: r.note || "" });
+        setText("");
+        message.success(`已派给 ${worker.name}`);
+      } else {
+        message.info("请求被 Router 直接答复,未生成工单");
+        onClose();
+      }
+    } catch (e) {
+      message.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title={`指派任务 → ${worker?.name ?? ""}`}
+      open={!!worker}
+      onCancel={onClose}
+      footer={result ? [
+        <button key="again" className="at-btn-amber" onClick={() => setResult(null)}>再派一条</button>,
+        <button key="done" className="at-link" onClick={onClose}>完成</button>,
+      ] : [
+        <button key="cancel" className="at-link" onClick={onClose}>取消</button>,
+        <button key="ok" className="at-btn-amber" disabled={busy || !text.trim()} onClick={submit}>
+          {busy ? "派工中…" : "确认派工"}
+        </button>,
+      ]}
+      width={560}
+      destroyOnHidden
+    >
+      {result ? (
+        <div style={{ padding: "10px 4px" }}>
+          <div style={{ fontSize: 14, marginBottom: 10 }}>
+            ✓ 工单已建立:<b style={{ fontFamily: "var(--at-font-mono)" }}>
+              {result.ticket_id.slice(0, 10)}
+            </b>
+            {result.note && (
+              <span style={{ fontSize: 12, color: "var(--at-text-faint)" }}> — {result.note}</span>
+            )}
+          </div>
+          <Link to={`/v2/tickets/${result.ticket_id}`} className="at-link" onClick={onClose}>
+            → 查看工单详情
+          </Link>
+          <div style={{ fontSize: 12, color: "var(--at-text-faint)", marginTop: 10 }}>
+            工单将在后台执行;执行状态见工单看板(需模型 Key;未配置时该工单落为 failed)。
+          </div>
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 13, color: "var(--at-text-dim)", marginBottom: 10 }}>
+            任务将<b>定向派给 <span style={{ fontFamily: "var(--at-font-mono)", color: "var(--at-amber)" }}>{worker?.name}</span></b>
+            (不经过 Router 分派);完成后从工单轨迹汇报。
+          </div>
+          <Input.TextArea autoSize={{ minRows: 4, maxRows: 8 }}
+            placeholder="任务描述 + 验收标准。例:核对本月各部门工单处理量,输出汇总表,数字需附来源与统计周期。"
+            value={text} onChange={(e) => setText(e.target.value)} />
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function WorkerCard({ w, allNodes, onEdit, onAssign, onChanged }: {
   w: V2Worker;
   allNodes: { id: string; label: string }[];
   onEdit: (w: V2Worker) => void;
+  onAssign: (w: V2Worker) => void;
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -66,6 +147,8 @@ function WorkerCard({ w, allNodes, onEdit, onChanged }: {
           {w.name}
         </span>
         <span style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+          <button className="at-link" style={{ color: "var(--at-green)" }}
+            onClick={(e) => { e.stopPropagation(); onAssign(w); }}>📋 指派</button>
           <button className="at-link" onClick={(e) => { e.stopPropagation(); onEdit(w); }}>✎ 编辑</button>
           <Popconfirm title={`删除 worker ${w.name}?`} onConfirm={(e) => { e?.stopPropagation(); remove(); }}
             onCancel={(e) => e?.stopPropagation()}>
@@ -107,6 +190,7 @@ function DrillView({
   onNavigate,
   allNodes,
   onEdit,
+  onAssign,
   onChanged,
 }: {
   tree: V2OrgNode[];
@@ -115,6 +199,7 @@ function DrillView({
   onNavigate: (path: string[]) => void;
   allNodes: { id: string; label: string }[];
   onEdit: (w: V2Worker) => void;
+  onAssign: (w: V2Worker) => void;
   onChanged: () => void;
 }) {
   const nodesById = new Map<string, V2OrgNode>();
@@ -174,7 +259,7 @@ function DrillView({
         gap: 10, marginBottom: children.length > 0 ? 14 : 0,
       }}>
         {members.map((w) => (
-          <WorkerCard key={w.name} w={w} allNodes={allNodes} onEdit={onEdit} onChanged={onChanged} />
+          <WorkerCard key={w.name} w={w} allNodes={allNodes} onEdit={onEdit} onAssign={onAssign} onChanged={onChanged} />
         ))}
       </div>
 
@@ -342,6 +427,7 @@ export default function V2Workers() {
   const { data: workers, loading: wkLoading, refetch: refetchWorkers } = useFetch<V2Worker[]>("/api/workers");
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<V2Worker | null>(null);
+  const [assignFor, setAssignFor] = useState<V2Worker | null>(null);
   const [path, setPath] = useState<string[]>([]);   // 下钻路径:根视图 = []
 
   const refetch = () => { refetchOrg(); refetchWorkers(); };
@@ -388,6 +474,7 @@ export default function V2Workers() {
           onNavigate={setPath}
           allNodes={nodeOptions}
           onEdit={(w) => { setEditing(w); setModalOpen(true); }}
+          onAssign={setAssignFor}
           onChanged={refetch}
         />
       )}
@@ -403,7 +490,8 @@ export default function V2Workers() {
           }}>
             {unattached.map((w) => (
               <WorkerCard key={w.name} w={w} allNodes={nodeOptions}
-                onEdit={(x) => { setEditing(x); setModalOpen(true); }} onChanged={refetch} />
+                onEdit={(x) => { setEditing(x); setModalOpen(true); }}
+                onAssign={setAssignFor} onChanged={refetch} />
             ))}
           </div>
         </div>
@@ -415,6 +503,7 @@ export default function V2Workers() {
         onClose={() => { setModalOpen(false); setEditing(null); }}
         onDone={() => { setModalOpen(false); setEditing(null); refetch(); }}
       />
+      <AssignModal worker={assignFor} onClose={() => setAssignFor(null)} />
     </div>
   );
 }
