@@ -26,6 +26,7 @@ def tickets_router(v2: V2Components) -> APIRouter:
                 thread_id=body.get("thread_id"),
                 repo_path=body.get("repo_path"),
                 budget_tokens=int(body.get("budget_tokens") or 0),
+                org_node=body.get("org_node"),
             )
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))

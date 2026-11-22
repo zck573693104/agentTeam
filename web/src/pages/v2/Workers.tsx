@@ -41,25 +41,31 @@ function memberCount(node: V2OrgNode, workersByNode: Record<string, V2Worker[]>)
     + node.children.reduce((acc, c) => acc + memberCount(c, workersByNode), 0);
 }
 
-/** 指派弹窗:定向派工(explicit worker,绕过 Router 直达该工人)。 */
-function AssignModal({ worker, onClose }: {
-  worker: V2Worker | null;
+/** 指派弹窗:worker 模式 = 定向派工(绕过 Router);node 模式 = 按组派工(Router 组内选人)。 */
+function AssignModal({ target, onClose }: {
+  target: { worker?: V2Worker; node?: { id: string; name: string } } | null;
   onClose: () => void;
 }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ticket_id: string; note: string } | null>(null);
+  const open = !!target?.worker || !!target?.node;
+  const title = target?.worker ? `指派任务 → ${target.worker.name}`
+    : target?.node ? `指派任务 → 「${target.node.name}」(组内选人)` : "指派任务";
 
   const submit = async () => {
-    if (!text.trim() || !worker) return;
+    if (!text.trim() || !target) return;
+    const body = target.worker
+      ? { text: text.trim(), worker_name: target.worker.name }
+      : { text: text.trim(), org_node: target.node!.id };
     setBusy(true);
     try {
       const r = await v2Post<{ action: string; ticket_id?: string; note?: string }>(
-        "/requests", { text: text.trim(), worker_name: worker.name });
+        "/requests", body);
       if (r.action === "dispatch" && r.ticket_id) {
         setResult({ ticket_id: r.ticket_id, note: r.note || "" });
         setText("");
-        message.success(`已派给 ${worker.name}`);
+        message.success(target.worker ? `已派给 ${target.worker.name}` : `已派给「${target.node!.name}」`);
       } else {
         message.info("请求被 Router 直接答复,未生成工单");
         onClose();
@@ -73,8 +79,8 @@ function AssignModal({ worker, onClose }: {
 
   return (
     <Modal
-      title={`指派任务 → ${worker?.name ?? ""}`}
-      open={!!worker}
+      title={title}
+      open={open}
       onCancel={onClose}
       footer={result ? [
         <button key="again" className="at-btn-amber" onClick={() => setResult(null)}>再派一条</button>,
@@ -108,8 +114,9 @@ function AssignModal({ worker, onClose }: {
       ) : (
         <>
           <div style={{ fontSize: 13, color: "var(--at-text-dim)", marginBottom: 10 }}>
-            任务将<b>定向派给 <span style={{ fontFamily: "var(--at-font-mono)", color: "var(--at-amber)" }}>{worker?.name}</span></b>
-            (不经过 Router 分派);完成后从工单轨迹汇报。
+            {target?.worker
+              ? <>任务将<b>定向派给 <span style={{ fontFamily: "var(--at-font-mono)", color: "var(--at-amber)" }}>{target.worker.name}</span></b>(不经过 Router 分派);完成后从工单轨迹汇报。</>
+              : <>任务将派给<b style={{ color: "var(--at-amber)" }}>「{target?.node?.name}」</b>——Router 依据组织架构在该组内选人执行(可越过多层)。</>}
           </div>
           <Input.TextArea autoSize={{ minRows: 4, maxRows: 8 }}
             placeholder="任务描述 + 验收标准。例:核对本月各部门工单处理量,输出汇总表,数字需附来源与统计周期。"
@@ -190,7 +197,8 @@ function DrillView({
   onNavigate,
   allNodes,
   onEdit,
-  onAssign,
+  onAssignWorker,
+  onAssignNode,
   onChanged,
 }: {
   tree: V2OrgNode[];
@@ -199,7 +207,8 @@ function DrillView({
   onNavigate: (path: string[]) => void;
   allNodes: { id: string; label: string }[];
   onEdit: (w: V2Worker) => void;
-  onAssign: (w: V2Worker) => void;
+  onAssignWorker: (w: V2Worker) => void;
+  onAssignNode: (n: { id: string; name: string }) => void;
   onChanged: () => void;
 }) {
   const nodesById = new Map<string, V2OrgNode>();
@@ -259,7 +268,7 @@ function DrillView({
         gap: 10, marginBottom: children.length > 0 ? 14 : 0,
       }}>
         {members.map((w) => (
-          <WorkerCard key={w.name} w={w} allNodes={allNodes} onEdit={onEdit} onAssign={onAssign} onChanged={onChanged} />
+          <WorkerCard key={w.name} w={w} allNodes={allNodes} onEdit={onEdit} onAssign={onAssignWorker} onChanged={onChanged} />
         ))}
       </div>
 
@@ -284,6 +293,10 @@ function DrillView({
                 <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)" }}>
                   {total > 0 ? `直挂 ${direct} · 共 ${total} 人` : "空"}
                 </span>
+                <button className="at-link" style={{ color: "var(--at-green)", fontSize: 12 }}
+                  onClick={(e) => { e.stopPropagation(); onAssignNode({ id: c.id, name: c.name }); }}>
+                  📋 指派
+                </button>
                 <span style={{ color: "var(--at-text-faint)", fontSize: 12 }}>›</span>
               </div>
             );
@@ -427,7 +440,8 @@ export default function V2Workers() {
   const { data: workers, loading: wkLoading, refetch: refetchWorkers } = useFetch<V2Worker[]>("/api/workers");
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<V2Worker | null>(null);
-  const [assignFor, setAssignFor] = useState<V2Worker | null>(null);
+  const [assignTarget, setAssignTarget] = useState<
+    { worker?: V2Worker; node?: { id: string; name: string } } | null>(null);
   const [path, setPath] = useState<string[]>([]);   // 下钻路径:根视图 = []
 
   const refetch = () => { refetchOrg(); refetchWorkers(); };
@@ -474,7 +488,8 @@ export default function V2Workers() {
           onNavigate={setPath}
           allNodes={nodeOptions}
           onEdit={(w) => { setEditing(w); setModalOpen(true); }}
-          onAssign={setAssignFor}
+          onAssignWorker={(w) => setAssignTarget({ worker: w })}
+          onAssignNode={(n) => setAssignTarget({ node: n })}
           onChanged={refetch}
         />
       )}
@@ -491,7 +506,7 @@ export default function V2Workers() {
             {unattached.map((w) => (
               <WorkerCard key={w.name} w={w} allNodes={nodeOptions}
                 onEdit={(x) => { setEditing(x); setModalOpen(true); }}
-                onAssign={setAssignFor} onChanged={refetch} />
+                onAssign={(x) => setAssignTarget({ worker: x })} onChanged={refetch} />
             ))}
           </div>
         </div>
@@ -503,7 +518,7 @@ export default function V2Workers() {
         onClose={() => { setModalOpen(false); setEditing(null); }}
         onDone={() => { setModalOpen(false); setEditing(null); refetch(); }}
       />
-      <AssignModal worker={assignFor} onClose={() => setAssignFor(null)} />
+      <AssignModal target={assignTarget} onClose={() => setAssignTarget(null)} />
     </div>
   );
 }

@@ -100,6 +100,39 @@ class OrgRepo(BaseSqliteRepo):
         )
         return {r["parent_id"]: r["n"] for r in rows}
 
+    def subtree_ids(self, node_id: str) -> list[str]:
+        """节点自身 + 全部子孙 id(按组派工的候选人范围;深度无上限)。"""
+        out: list[str] = []
+        frontier = [node_id]
+        while frontier:
+            batch = tuple(frontier)
+            out.extend(batch)
+            marks = ",".join("?" * len(batch))
+            rows = self._fetchall(
+                f"SELECT id FROM org_nodes WHERE parent_id IN ({marks})", batch,
+            )
+            frontier = [r["id"] for r in rows]
+        return out
+
+    def path_names(self, node_id: str) -> list[str]:
+        """从根到该节点的名称链;节点不存在 → []。"""
+        return [n["name"] for n in self.path_nodes(node_id)]
+
+    def path_nodes(self, node_id: str) -> list[dict]:
+        """从根到该节点的节点字典链(工人组织身份展示用);节点不存在 → []。"""
+        names: list[dict] = []
+        current: str | None = node_id
+        seen: set[str] = set()
+        while current and current not in seen:
+            seen.add(current)
+            row = self.get(current)
+            if row is None:
+                break
+            names.append(row)
+            current = row["parent_id"]
+        names.reverse()
+        return names
+
     def tree(self) -> list[dict]:
         """全量组嵌套(任意深度);节点附 children 列表。返回根节点列表。"""
         nodes = self.list_all()

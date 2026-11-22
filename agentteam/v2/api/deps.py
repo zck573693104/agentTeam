@@ -130,7 +130,7 @@ def create_v2_components(
         thread_repo=thread_repo, subscription_repo=subscription_repo,
         outbox_repo=outbox_repo if notify_webhook_url else None,
         notify_webhook_url=notify_webhook_url, console_url=console_url,
-        memory_store=memory_store,
+        memory_store=memory_store, org_repo=org_repo,
     )
     if memory_store is not None and postmortem_enabled:
         # P5 工作区归档回调(终态工单只增不减的欠账;sleep-time 角色顺带保洁)

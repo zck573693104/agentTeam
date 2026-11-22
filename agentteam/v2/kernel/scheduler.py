@@ -75,6 +75,7 @@ class Scheduler:
         console_url: str = "",
         memory_store=None,          # MemoryStore | None(P4 记忆;None = 停用)
         postmortem=None,            # PostmortemEngine | None(P4 复盘;None = 停用)
+        org_repo=None,              # OrgRepo | None(P6 组织树;None = 不参与派工)
     ) -> None:
         self.tickets = ticket_repo
         self.sessions = session_repo
@@ -93,9 +94,11 @@ class Scheduler:
         self.skill_loader = skill_loader
         self.memory_store = memory_store
         self.postmortem = postmortem
+        self.org_repo = org_repo
         self.workspaces = WorkspaceManager(workspace_root)
         self.default_model = default_model
-        self.router = Router(model_provider, default_model, memory_store=memory_store)
+        self.router = Router(model_provider, default_model, memory_store=memory_store,
+                             org_digest_fn=self._org_digest)
         self._pool = ThreadPoolExecutor(
             max_workers=max_session_workers, thread_name_prefix="v2-session",
         )
@@ -145,14 +148,24 @@ class Scheduler:
         worker_name: str | None = None, thread_id: str | None = None,
         mandate_basis: str = "explicit",
         repo_path: str | None = None, budget_tokens: int = 0,
+        org_node: str | None = None,
     ) -> dict:
         """人/Source 的请求入口:Router 决策 → Ticket(pending) → 入队。
 
-        mandate_basis: explicit(人经 API) | inferred(Source 入站 Eval 立项)。"""
+        mandate_basis: explicit(人经 API) | inferred(Source 入站 Eval 立项)。
+        org_node(P6): 指定组织节点 → Router 只在该节点子树成员中选人(按组派工)。"""
         text = (text or "").strip()
         if not text:
             raise ValueError("request text is empty")
-        decision = self.router.decide(text, self.workers.list_all(),
+        candidates = self.workers.list_all()
+        if org_node:
+            if self.org_repo is None or self.org_repo.get(org_node) is None:
+                raise ValueError(f"org node '{org_node}' not found")
+            subtree = set(self.org_repo.subtree_ids(org_node))
+            candidates = [w for w in candidates if w.org_node_id in subtree]
+            if not candidates:
+                raise ValueError(f"组织节点 '{org_node}' 子树下没有可派工人")
+        decision = self.router.decide(text, candidates,
                                       requested_worker=worker_name, repo_path=repo_path)
 
         if decision.action == "reply":
@@ -404,6 +417,52 @@ class Scheduler:
     def _policy_version(self) -> str:
         return policy_version_for_pool([w.to_dict() for w in self.workers.list_all()])
 
+    def _org_digest(self) -> str:
+        """P6: 组织架构摘要(Router prompt 注入;树小,每次现建)。"""
+        if self.org_repo is None:
+            return ""
+        try:
+            by_node: dict[str, list[str]] = {}
+            for w in self.workers.list_all():
+                if w.org_node_id:
+                    by_node.setdefault(w.org_node_id, []).append(w.name)
+            lines: list[str] = []
+
+            def walk(nodes: list, depth: int) -> None:
+                for n in nodes:
+                    indent = "  " * depth
+                    members = by_node.get(n["id"], [])
+                    suffix = f" [{','.join(members)}]" if members else ""
+                    lines.append(f"{indent}- {n['name']}{suffix}")
+                    walk(n.get("children") or [], depth + 1)
+
+            walk(self.org_repo.tree(), 0)
+            return "\n".join(lines)
+        except Exception:
+            logger.exception("org digest build failed")
+            return ""
+
+    def _org_identity(self, worker: WorkerDef) -> str:
+        """P6: 工人组织身份注入(部门路径 + 部门层负责人)。"""
+        if self.org_repo is None or not worker.org_node_id:
+            return ""
+        try:
+            nodes = self.org_repo.path_nodes(worker.org_node_id)
+            if not nodes:
+                return ""
+            path_str = " › ".join(n["name"] for n in nodes)
+            lead_str = ""
+            if len(nodes) > 1:  # 路径第一层 = 根部门节点;其上挂载的其他工人视为部门负责人
+                leads = [w.name for w in self.workers.list_all()
+                         if w.org_node_id == nodes[0]["id"] and w.name != worker.name]
+                if leads:
+                    lead_str = f";{nodes[0]['name']}负责人: {','.join(leads)}"
+            return (f"【组织身份】你的组织路径: {path_str}{lead_str}。"
+                    "跨组事务请在汇报中注明,由协调层处理。")
+        except Exception:
+            logger.exception("org identity build failed for %s", worker.name)
+            return ""
+
     def _emit(self, ticket_id: str, event_type: str, actor: str = "system",
               session_id: str | None = None, payload: dict | None = None) -> None:
         envelope = self.events.insert(ticket_id, event_type, actor=actor,
@@ -506,6 +565,7 @@ class Scheduler:
                 attention_repo=self.attentions, bus=self.bus,
                 default_model=self.default_model,
                 memory_store=self.memory_store,
+                org_identity=self._org_identity(worker),
                 is_cancelled=self.is_cancelled,
                 pop_follow_ups=lambda: self._pop_follow_ups(ticket.id),
             )
