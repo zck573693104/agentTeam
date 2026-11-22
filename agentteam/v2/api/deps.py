@@ -19,6 +19,7 @@ from agentteam.v2.storage.attentions import AttentionRepo
 from agentteam.v2.storage.db import init_db
 from agentteam.v2.storage.events import EventBus, EventRepo
 from agentteam.v2.storage.outbox import OutboxRepo
+from agentteam.v2.storage.org import OrgRepo
 from agentteam.v2.storage.sources import EvaluationRepo, SourceRepo
 from agentteam.v2.storage.threads import SubscriptionRepo, ThreadRepo
 from agentteam.v2.storage.tickets import MessageRepo, SessionRepo, TicketRepo
@@ -57,6 +58,7 @@ class V2Components:
     memory_store: MemoryStore | None
     postmortem: PostmortemEngine | None
     distiller: object | None
+    org_repo: OrgRepo
 
 
 def create_v2_components(
@@ -114,6 +116,7 @@ def create_v2_components(
     thread_repo = ThreadRepo(conn, lock=lock)
     subscription_repo = SubscriptionRepo(conn, lock=lock)
     outbox_repo = OutboxRepo(conn, lock=lock)
+    org_repo = OrgRepo(conn, lock=lock)   # P6: 组织架构树(任意深度)
     bus = EventBus()
 
     scheduler = Scheduler(
@@ -196,5 +199,5 @@ def create_v2_components(
         source_daemon=source_daemon, bus=bus,
         scheduler=scheduler, default_model=default_model,
         aux_model=aux_model, memory_store=memory_store, postmortem=postmortem,
-        distiller=distiller,
+        distiller=distiller, org_repo=org_repo,
     )

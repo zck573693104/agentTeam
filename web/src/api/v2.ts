@@ -12,6 +12,16 @@ export interface V2Worker {
   approval_targets: string[];
   max_iterations: number;
   enabled: boolean;
+  org_node_id?: string | null;
+}
+
+export interface V2OrgNode {
+  id: string;
+  parent_id: string | null;
+  name: string;
+  kind: string;
+  position: number;
+  children: V2OrgNode[];
 }
 
 export interface V2Mandate {

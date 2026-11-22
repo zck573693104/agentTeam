@@ -189,6 +189,22 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
         "ALTER TABLE sessions ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE messages ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0",     # chain-of-recall
     ]),
+    # v4: 组织架构树(任意深度,parent_id 自引用) + 工人挂载节点
+    (4, [
+        """
+        CREATE TABLE IF NOT EXISTS org_nodes (
+            id TEXT PRIMARY KEY,
+            parent_id TEXT,                  -- NULL = 根节点;自引用 → 层级深度无上限
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'group',   -- department | group | team | 任意自定义标签
+            position INTEGER NOT NULL DEFAULT 0,   -- 同级排序
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_org_nodes_parent ON org_nodes(parent_id, position)",
+        "ALTER TABLE workers ADD COLUMN org_node_id TEXT",   # 工人挂载的组织节点(可空)
+    ]),
 ]
 
 

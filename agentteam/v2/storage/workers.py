@@ -36,19 +36,21 @@ class WorkerRepo(BaseSqliteRepo):
         now = _now()
         self._execute(
             "INSERT INTO workers (name, system_prompt, model_json, tools_json, skills_json, "
-            "approval_json, max_iterations, enabled, created_at, updated_at, mcp_json) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+            "approval_json, max_iterations, enabled, created_at, updated_at, mcp_json, "
+            "org_node_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(name) DO UPDATE SET system_prompt=excluded.system_prompt, "
             "model_json=excluded.model_json, tools_json=excluded.tools_json, "
             "skills_json=excluded.skills_json, approval_json=excluded.approval_json, "
             "max_iterations=excluded.max_iterations, enabled=excluded.enabled, "
-            "mcp_json=excluded.mcp_json, updated_at=excluded.updated_at",
+            "mcp_json=excluded.mcp_json, org_node_id=excluded.org_node_id, "
+            "updated_at=excluded.updated_at",
             (
                 w.name, w.system_prompt,
                 json.dumps(w.model, ensure_ascii=False) if w.model else None,
                 json.dumps(w.tools), json.dumps(w.skills), json.dumps(w.approval_targets),
                 w.max_iterations, 1 if w.enabled else 0, now, now,
                 json.dumps(w.mcp_servers, ensure_ascii=False),
+                w.org_node_id,
             ),
         )
         with self._cache_lock:

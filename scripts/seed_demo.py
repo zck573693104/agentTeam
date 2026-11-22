@@ -35,6 +35,7 @@ from agentteam.v2.kernel.workspace import WorkspaceManager  # noqa: E402
 from agentteam.v2.storage.attentions import AttentionRepo  # noqa: E402
 from agentteam.v2.storage.db import init_db  # noqa: E402
 from agentteam.v2.storage.events import EventRepo  # noqa: E402
+from agentteam.v2.storage.org import OrgRepo  # noqa: E402
 from agentteam.v2.storage.sources import EvaluationRepo, SourceRepo  # noqa: E402
 from agentteam.v2.storage.threads import SubscriptionRepo, ThreadRepo  # noqa: E402
 from agentteam.v2.storage.tickets import MessageRepo, SessionRepo, TicketRepo  # noqa: E402
@@ -82,6 +83,7 @@ def main() -> None:
     evaluations = EvaluationRepo(conn, lock=lock)
     workspaces = WorkspaceManager(workspace_root)
     memory = MemoryStore(memory_dir)
+    org = OrgRepo(conn, lock=lock)
 
     # —— 1. 工人池(dev_pool 预设 + reviewer + org_demo 组织架构预设) ——
     from agentteam.v2.presets.dev_pool import WORKERS as DEV_WORKERS
@@ -94,6 +96,30 @@ def main() -> None:
                       "用 read_file/list_dir 检查产出,按评审清单逐项给出结论。",
         tools=["search_web"], max_iterations=8,
     ))
+
+    # —— 1.5 组织架构树(P6: 任意深度;工人挂载节点) ——
+    if org.get("org_pms") is None:
+        org.create("PMS部门", None, node_id="org_pms", kind="department", position=0)
+        org.create("操作组", "org_pms", node_id="org_pms_ops", position=0)
+        org.create("职能组", "org_pms", node_id="org_pms_func", position=1)
+        org.create("报表组", "org_pms", node_id="org_pms_report", position=2)
+        # 第 3 层:演示树可动态加深(任意节点都能继续加子级)
+        org.create("月报小组", "org_pms_report", node_id="org_pms_report_monthly", kind="team")
+        org.create("应用部", None, node_id="org_app", kind="department", position=1)
+        org.create("财务组", "org_app", node_id="org_app_finance", position=0)
+        org.create("平台应用组", "org_app", node_id="org_app_platform", position=1)
+        org.create("成本分摊组", "org_app", node_id="org_app_cost", position=2)
+    attach = {
+        "pms_ops": "org_pms_ops", "pms_func": "org_pms_func",
+        "pms_report": "org_pms_report", "pms_lead": "org_pms",
+        "app_finance": "org_app_finance", "app_platform": "org_app_platform",
+        "app_cost": "org_app_cost", "app_lead": "org_app",
+    }
+    for name, node_id in attach.items():
+        w = workers.get(name)
+        if w and w.org_node_id != node_id:
+            w.org_node_id = node_id
+            workers.upsert(w)
 
     demo_repo = str((Path(__file__).resolve().parent.parent / "workspaces" / "_demo_repo").resolve())
 

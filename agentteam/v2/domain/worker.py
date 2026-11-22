@@ -25,6 +25,8 @@ class WorkerDef:
     approval_targets: list[str] = field(default_factory=list)
     max_iterations: int = 10
     enabled: bool = True
+    # P6 组织架构:工人挂载的组织节点 id(org_nodes 表;None = 未挂载)
+    org_node_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +39,7 @@ class WorkerDef:
             "approval_targets": list(self.approval_targets),
             "max_iterations": self.max_iterations,
             "enabled": self.enabled,
+            "org_node_id": self.org_node_id,
         }
 
     @classmethod
@@ -51,6 +54,7 @@ class WorkerDef:
             approval_targets=list(d.get("approval_targets", [])),
             max_iterations=int(d.get("max_iterations", 10)),
             enabled=bool(d.get("enabled", True)),
+            org_node_id=d.get("org_node_id"),
         )
 
 
@@ -68,4 +72,5 @@ def worker_from_row(row) -> WorkerDef:
         approval_targets=json.loads(row["approval_json"] or "[]"),
         max_iterations=int(row["max_iterations"]),
         enabled=bool(row["enabled"]),
+        org_node_id=row["org_node_id"] if "org_node_id" in row.keys() else None,
     )

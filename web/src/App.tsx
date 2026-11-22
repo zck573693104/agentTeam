@@ -9,6 +9,7 @@ import V2Workers from "./pages/v2/Workers";
 import V2Sources from "./pages/v2/Sources";
 import V2Skills from "./pages/v2/Skills";
 import V2Memory from "./pages/v2/Memory";
+import V2Org from "./pages/v2/Org";
 
 /**
  * 自定义侧栏导航 — 替代 antd Layout/Sider/Menu。
@@ -147,6 +148,21 @@ const NAV_ITEMS: NavItem[] = [
         <circle cx="8" cy="8" r="5.5" />
         <circle cx="8" cy="8" r="1.6" />
         <path d="M8 2.5v2M8 11.5v2M2.5 8h2M11.5 8h2" />
+      </svg>
+    ),
+  },
+  {
+    key: "/v2/org",
+    index: "10",
+    label: "ORG · V2",
+    sublabel: "组织架构",
+    path: "/v2/org",
+    icon: (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <rect x="6" y="1.5" width="4" height="3" />
+        <rect x="1.5" y="11" width="4" height="3" />
+        <rect x="10.5" y="11" width="4" height="3" />
+        <path d="M8 4.5v3M3.5 11v-2h9v2M8 7.5V9" />
       </svg>
     ),
   },
@@ -364,6 +380,7 @@ export default function App() {
           <Route path="/v2/sources" element={<V2Sources />} />
           <Route path="/v2/skills" element={<V2Skills />} />
           <Route path="/v2/memory" element={<V2Memory />} />
+          <Route path="/v2/org" element={<V2Org />} />
         </Routes>
       </main>
     </div>

@@ -10,6 +10,11 @@ from agentteam.v2.domain.worker import WorkerDef
 def workers_router(v2: V2Components) -> APIRouter:
     router = APIRouter(prefix="/workers", tags=["v2-workers"])
 
+    def _validate_org_node(node_id: str | None) -> None:
+        """P6: 工人挂载的组织节点必须存在(空 = 未挂载,合法)。"""
+        if node_id and v2.org_repo.get(node_id) is None:
+            raise HTTPException(status_code=422, detail=f"org node '{node_id}' not found")
+
     @router.get("")
     def list_workers():
         return [w.to_dict() for w in v2.worker_repo.list_all()]
@@ -22,6 +27,7 @@ def workers_router(v2: V2Components) -> APIRouter:
             raise HTTPException(status_code=422, detail=f"missing field: {e}")
         if v2.worker_repo.get(w.name) is not None:
             raise HTTPException(status_code=400, detail=f"Worker already exists: {w.name}")
+        _validate_org_node(w.org_node_id)
         v2.worker_repo.upsert(w)
         noted = v2.scheduler.on_pool_changed()  # 配置热更新 → 在途工单授权注记
         return {"name": w.name, "policy_expiry_noted": noted}
@@ -43,6 +49,7 @@ def workers_router(v2: V2Components) -> APIRouter:
             w = WorkerDef.from_dict(body)
         except KeyError as e:
             raise HTTPException(status_code=422, detail=f"missing field: {e}")
+        _validate_org_node(w.org_node_id)
         v2.worker_repo.upsert(w)
         noted = v2.scheduler.on_pool_changed()
         return {"name": w.name, "policy_expiry_noted": noted}
