@@ -5,16 +5,24 @@ A2: 关联 git 仓库的工单,工作区升级为 **git worktree**(分支 agentt
 
 文件工具按 session 注入(替代 v1 的全局 WORKSPACE_ROOT env),
 路径校验逻辑移植自 v1 tools/skills/file_ops.py(拒绝穿越/拒绝符号链接)。
+
+P5 housekeeping: 终态工单工作区超期归档(只增不减会无限膨胀)——
+整体改名移入 _archive/,worker 产出零丢失;worktree 的父仓库元数据变陈旧,
+git worktree prune 可清理,分支 agentteam/<ticket> 仍在。
 """
 from __future__ import annotations
 
 import difflib
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from langchain_core.tools import BaseTool, tool
 
+from agentteam.logging_config import get_logger
+
 MAX_READ_SIZE = 10 * 1024 * 1024  # 10 MB
+logger = get_logger("v2.kernel.workspace")
 
 # v1 全局文件工具名;v2 session 构建工具列表时排除它们,改用 workspace 版
 FILE_TOOL_NAMES = frozenset({"read_file", "write_file", "list_dir"})
@@ -54,6 +62,43 @@ class WorkspaceManager:
                     pass  # fall through
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    # —— P5 housekeeping: 超期终态工作区归档 ——
+    def archive_stale(self, ended_rows: list[tuple[str, str | None]],
+                      max_age_days: int = 7) -> list[str]:
+        """归档终态超过 max_age_days 天的工单工作区(移入 _archive/)。
+
+        ended_rows: [(ticket_id, ended_at_iso)]。max_age_days <= 0 → 不做任何事。
+        返回被归档的 ticket_id 列表。
+        """
+        if max_age_days <= 0 or not ended_rows:
+            return []
+        now = datetime.now(timezone.utc)
+        archived: list[str] = []
+        for ticket_id, ended_at in ended_rows:
+            src = self._root / ticket_id
+            if not src.is_dir() or ticket_id in archived:
+                continue
+            try:
+                ended = datetime.fromisoformat(ended_at) if ended_at else None
+            except (TypeError, ValueError):
+                ended = None
+            if ended is None or ended.tzinfo is None:
+                continue  # 无终态时间/非法时间戳 → 保守不归档
+            if now - ended < timedelta(days=max_age_days):
+                continue
+            archive_dir = self._root / "_archive"
+            archive_dir.mkdir(exist_ok=True)
+            dst = archive_dir / ticket_id
+            if dst.exists():
+                logger.info("workspace archive target exists, skip: %s", ticket_id)
+                continue
+            try:
+                src.rename(dst)
+                archived.append(ticket_id)
+            except OSError as exc:
+                logger.warning("archive workspace %s failed: %s", ticket_id, exc)
+        return archived
 
 
 def unified_diff_for_write(workspace: Path, path: str, new_content: str) -> str:

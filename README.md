@@ -20,10 +20,16 @@ Source(webhook/IM/GitHub) ──► SourceDaemon(asyncio 常驻轮询)
    Router                                            接单/派工,无执行工具,批注 ≤30 词
         ▼
    Worker Session(每 Ticket 一个会话+独立工作目录)    ReAct 工具循环,transcript 即 checkpoint
-        │
-        ├─ Attention(审批门/结构化提问,一次一个)      人工批准 = Mandate 授权延续
+        │                                              ↑ 注入【历史教训】(按任务检索记忆库)
+        ├─ Attention(审批门/结构化提问/技能提案)       人工批准 = Mandate 授权延续
         ├─ Outbox(先存后发,指数退避,同工单串行)      IM 通知可靠出站
         └─ Subscription(工单↔线程多对多)              同线程追问直达 worker,只入不回
+        │
+        ▼ 终态(done/failed)
+   Postmortem(独立单线程池,sleep-time 蒸馏)          教训 → 文件式记忆库(L0/L2)
+        │                                             可复用流程 → 技能提案 → 注意件审批 → 晋升 skills/
+        ▼
+   MemoryStore(memory/ 目录,markdown,人可审)         OpenViking 范式:零依赖打分检索
 ```
 
 **Ticket 状态机**: `pending → running ⇄ waiting_human → done | failed`,任意非终态可 `cancelled(人工撤权)`。
@@ -67,6 +73,7 @@ agentteam install-preset dev_pool
 | POST | /sources/observe/{id}/confirm | 人工确认转正立项 |
 | GET/POST | /threads · /threads/inbound | 线程聚合与入站记录 |
 | GET | /tickets/{id}/notifications | IM 通知回执(outbox) |
+| GET | /memory | 经验记忆库(复盘蒸馏的教训清单) |
 | GET | /skills · /health | 技能列表 / 健康检查 |
 
 ## 配置(env_prefix=AGENTTEAM_)
@@ -76,10 +83,38 @@ agentteam install-preset dev_pool
 | DB_PATH | data/agentteam_v2.db | SQLite(独立于 v1 存档) |
 | V2_MAX_SESSION_WORKERS | 8 | 同时执行的 Ticket 数上限 |
 | V2_DEFAULT_PROVIDER / V2_DEFAULT_MODEL | qwen / qwen-max | Router 与默认 worker 模型 |
+| V2_AUX_PROVIDER / V2_AUX_MODEL | (空) | 轻量辅助模型(Eval 研判/复盘蒸馏);空 = 回落默认模型 |
+| V2_MEMORY_DIR | (空) | 经验记忆库根目录;空 = db 同目录 memory/,`off` 显式关闭 |
+| V2_POSTMORTEM_ENABLED | true | 工单终态后自动复盘蒸馏 |
+| V2_MEMORY_EVICT_DAYS | 30 | 从未命中教训归档天数;0 = 关闭 |
+| V2_WORKSPACE_ARCHIVE_DAYS | 7 | 终态工单工作区归档天数;0 = 关闭 |
+| V2_EVAL_DISTILL_THRESHOLD | 5 | 观察模式确认样本蒸馏阈值;0 = 关闭 |
 | NOTIFY_WEBHOOK_URL | (空) | IM 出站 webhook;空 = 关闭 |
 | V2_SOURCE_POLL_INTERVAL | 10s | SourceDaemon 轮询间隔 |
 
 模型 Key 走环境变量: DASHSCOPE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY(按 provider)。
+
+## 学习闭环(P4/P5)
+
+> 范式来源: [Letta sleep-time compute](https://www.letta.com/blog/sleep-time-compute)(主 agent 无权写记忆,独立角色异步蒸馏) + [OpenViking](https://github.com/volcengine/OpenViking)(上下文即文件系统,L0 摘要/L2 全文分级)。
+
+```
+工单终态 → Postmortem(独立线程池,辅助模型)
+             ├─ 教训(≤3条) → memory/lessons/<id>.md(L2) + _index.md(L0 一行账本)
+             └─ 可复用流程 → proposal 注意件 → 人工批准 → 写入 skills/ 并热加载
+新工单派工 → Router 注入 L0 摘要(避坑) + Worker 注入【历史教训】top-k(零依赖相关性打分)
+
+观察模式人工确认(would_accept 转正) → 确认样本入库
+             → 攒够阈值 → 蒸馏「入站研判校准规则」→ EvalEngine prompt 注入(gate/Eval 自我校准)
+housekeeping(sleep-time 兼职保洁,每次复盘顺带执行):
+             ├─ 从未命中且超期的教训 → memory/_archive/(淘汰)
+             └─ 超期终态工单工作区 → workspaces/_archive/(归档,产出零丢失)
+```
+
+- 记忆是**人可读可改的 markdown 文件**(`memory/`),不是黑盒向量库;`use_count` 命中计数驱动淘汰
+- 复盘幂等(每工单最多一次尝试)、失败只落 `postmortem_failed` 事件,绝不影响工单状态
+- 琐碎会话(无工具交互,3 行 transcript)不值得蒸馏,自动跳过
+- 控制台「记忆库」页(`/v2/memory`):教训清单 + 校准规则可视化
 
 ## 测试与部署
 

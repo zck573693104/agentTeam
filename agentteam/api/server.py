@@ -41,6 +41,13 @@ def create_app(
         _skills_env = os.environ.get("AGENTTEAM_SKILLS_DIR", "")
         skills_dir = Path(_skills_env) if _skills_env else None
 
+    # P4 记忆库目录:显式 off 关闭;空 = db 同目录 memory/
+    _memory_env = os.environ.get("AGENTTEAM_V2_MEMORY_DIR", settings.v2_memory_dir)
+    memory_dir: Path | None = (
+        Path(db_path).parent / "memory" if not _memory_env
+        else (None if _memory_env.lower() == "off" else Path(_memory_env))
+    )
+
     v2 = create_v2_components(
         db_path=db_path,
         workspace_root=(
@@ -59,6 +66,13 @@ def create_app(
         notify_backoff_base=settings.notify_backoff_base,
         notify_timeout_seconds=settings.notify_timeout_seconds,
         source_poll_interval=settings.v2_source_poll_interval,
+        memory_dir=memory_dir,
+        aux_provider=settings.v2_aux_provider,
+        aux_model_name=settings.v2_aux_model,
+        postmortem_enabled=settings.v2_postmortem_enabled,
+        memory_evict_days=settings.v2_memory_evict_days,
+        workspace_archive_days=settings.v2_workspace_archive_days,
+        eval_distill_threshold=settings.v2_eval_distill_threshold,
     )
     # 内置工具自动发现(仅新建 registry 时;调用方传入的 registry 保持其控制权)
     if tool_registry is None:

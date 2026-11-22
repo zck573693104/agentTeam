@@ -34,6 +34,7 @@ class InboundEngine:
         bus: EventBus,
         submit_from_source,  # Scheduler.submit_request 的 inferred 封装
         fanout=None,         # Scheduler.fan_out_thread(A4 双向 pass-through)
+        on_confirmed=None,   # P5: 人工确认回调(InboundDistiller.record_confirm)
     ) -> None:
         self.sources = source_repo
         self.threads = thread_repo
@@ -43,6 +44,7 @@ class InboundEngine:
         self.bus = bus
         self._submit = submit_from_source
         self._fanout = fanout
+        self._on_confirmed = on_confirmed
 
     def handle(self, source_name: str, trigger: Trigger) -> dict:
         """入站事件 → gate → Eval → (auto 立项 | would_accept 观察 | rejected)。
@@ -116,6 +118,12 @@ class InboundEngine:
         src = self.sources.get(thread["source"]) if thread else None
         if src is None:
             raise RuntimeError("source gone")
+        # P5: 人工确认 = 最强正信号,进蒸馏样本(毫秒级落盘;蒸馏在 housekeeping 异步)
+        if self._on_confirmed is not None:
+            try:
+                self._on_confirmed(trigger["text"])
+            except Exception:  # 样本积累失败不影响转正主流程
+                logger.exception("record confirmed sample failed")
         return self._promote(
             src, trigger["thread_id"], trigger["id"],
             evaluation["reason"] or "人工确认转正", confirmed_by=confirmed_by,

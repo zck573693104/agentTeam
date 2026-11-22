@@ -49,9 +49,11 @@ class Router:
         self,
         model_provider: ModelProvider,
         default_model: ModelRef,
+        memory_store=None,          # MemoryStore | None(P4:L0 教训摘要注入;None = 停用)
     ) -> None:
         self._mp = model_provider
         self._default_model = default_model
+        self._memory_store = memory_store
 
     def _roster(self, workers: list[WorkerDef]) -> str:
         lines = ["可用 worker(只能派给其中之一):"]
@@ -66,6 +68,7 @@ class Router:
         text: str,
         workers: list[WorkerDef],
         requested_worker: str | None = None,
+        repo_path: str | None = None,
     ) -> DispatchDecision:
         enabled = [w for w in workers if w.enabled]
         if not enabled:
@@ -85,11 +88,16 @@ class Router:
                 )
             logger.warning("requested worker %r not found, fallback to llm", requested_worker)
 
-        # 2) LLM 研判
+        # 2) LLM 研判(附 L0 历史教训摘要,路由时避开已知坑)
         llm = self._mp.get_llm(self._default_model)
+        lesson_block = ""
+        if self._memory_store is not None:
+            lines = self._memory_store.l0_lines(repo_path, limit=5)
+            if lines:
+                lesson_block = "\n【历史教训摘要】\n" + "\n".join(lines) + "\n"
         prompt = (
             f"{ROUTER_DISCIPLINE}\n\n{self._roster(enabled)}\n\n"
-            f"用户请求:\n{text}\n\n"
+            f"用户请求:\n{text}\n{lesson_block}\n"
             "请决定:派工(dispatch)还是直接答复(reply)。"
         )
         try:

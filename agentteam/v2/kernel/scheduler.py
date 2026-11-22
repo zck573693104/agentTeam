@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -72,6 +73,8 @@ class Scheduler:
         outbox_repo: OutboxRepo | None = None,
         notify_webhook_url: str = "",
         console_url: str = "",
+        memory_store=None,          # MemoryStore | None(P4 记忆;None = 停用)
+        postmortem=None,            # PostmortemEngine | None(P4 复盘;None = 停用)
     ) -> None:
         self.tickets = ticket_repo
         self.sessions = session_repo
@@ -88,12 +91,16 @@ class Scheduler:
         self.mp = model_provider
         self.registry = tool_registry
         self.skill_loader = skill_loader
+        self.memory_store = memory_store
+        self.postmortem = postmortem
         self.workspaces = WorkspaceManager(workspace_root)
         self.default_model = default_model
-        self.router = Router(model_provider, default_model)
+        self.router = Router(model_provider, default_model, memory_store=memory_store)
         self._pool = ThreadPoolExecutor(
             max_workers=max_session_workers, thread_name_prefix="v2-session",
         )
+        # P4 复盘走独立单线程池(sleep-time 角色,不占会话坑位,串行防记忆写竞争)
+        self._pm_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="v2-postmortem")
         self._queue: queue.Queue[str] = queue.Queue()
         self._dispatch_thread: threading.Thread | None = None
         self._wake = threading.Event()
@@ -118,6 +125,7 @@ class Scheduler:
         if self._dispatch_thread:
             self._dispatch_thread.join(timeout=5)
         self._pool.shutdown(wait=wait)
+        self._pm_pool.shutdown(wait=wait)
 
     def _recover(self) -> None:
         """崩溃恢复:pending 重排;孤儿 running session 标 failed;
@@ -144,7 +152,8 @@ class Scheduler:
         text = (text or "").strip()
         if not text:
             raise ValueError("request text is empty")
-        decision = self.router.decide(text, self.workers.list_all(), requested_worker=worker_name)
+        decision = self.router.decide(text, self.workers.list_all(),
+                                      requested_worker=worker_name, repo_path=repo_path)
 
         if decision.action == "reply":
             return {"action": "reply", "reply": decision.reply}
@@ -270,7 +279,8 @@ class Scheduler:
         - approval + approve: 恢复会话并真实执行该工具
         - approval + reject: 注入拒绝结果(worker 可改道)
         - question + answer: 注入人工回答
-        终态工单/已撤权工单的 Attention 不可决定(409)。
+        - proposal(P4): 审批复盘产出的技能提案;工单已终态,不恢复会话
+        终态工单/已撤权工单的 Attention 不可决定(409,proposal 除外)。
         """
         if decision not in _DECISIONS:
             raise ValueError(f"invalid decision: {decision}")
@@ -279,6 +289,9 @@ class Scheduler:
             raise KeyError(f"attention '{attention_id}' not found")
         if att["status"] != "pending":
             raise RuntimeError(f"attention already decided: {att['decision']}")
+        # P4: 技能提案在工单终态后产生,终态校验前分流(不恢复会话/不改工单状态)
+        if att["type"] == "proposal":
+            return self._decide_proposal(att, decision, decided_by, reason)
         ticket = self.tickets.get(att["ticket_id"])
         if ticket is None or ticket.status.is_terminal():
             raise RuntimeError(f"ticket is terminal ({ticket.status.value if ticket else 'gone'})")
@@ -312,6 +325,58 @@ class Scheduler:
             return
         self._run_session(self.tickets.get(ticket_id), session_id=attention["session_id"],
                           attention=attention, decision=decision, answer=answer)
+
+    # —— P4: 技能提案决定(复盘产出 → 人工审批 → 技能库热晋升) ——
+    def _decide_proposal(self, att: dict, decision: str, decided_by: str,
+                         reason: str | None) -> dict:
+        """审批技能提案:approve → 写技能文件 + 热加载;reject → 仅记档。
+
+        提案所在工单已终态,故不走会话恢复/工单状态机。
+        """
+        payload = att["payload"] or {}
+        skill_name = str(payload.get("skill_name") or "").strip()
+        content = str(payload.get("content") or "")
+        if decision == "approve":
+            if not skill_name or not content:
+                raise ValueError("提案缺少 skill_name 或 content,无法晋升")
+            safe_name = self._safe_skill_name(skill_name)
+            skills_dir = self.skill_loader._skills_dir
+            if skills_dir is None:
+                raise ValueError(
+                    "未配置技能目录(AGENTTEAM_SKILLS_DIR),无法晋升技能提案",
+                )
+            target = Path(skills_dir) / f"{safe_name}.md"
+            if target.exists():
+                raise ValueError(f"技能 '{safe_name}' 已存在,拒绝覆盖;请先改名提案")
+        if not self.attentions.decide(att["id"], decision=decision,
+                                      decided_by=decided_by, reason=reason):
+            raise RuntimeError("attention already decided (race)")
+        self._emit(att["ticket_id"], ev.ATTENTION_DECIDED, actor=decided_by,
+                   session_id=att["session_id"],
+                   payload={"attention_id": att["id"], "decision": decision,
+                            "type": "proposal"})
+        if decision == "approve":
+            target.write_text(content, encoding="utf-8")
+            self.skill_loader.reload()
+            self._emit(att["ticket_id"], ev.SKILL_PROMOTED, actor=decided_by,
+                       session_id=att["session_id"],
+                       payload={"skill_name": safe_name, "attention_id": att["id"]})
+        return {"ok": True, "attention_id": att["id"], "decision": decision,
+                "type": "proposal"}
+
+    @staticmethod
+    def _safe_skill_name(name: str) -> str:
+        """技能文件名收敛:小写字母/数字/连字符/下划线,≤64 字符。"""
+        cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "-", name.strip().lower()).strip("-")
+        if not cleaned:
+            raise ValueError(f"技能名不合法: {name!r}")
+        return cleaned[:64]
+
+    # —— P4: 终态复盘(独立单线程池,sleep-time 角色) ——
+    def _schedule_postmortem(self, ticket_id: str) -> None:
+        if self.postmortem is None:
+            return
+        self._pm_pool.submit(self.postmortem.run, ticket_id)
 
     # —— worker pool 热更新(dsh: 变更通知到在途工单,不中断) ——
     def on_pool_changed(self) -> int:
@@ -440,6 +505,7 @@ class Scheduler:
                 message_repo=self.messages, event_repo=self.events,
                 attention_repo=self.attentions, bus=self.bus,
                 default_model=self.default_model,
+                memory_store=self.memory_store,
                 is_cancelled=self.is_cancelled,
                 pop_follow_ups=lambda: self._pop_follow_ups(ticket.id),
             )
@@ -458,11 +524,13 @@ class Scheduler:
         if result.status == SessionStatus.DONE:
             self.tickets.cas_status(ticket.id, TicketStatus.RUNNING, TicketStatus.DONE, result=result.reply)
             self._emit(ticket.id, ev.TICKET_STATUS_CHANGED, payload={"to": "done"})
+            self._schedule_postmortem(ticket.id)
         elif result.status == SessionStatus.FAILED:
             self.tickets.cas_status(ticket.id, TicketStatus.RUNNING, TicketStatus.FAILED, result=result.error)
             self._emit(ticket.id, ev.TICKET_STATUS_CHANGED, payload={
                 "to": "failed", "error": (result.error or "")[:300],
             })
+            self._schedule_postmortem(ticket.id)
         elif result.status == SessionStatus.WAITING_HUMAN:
             self.tickets.cas_status(ticket.id, TicketStatus.RUNNING, TicketStatus.WAITING_HUMAN)
             self._emit(ticket.id, ev.TICKET_STATUS_CHANGED, payload={

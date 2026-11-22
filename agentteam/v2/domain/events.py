@@ -14,6 +14,7 @@ from enum import Enum
 # 注意件:   attention_created / attention_decided(P1)
 # 直通:     follow_up_delivered(P2)
 # 入站:     trigger_received / gate_passed / gate_rejected / eval_decided(P3)
+# 学习:     postmortem_completed / postmortem_failed / skill_proposed / skill_promoted(P4)
 TICKET_CREATED = "ticket_created"
 TICKET_DISPATCHED = "ticket_dispatched"
 TICKET_STATUS_CHANGED = "ticket_status_changed"
@@ -31,6 +32,10 @@ TRIGGER_RECEIVED = "trigger_received"
 GATE_PASSED = "gate_passed"
 GATE_REJECTED = "gate_rejected"
 EVAL_DECIDED = "eval_decided"
+POSTMORTEM_COMPLETED = "postmortem_completed"
+POSTMORTEM_FAILED = "postmortem_failed"
+SKILL_PROPOSED = "skill_proposed"
+SKILL_PROMOTED = "skill_promoted"
 
 EVENTS: tuple[str, ...] = (
     TICKET_CREATED, TICKET_DISPATCHED, TICKET_STATUS_CHANGED, TICKET_CANCELLED,
@@ -39,6 +44,7 @@ EVENTS: tuple[str, ...] = (
     ATTENTION_CREATED, ATTENTION_DECIDED, POLICY_EXPIRED,
     FOLLOW_UP_DELIVERED,
     TRIGGER_RECEIVED, GATE_PASSED, GATE_REJECTED, EVAL_DECIDED,
+    POSTMORTEM_COMPLETED, POSTMORTEM_FAILED, SKILL_PROPOSED, SKILL_PROMOTED,
 )
 
 

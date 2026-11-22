@@ -23,6 +23,26 @@ WORKER_DISCIPLINE = """【汇报纪律】
 - 你不能直接与人对话,你的汇报只进入工单轨迹。"""
 
 
+POSTMORTEM_PROMPT = """【复盘纪律】你是工单终态后的复盘蒸馏角色(sleep-time),不是执行者:
+- 只从 transcript 提炼「下次可直接执行」的规则,禁止空话(如"遇到困难要坚持");
+- 每条教训必须降一个抽象层级:写具体条件(什么仓库/什么命令/什么场景)和具体做法;
+- 最多 3 条,没有值得记的就返回空列表(宁缺毋滥);
+- 对照现有教训账本判重:与已有条目本质重复 → 给出 existing_id 合并更新,不重复立项;
+- scope 判断:仅与某仓库/项目相关 → repo;跨项目通用 → global;
+- 若本次任务沉淀出「可复用的做事流程」(非单条教训),提为技能提案(skill_proposal),
+  写成完整 markdown 技能正文(供人审批后进入技能库)。
+
+任务与结果:
+{task_block}
+
+会话 transcript:
+{transcript}
+
+现有教训账本(L0,判重用,格式: - <id> 摘要):
+{lesson_index}
+"""
+
+
 def extract_question(text: str) -> str | None:
     """提取 worker 回复中的 QUESTION 标记(一次最多一个;无标记返回 None)。"""
     if not text:

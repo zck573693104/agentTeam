@@ -8,6 +8,7 @@ import V2Observe from "./pages/v2/Observe";
 import V2Workers from "./pages/v2/Workers";
 import V2Sources from "./pages/v2/Sources";
 import V2Skills from "./pages/v2/Skills";
+import V2Memory from "./pages/v2/Memory";
 
 /**
  * 自定义侧栏导航 — 替代 antd Layout/Sider/Menu。
@@ -132,6 +133,20 @@ const NAV_ITEMS: NavItem[] = [
       <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
         <path d="M2 3h12v10H2z" />
         <path d="M2 6h12M5 3v10M9 3v10" />
+      </svg>
+    ),
+  },
+  {
+    key: "/v2/memory",
+    index: "09",
+    label: "MEMORY · V2",
+    sublabel: "记忆库",
+    path: "/v2/memory",
+    icon: (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4">
+        <circle cx="8" cy="8" r="5.5" />
+        <circle cx="8" cy="8" r="1.6" />
+        <path d="M8 2.5v2M8 11.5v2M2.5 8h2M11.5 8h2" />
       </svg>
     ),
   },
@@ -348,6 +363,7 @@ export default function App() {
           <Route path="/v2/workers" element={<V2Workers />} />
           <Route path="/v2/sources" element={<V2Sources />} />
           <Route path="/v2/skills" element={<V2Skills />} />
+          <Route path="/v2/memory" element={<V2Memory />} />
         </Routes>
       </main>
     </div>

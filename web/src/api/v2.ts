@@ -76,7 +76,7 @@ export interface V2Attention {
   id: string;
   ticket_id: string;
   session_id: string;
-  type: "approval" | "question" | "budget";
+  type: "approval" | "question" | "budget" | "proposal";
   payload: {
     tool?: string;
     args?: Record<string, any>;
@@ -87,6 +87,9 @@ export interface V2Attention {
     diff?: string;
     used?: number;
     limit?: number;
+    skill_name?: string;
+    content?: string;
+    summary?: string;
   };
   status: "pending" | "decided";
   decision: string | null;

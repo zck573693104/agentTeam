@@ -74,6 +74,15 @@ class TicketRepo(BaseSqliteRepo):
         )
         return [r["id"] for r in rows]
 
+    def list_ended(self, limit: int = 500) -> list[Ticket]:
+        """全部终态工单(P5 工作区归档扫描;按 ended_at 旧→新)。"""
+        rows = self._fetchall(
+            "SELECT * FROM tickets WHERE ended_at IS NOT NULL "
+            "ORDER BY ended_at ASC LIMIT ?",
+            (min(limit, 2000),),
+        )
+        return [self._row_to_ticket(r) for r in rows]
+
     def cas_status(
         self, ticket_id: str, expected: TicketStatus, new: TicketStatus,
         *, worker_name: str | None = None, result: str | None = None,

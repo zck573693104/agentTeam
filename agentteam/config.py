@@ -64,6 +64,36 @@ class Settings(BaseSettings):
         description="SourceDaemon 轮询间隔(秒)",
     )
 
+    # P4 学习闭环(复盘蒸馏 + 文件式记忆 + 技能晋升)
+    v2_memory_dir: str = Field(
+        default="",
+        description="经验记忆库根目录;空 = db 同目录下的 memory/(置为 off 关闭)",
+    )
+    v2_aux_provider: str = Field(
+        default="",
+        description="轻量辅助模型 provider(Eval 研判/复盘蒸馏);空 = 回落默认模型",
+    )
+    v2_aux_model: str = Field(
+        default="",
+        description="轻量辅助模型名;空 = 回落默认模型",
+    )
+    v2_postmortem_enabled: bool = Field(
+        default=True,
+        description="工单终态后是否自动复盘蒸馏(需 memory 目录已启用)",
+    )
+    v2_memory_evict_days: int = Field(
+        default=30, ge=0,
+        description="P5: 从未命中教训归档天数(_archive/);0 = 关闭",
+    )
+    v2_workspace_archive_days: int = Field(
+        default=7, ge=0,
+        description="P5: 终态工单工作区归档天数(_archive/);0 = 关闭",
+    )
+    v2_eval_distill_threshold: int = Field(
+        default=5, ge=0,
+        description="P5: 观察模式确认样本攒够多少条蒸馏一次校准规则;0 = 关闭",
+    )
+
     # IM 通知出站(Outbox: 先存后发,退避重试)
     notify_webhook_url: str = Field(
         default="",

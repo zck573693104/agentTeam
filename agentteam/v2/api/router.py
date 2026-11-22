@@ -52,6 +52,17 @@ def build_v2_router(v2: V2Components) -> APIRouter:
         """可用技能(skills/ 目录 .md 文件名;worker.skills 引用)。"""
         return {"skills": v2.skill_loader.list_available()}
 
+    @router.get("/memory")
+    def list_memory():
+        """P4/P5 经验记忆库:教训清单 + 入站研判校准规则(均不含正文)。"""
+        if v2.memory_store is None:
+            return {"enabled": False, "lessons": [], "inbound_rules": []}
+        return {
+            "enabled": True,
+            "lessons": v2.memory_store.list_lessons(),
+            "inbound_rules": v2.distiller.lines() if v2.distiller else [],
+        }
+
     @router.get("/health")
     def health():
         return {

@@ -1,5 +1,11 @@
-"""Eval 轻量研判(dsh 三事实: 针对本项目/有实施意图/方向已定)。"""
+"""Eval 轻量研判(dsh 三事实: 针对本项目/有实施意图/方向已定)。
+
+P5: 可注入「历史校准规则」(人工确认样本蒸馏产物,见 eval_distill.py)——
+gate/Eval 随人工确认自我校准。
+"""
 from __future__ import annotations
+
+from typing import Callable
 
 from pydantic import BaseModel, Field
 
@@ -21,22 +27,32 @@ EVAL_PROMPT_TEMPLATE = """你是入站事件的研判助手。判断以下入站
 3. 方向已定(不是模糊开放的想法)。
 
 全部成立 → accept=true;任一不成立 → accept=false(拿不准倾向不行动)。
-
+{rules_block}
 入站文本:
 {text}
 """
 
 
 class EvalEngine:
-    def __init__(self, model_provider: ModelProvider, default_model: ModelRef) -> None:
+    def __init__(
+        self, model_provider: ModelProvider, default_model: ModelRef,
+        rules_provider: Callable[[], list[str]] | None = None,
+    ) -> None:
         self._mp = model_provider
         self._model = default_model
+        self._rules_provider = rules_provider  # P5 校准规则源(InboundDistiller);None = 无
 
     def evaluate(self, text: str) -> EvalDecision:
         llm = self._mp.get_llm(self._model)
         try:
+            rules_block = ""
+            if self._rules_provider is not None:
+                lines = self._rules_provider()
+                if lines:
+                    rules_block = "【历史校准规则】(人工确认样本蒸馏,满足任一条倾向 accept=true)\n" \
+                        + "\n".join(f"- {ln}" for ln in lines) + "\n"
             decision = llm.with_structured_output(EvalDecision).invoke(
-                EVAL_PROMPT_TEMPLATE.format(text=text[:2000]),
+                EVAL_PROMPT_TEMPLATE.format(text=text[:2000], rules_block=rules_block),
             )
             return decision
         except Exception:

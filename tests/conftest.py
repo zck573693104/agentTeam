@@ -17,6 +17,9 @@ class FakeLLM:
         self.structured_responses: list = []
         self._inv_idx = 0
         self._struct_idx = 0
+        # P4: 调用捕获(断言 prompt 注入/复盘入参用;向后兼容,不影响既有脚本语义)
+        self.invoked_messages: list = []
+        self.invoked_structured: list = []
 
     def set_invoke_responses(self, responses: list) -> None:
         self.invoke_responses = list(responses)
@@ -34,6 +37,7 @@ class FakeLLM:
 
         class _Structured:
             def invoke(self, messages, **kw):
+                parent.invoked_structured.append({"schema": schema, "messages": messages})
                 r = parent.structured_responses[parent._struct_idx]
                 parent._struct_idx += 1
                 return r
@@ -41,6 +45,7 @@ class FakeLLM:
         return _Structured()
 
     def invoke(self, messages, **kwargs):
+        self.invoked_messages.append(messages)
         r = self.invoke_responses[self._inv_idx]
         self._inv_idx += 1
         return r

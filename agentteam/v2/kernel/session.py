@@ -111,6 +111,7 @@ class WorkerSession:
         bus: EventBus,
         pipeline: ToolPipeline | None = None,
         default_model: ModelRef | None = None,
+        memory_store=None,          # MemoryStore | None(P4 记忆注入;None = 停用)
         is_cancelled: Callable[[str], bool] | None = None,
         pop_follow_ups: Callable[[], list[tuple[str, str]]] | None = None,
     ) -> None:
@@ -157,7 +158,15 @@ class WorkerSession:
         skill_block = "\n\n".join(
             f'<skill name="{name}">\n{content}\n</skill>' for name, content in skills.items()
         )
-        system_parts = [p for p in (worker.system_prompt, skill_block, WORKER_DISCIPLINE) if p]
+        # P4 记忆注入:检索与任务相关的历史教训(Letta 范式:主 agent 只读记忆)
+        memory_block = ""
+        if memory_store is not None:
+            recall = memory_store.recall(self.ticket.task, self.ticket.repo_path)
+            memory_block = recall.block
+            if recall.ids:
+                memory_store.record_use(recall.ids)
+        system_parts = [p for p in (worker.system_prompt, skill_block, memory_block,
+                                    WORKER_DISCIPLINE) if p]
         self._system_message = SystemMessage(content="\n\n".join(system_parts))
 
     # —— 事件辅助 ——

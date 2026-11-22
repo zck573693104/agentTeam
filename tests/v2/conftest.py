@@ -35,13 +35,30 @@ def make_v2(tmp_path: Path):
 
     created = []
 
-    def _create(llm_by_model: dict[str, FakeLLM] | None = None) -> "V2Components":
+    def _create(
+        llm_by_model: dict[str, FakeLLM] | None = None,
+        *,
+        skills_dir: Path | None = None,
+        memory_dir: Path | None = None,       # P4 记忆库;None = 停用(默认不影响旧测试)
+        aux_model_name: str = "",
+        postmortem_enabled: bool = True,
+        memory_evict_days: int = 0,           # P5
+        workspace_archive_days: int = 0,      # P5
+        eval_distill_threshold: int = 0,      # P5
+    ) -> "V2Components":
         provider = FakeModelProvider(llm_by_model or {"qwen-max": FakeLLM()})
         v2 = create_v2_components(
             db_path=str(tmp_path / f"v2_{len(created)}.db"),
             workspace_root=tmp_path / "workspaces",
             model_provider=provider,
             max_session_workers=4,
+            skills_dir=skills_dir,
+            memory_dir=memory_dir,
+            aux_model_name=aux_model_name,
+            postmortem_enabled=postmortem_enabled,
+            memory_evict_days=memory_evict_days,
+            workspace_archive_days=workspace_archive_days,
+            eval_distill_threshold=eval_distill_threshold,
         )
         v2.scheduler.start()  # 服务内由 lifespan 调用;测试需显式启动
         created.append(v2)

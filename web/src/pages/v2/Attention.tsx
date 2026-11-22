@@ -43,20 +43,51 @@ function AttentionCard({
 
   const isApproval = att.type === "approval";
   const isBudget = att.type === "budget";
+  const isProposal = att.type === "proposal";
   return (
     <div className="at-panel at-panel-corners" style={{ padding: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
         <span className="at-tag" style={{
-          color: isApproval || isBudget ? "var(--at-red)" : "var(--at-amber)",
+          color: isApproval || isBudget ? "var(--at-red)"
+            : isProposal ? "var(--at-cyan)" : "var(--at-amber)",
         }}>
-          {isApproval ? "审批 APPROVAL" : isBudget ? "预算 BUDGET" : "提问 QUESTION"}
+          {isApproval ? "审批 APPROVAL" : isBudget ? "预算 BUDGET"
+            : isProposal ? "技能提案 PROPOSAL" : "提问 QUESTION"}
         </span>
         <Link to={`/v2/tickets/${att.ticket_id}`} className="at-link" style={{ fontSize: 12 }}>
           工单 {att.ticket_id.slice(0, 8)} ↗
         </Link>
       </div>
 
-      {isBudget ? (
+      {isProposal ? (
+        <>
+          <div style={{ fontSize: 14, marginBottom: 6 }}>
+            复盘提出新技能{" "}
+            <b style={{ fontFamily: "var(--at-font-mono)" }}>{att.payload.skill_name}</b>
+            {att.payload.summary && (
+              <span style={{ fontSize: 12, color: "var(--at-text-faint)" }}>
+                {" — "}{att.payload.summary}
+              </span>
+            )}
+          </div>
+          <pre style={{ fontSize: 12, padding: 10, margin: "0 0 10px", background: "var(--at-bg-deep)",
+            border: "1px solid var(--at-border)", fontFamily: "var(--at-font-mono)",
+            whiteSpace: "pre-wrap", maxHeight: 200, overflow: "auto" }}>
+            {att.payload.content}
+          </pre>
+          <div style={{ fontSize: 12, color: "var(--at-text-faint)", marginBottom: 10 }}>
+            {att.payload.decision_effect || "approve = 写入技能库并热加载;reject = 丢弃提案"}
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button className="at-btn-amber" disabled={busy} onClick={() => decide("approve")}>
+              ✓ 批准入库
+            </button>
+            <Popconfirm title="丢弃该技能提案?" onConfirm={() => decide("reject")}>
+              <button className="at-link" style={{ color: "var(--at-red)" }}>✕ 丢弃</button>
+            </Popconfirm>
+          </div>
+        </>
+      ) : isBudget ? (
         <>
           <div style={{ fontSize: 14, marginBottom: 6 }}>
             Worker 的 Token 预算已耗尽:
@@ -165,7 +196,10 @@ function DecidedList() {
             {a.decision}
           </span>
           <span style={{ fontSize: 13, color: "var(--at-text-dim)" }}>
-            {a.type === "approval" ? `审批 ${a.payload.tool}` : `提问 ${a.payload.question}`}
+            {a.type === "approval" ? `审批 ${a.payload.tool}`
+              : a.type === "budget" ? "预算追加"
+                : a.type === "proposal" ? `技能提案 ${a.payload.skill_name}`
+                  : `提问 ${a.payload.question}`}
           </span>
           <Link to={`/v2/tickets/${a.ticket_id}`} className="at-link" style={{ fontSize: 12, marginLeft: "auto" }}>
             ↗
