@@ -1,4 +1,4 @@
-"""轮询型 Source:GitHub 已实现;飞书为骨架。
+"""轮询型 Source:GitHub 已实现;飞书为骨架;cron 为每日定时触发(P7)。
 
 安全铁律(spec §8): 外部文本是数据不是规则——Trigger 文本进入 prompt
 前先过 gate;Source 身份独立(配置的 token 不与操作者混用)。
@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
+from typing import Callable
 
 import requests
 
@@ -103,3 +105,54 @@ class FeishuSource(SourceBase):
 
     def poll(self) -> list[Trigger]:
         return []
+
+
+class CronSource(SourceBase):
+    """定时触发源(P7 每日晨报):到点发一条 Trigger,external_id = 日期 天然去重。
+
+    config:
+      schedule: "HH:MM"(本地时间;到达后当天触发一次)
+      text:     触发文本(晨报任务描述)
+      stats:    true → 附加 stats_fn() 产出的昨日数据块(部署方注入,如每人工单统计)
+    actor 固定 "cron"(gate 配 allowed_actors: ["cron"]);建议配合 skip_eval + worker 使用。
+    """
+
+    kind = "cron"
+
+    def __init__(self, name: str, config: dict, emit,
+                 stats_fn: Callable[[], str] | None = None,
+                 now_fn: Callable[[], datetime] | None = None) -> None:
+        super().__init__(name, config, emit)
+        self._stats_fn = stats_fn
+        self._now_fn = now_fn or datetime.now
+        self._fired_date: str | None = None  # 进程内防重;重启后靠 external_id 去重兜底
+
+    def poll(self) -> list[Trigger]:
+        cfg = self.config or {}
+        schedule = str(cfg.get("schedule", "09:00"))
+        try:
+            hh, mm = (int(x) for x in schedule.split(":")[:2])
+        except ValueError:
+            logger.warning("cron %s: 非法 schedule %r,跳过", self.name, schedule)
+            return []
+        now = self._now_fn()
+        due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        today = now.strftime("%Y-%m-%d")
+        if now < due or self._fired_date == today:
+            return []
+        self._fired_date = today
+        text = str(cfg.get("text", "")).strip() or "生成今日晨报"
+        if cfg.get("stats") and self._stats_fn is not None:
+            try:
+                stats = self._stats_fn()
+                if stats:
+                    text += "\n\n【昨日数据】\n" + stats
+            except Exception:
+                logger.exception("cron %s: 昨日数据构建失败", self.name)
+        return [Trigger(
+            actor="cron",
+            thread_key=f"cron-{self.name}",
+            text=text[:6000],
+            raw={"external_id": f"cron-{self.name}-{today}", "date": today,
+                 "schedule": schedule},
+        )]

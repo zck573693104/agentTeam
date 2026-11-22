@@ -331,6 +331,16 @@ def main() -> None:
     src = sources.get("demo_group")
     if src is None:
         sources.create("demo_group", "webhook", {"mode": "observe"})
+    # 每日晨报(cron 源,P7): 每天 09:00 定向派给部门领导,附昨日每人工单统计
+    if sources.get("briefing_pms") is None:
+        sources.create("briefing_pms", "cron", {
+            "schedule": "09:00",
+            "text": "生成今日 PMS 部门晨报:按下属逐人汇总昨日工单完成/失败/在途,"
+                    "标出失败原因与阻塞点,给出今天的工作安排建议。",
+            "stats": True,
+            "worker": "pms_lead",
+            "allowed_actors": ["cron"], "mode": "auto", "skip_eval": True,
+        })
     thread = threads.get_or_create("demo_group", "feishu-chat-1001")
     if not threads.list_triggers(thread["id"]):
         texts = [

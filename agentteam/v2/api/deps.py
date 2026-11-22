@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agentteam.logging_config import get_logger
@@ -172,9 +173,32 @@ def create_v2_components(
         fanout=scheduler.fan_out_thread,
         on_confirmed=distiller.record_confirm if distiller else None,
     )
-    # poll 型源骨架(github/feishu)随库配置注册;webhook 型由 HTTP 驱动不进 daemon
+    # poll 型源(github/feishu/cron)随库配置注册;webhook 型由 HTTP 驱动不进 daemon
     from agentteam.v2.sources.daemon import SourceDaemon
-    from agentteam.v2.sources.poll import FeishuSource, GitHubSource
+    from agentteam.v2.sources.poll import CronSource, FeishuSource, GitHubSource
+
+    def _daily_stats() -> str:
+        """P7 晨报数据:昨日每人工单终态 + 当前在途(本地时区的"昨天")。"""
+        from datetime import timedelta
+
+        local_now = datetime.now().astimezone()
+        y0 = (local_now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        t0 = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        stats = ticket_repo.daily_stats(
+            y0.astimezone(timezone.utc).isoformat(),
+            t0.astimezone(timezone.utc).isoformat(),
+        )
+        if not stats:
+            return "(昨日无终态工单)"
+        lines = []
+        for name, st in sorted(stats.items()):
+            active = (st.get("pending", 0) + st.get("running", 0)
+                      + st.get("waiting_human", 0))
+            lines.append(
+                f"- {name}: 昨日完成 {st.get('done', 0)} / 失败 {st.get('failed', 0)}"
+                f" / 取消 {st.get('cancelled', 0)};当前在途 {active}"
+            )
+        return "\n".join(lines)
 
     poll_sources = []
     for src in source_repo.list_all():
@@ -184,6 +208,11 @@ def create_v2_components(
             poll_sources.append(GitHubSource(src["name"], src["config"], inbound_engine.handle))
         elif src["kind"] == "feishu":
             poll_sources.append(FeishuSource(src["name"], src["config"], inbound_engine.handle))
+        elif src["kind"] == "cron":
+            poll_sources.append(CronSource(
+                src["name"], src["config"], inbound_engine.handle,
+                stats_fn=_daily_stats if (src["config"] or {}).get("stats") else None,
+            ))
     source_daemon = SourceDaemon(poll_sources, inbound_engine.handle,
                                  poll_interval=source_poll_interval)
 

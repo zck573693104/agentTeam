@@ -43,7 +43,8 @@ class ThreadRepo(BaseSqliteRepo):
         """入站事件 → Trigger(不可变,含 actor)。
 
         C10 轮询源去重: raw.external_id 存在时,同 external_id 不重复落库
-        (轮询游标重启回退会重发同事件),返回已有 trigger。
+        (轮询游标重启回退会重发同事件),返回已有 trigger 并带 duplicate=True,
+        调用方(InboundEngine)据此短路,避免回放重复立项。
         """
         external_id = (raw or {}).get("external_id")
         if external_id:
@@ -53,7 +54,7 @@ class ThreadRepo(BaseSqliteRepo):
                 (thread_id, external_id),
             )
             if existing:
-                return dict(existing)
+                return {**dict(existing), "duplicate": True}
         trigger_id = uuid4().hex
         now = _now()
         self._execute(
@@ -62,7 +63,7 @@ class ThreadRepo(BaseSqliteRepo):
              json.dumps(raw or {}, ensure_ascii=False), now),
         )
         return {"id": trigger_id, "thread_id": thread_id, "actor": actor,
-                "text": text, "at": now}
+                "text": text, "at": now, "duplicate": False}
 
     def list_triggers(self, thread_id: str, limit: int = 200) -> list[dict]:
         rows = self._fetchall(

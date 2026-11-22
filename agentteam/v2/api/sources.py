@@ -18,8 +18,8 @@ def sources_router(v2: V2Components) -> APIRouter:
         if v2.source_repo.get(name) is not None:
             raise HTTPException(status_code=400, detail=f"Source already exists: {name}")
         kind = body.get("kind", "webhook")
-        if kind not in ("webhook", "github", "feishu"):
-            raise HTTPException(status_code=422, detail="kind must be webhook|github|feishu")
+        if kind not in ("webhook", "github", "feishu", "cron"):
+            raise HTTPException(status_code=422, detail="kind must be webhook|github|feishu|cron")
         secret = body.get("secret")
         secret_hash = hash_secret(secret) if secret else None
         src = v2.source_repo.create(name, kind, body.get("config") or {}, secret_hash)

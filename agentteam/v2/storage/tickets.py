@@ -83,6 +83,29 @@ class TicketRepo(BaseSqliteRepo):
         )
         return [self._row_to_ticket(r) for r in rows]
 
+    def daily_stats(self, start_iso: str, end_iso: str) -> dict:
+        """P7 晨报:按 worker 汇总窗口内终态工单 + 当前在途。
+
+        返回 {worker_name: {done/failed/cancelled/pending/running/waiting_human: n}}。
+        """
+        stats: dict[str, dict[str, int]] = {}
+        rows = self._fetchall(
+            "SELECT worker_name, status, COUNT(*) AS n FROM tickets "
+            "WHERE ended_at IS NOT NULL AND ended_at >= ? AND ended_at < ? "
+            "AND worker_name IS NOT NULL GROUP BY worker_name, status",
+            (start_iso, end_iso),
+        )
+        for r in rows:
+            stats.setdefault(r["worker_name"], {})[r["status"]] = r["n"]
+        rows2 = self._fetchall(
+            "SELECT worker_name, status, COUNT(*) AS n FROM tickets "
+            "WHERE status IN ('pending','running','waiting_human') "
+            "AND worker_name IS NOT NULL GROUP BY worker_name, status",
+        )
+        for r in rows2:
+            stats.setdefault(r["worker_name"], {})[r["status"]] = r["n"]
+        return stats
+
     def cas_status(
         self, ticket_id: str, expected: TicketStatus, new: TicketStatus,
         *, worker_name: str | None = None, result: str | None = None,

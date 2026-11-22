@@ -12,7 +12,7 @@ import json
 
 from agentteam.logging_config import get_logger
 from agentteam.v2.domain import events as ev
-from agentteam.v2.kernel.eval_engine import EvalEngine
+from agentteam.v2.kernel.eval_engine import EvalDecision, EvalEngine
 from agentteam.v2.kernel.gate import Gate
 from agentteam.v2.sources.webhook import Trigger
 from agentteam.v2.storage.events import EventBus, EventRepo
@@ -59,6 +59,10 @@ class InboundEngine:
         trig = self.threads.append_trigger(
             thread["id"], trigger.actor, trigger.text, raw=trigger.raw,
         )
+        # 去重短路:同 external_id 的回放(轮询游标重启重发)不重复立项/扇出
+        if trig.get("duplicate"):
+            return {"decision": "duplicate", "reason": "external_id already processed",
+                    "thread_id": thread["id"], "trigger_id": trig["id"]}
         # A4 双向 pass-through: 同线程活跃工单的 worker 直接收到此事件
         # (独立于 gate/Eval 流程;终态工单自动跳过)
         if self._fanout is not None:
@@ -76,8 +80,11 @@ class InboundEngine:
                     "thread_id": thread["id"], "trigger_id": trig["id"],
                     "evaluation_id": evaluation["id"]}
 
-        # —— Eval 三事实(轻量模型) ——
-        decision = self.eval_engine.evaluate(trigger.text)
+        # —— Eval 三事实(轻量模型);受信机器源(config.skip_eval)免研判 ——
+        if (src["config"] or {}).get("skip_eval"):
+            decision = EvalDecision(accept=True, reason="skip_eval(受信机器源)")
+        else:
+            decision = self.eval_engine.evaluate(trigger.text)
 
         if not decision.accept:
             evaluation = self.evaluations.create(
@@ -135,12 +142,14 @@ class InboundEngine:
         """立项:Router 派工 + inferred Mandate + thread 绑定。
 
         eval_id 非空(观察转正)时翻转原 would_accept 记录;auto 模式新建 accepted。
+        源配置 worker(管理员的承接人指定)时定向派工,绕过 Router 猜测。
         """
         trigger = self._get_trigger(trigger_id)
         result = self._submit(
             text=trigger["text"],
             source_name=src["name"],
             thread_id=thread_id,
+            worker_name=(src.get("config") or {}).get("worker"),
         )
         if eval_id:
             self.evaluations.set_ticket(eval_id, result["ticket_id"], decision="accepted")

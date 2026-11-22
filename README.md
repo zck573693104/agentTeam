@@ -94,7 +94,30 @@ agentteam install-preset dev_pool
 
 模型 Key 走环境变量: DASHSCOPE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY(按 provider)。
 
-## 学习闭环(P4/P5)
+## 外部数据渠道接入（部门晨报 / 代码 / 禅道 / 考勤）
+
+领导每日晨报由 **cron 源**驱动：到点发 Trigger →（可 skip_eval）→ 定向派给部门领导 worker，自动附上**昨日每人工单统计**（完成/失败/在途）：
+
+```json
+{"name": "briefing_pms", "kind": "cron", "config": {
+  "schedule": "09:00",
+  "text": "生成今日部门晨报:按下属逐人汇总昨日工单完成/失败/在途…",
+  "stats": true, "worker": "pms_lead",
+  "allowed_actors": ["cron"], "mode": "auto", "skip_eval": true
+}}
+```
+
+其他三个渠道都是**现成接口**，无需改代码，按渠道特性接入：
+
+| 渠道 | 接入方式 |
+|---|---|
+| **代码情况** | `github` 源（config.repos 填下属仓库，配 GITHUB_TOKEN）→ issue/评论自动进线程；自有 Git 服务可用 webhook 源推 commit/PR 事件 |
+| **禅道任务** | 禅道侧配置 webhook 或轮询脚本调 `POST /api/sources/{name}/webhook` 推任务状态变更（actor=禅道用户名，同 thread_key 自动聚合） |
+| **考勤数据** | 考勤系统 webhook 推每日出勤摘要（缺勤/迟到），或由晨报 worker 经 MCP 工具拉取 |
+
+渠道推送的文本会进对应线程（thread_key 聚合），晨报 worker 下钻线程即得上下文。**安全铁律**：外部文本只是数据，过 gate 后才进 prompt，且不改变授权。
+
+
 
 > 范式来源: [Letta sleep-time compute](https://www.letta.com/blog/sleep-time-compute)(主 agent 无权写记忆,独立角色异步蒸馏) + [OpenViking](https://github.com/volcengine/OpenViking)(上下文即文件系统,L0 摘要/L2 全文分级)。
 

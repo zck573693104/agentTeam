@@ -1,12 +1,12 @@
 /**
- * V2 工单看板:按状态分列 + 新建请求。
+ * V2 工单看板:按状态分列 + 新建请求 + 组织过滤(领导看下属:选节点即看其子树全部工单)。
  * dsh: Ticket = 已授权工作单元,状态机独立于执行器。
  */
 import { useState } from "react";
-import { Input, Modal, message } from "antd";
+import { Input, Modal, Select, message } from "antd";
 import { Link } from "react-router-dom";
 import { useFetch } from "../../hooks/useFetch";
-import { v2Post, type V2Ticket } from "../../api/v2";
+import { v2Post, type V2OrgNode, type V2Ticket } from "../../api/v2";
 import { PageHeader } from "../../components/PageHeader";
 
 const COLUMNS: { status: string; label: string; color: string }[] = [
@@ -108,7 +108,42 @@ function TicketCard({ t }: { t: V2Ticket }) {
 
 export default function V2Tickets() {
   const [modalOpen, setModalOpen] = useState(false);
+  const [orgFilter, setOrgFilter] = useState<string | undefined>(undefined);
   const { data, loading, refetch } = useFetch<V2Ticket[]>("/api/tickets");
+  const { data: orgData } = useFetch<{ tree: V2OrgNode[]; workers_by_node: Record<string, { name: string }[]> }>("/api/org");
+
+  // 组织树扁平化(过滤选项) + 节点子树工人集合(按组看下属工单)
+  const nodeOptions: { id: string; label: string }[] = [];
+  const flatten = (nodes: V2OrgNode[], depth: number) => {
+    for (const n of nodes) {
+      nodeOptions.push({ id: n.id, label: `${"　".repeat(depth)}${n.name}` });
+      flatten(n.children || [], depth + 1);
+    }
+  };
+  flatten(orgData?.tree || [], 0);
+  const subtreeWorkers = (nodeId: string | undefined): Set<string> | null => {
+    if (!nodeId || !orgData) return null;
+    const ids = new Set<string>([nodeId]);
+    const addSub = (nodes: V2OrgNode[]) => {
+      for (const n of nodes) {
+        if (n.id === nodeId || ids.has(n.parent_id || "")) {
+          ids.add(n.id);
+          addSub(n.children || []);
+        }
+      }
+    };
+    addSub(orgData.tree || []);
+    const names = new Set<string>();
+    for (const [nid, ws] of Object.entries(orgData.workers_by_node || {})) {
+      if (ids.has(nid)) for (const w of ws) names.add(w.name);
+    }
+    return names;
+  };
+  const activeWorkers = subtreeWorkers(orgFilter);
+
+  const filtered = activeWorkers
+    ? (data || []).filter((t) => t.worker_name && activeWorkers.has(t.worker_name))
+    : (data || []);
 
   return (
     <div>
@@ -116,7 +151,16 @@ export default function V2Tickets() {
         index="03 · V2 TICKETS"
         title="工单看板"
         subtitle="Ticket Board"
-        action={<button className="at-btn-amber" onClick={() => setModalOpen(true)}>+ 新请求</button>}
+        action={
+          <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <Select size="small" style={{ minWidth: 170 }} allowClear
+              placeholder="组织过滤(看下属工单)"
+              value={orgFilter}
+              onChange={(v) => setOrgFilter(v || undefined)}
+              options={nodeOptions.map((n) => ({ value: n.id, label: n.label }))} />
+            <button className="at-btn-amber" onClick={() => setModalOpen(true)}>+ 新请求</button>
+          </span>
+        }
       />
       {loading && !data && (
         <div style={{ padding: 40, textAlign: "center", color: "var(--at-text-faint)", fontFamily: "var(--at-font-mono)", fontSize: 13 }}>
@@ -125,7 +169,7 @@ export default function V2Tickets() {
       )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
         {COLUMNS.map((col) => {
-          const list = (data || []).filter((t) => t.status === col.status);
+          const list = filtered.filter((t) => t.status === col.status);
           return (
             <div key={col.status} className="at-panel at-fade-in" style={{ padding: 12, minHeight: 120 }}>
               <div style={{

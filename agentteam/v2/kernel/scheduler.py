@@ -229,11 +229,16 @@ class Scheduler:
         self._wake.set()  # 若工单还在 pending 队列,唤醒调度
         return {"ok": True, "state": ticket.status.value}
 
-    def submit_from_source(self, text: str, source_name: str, thread_id: str | None = None) -> dict:
-        """Source 入站立项:inferred Mandate + Source 独立身份(身份分离铁律)。"""
+    def submit_from_source(self, text: str, source_name: str, thread_id: str | None = None,
+                           worker_name: str | None = None) -> dict:
+        """Source 入站立项:inferred Mandate + Source 独立身份(身份分离铁律)。
+
+        worker_name: 源配置的承接人提示(管理员预设,非外部文本;可空 = Router 派工)。
+        """
         return self.submit_request(
             text, submitted_by=f"source:{source_name}",
             thread_id=thread_id, mandate_basis="inferred",
+            worker_name=worker_name,
         )
 
     # —— 取消(撤权) ——
