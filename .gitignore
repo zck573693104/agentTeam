@@ -50,3 +50,7 @@ Thumbs.db
 workspaces/
 data/*.db-shm
 data/*.db-wal
+
+# v2 runtime data (memory + per-ticket workspaces)
+data/memory/
+data/workspaces/
