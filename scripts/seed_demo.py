@@ -1,7 +1,7 @@
 """demo 数据种子脚本 — 一键填充控制台演示数据(幂等,可重复执行,无需模型 Key)。
 
 覆盖全部控制台页面:
-- 工人池: coder/tester(dev_pool 预设)+ reviewer
+- 工人池: coder/tester(dev_pool 预设)+ reviewer + 组织架构池(PMS部门/应用部,org_demo 预设)
 - 工单看板: done(repo worktree,含审批故事)/done(普通)/failed/waiting_human
 - 注意件收件箱: 待答提问 + 待批技能提案 + 已批审批
 - 观察模式: webhook 源(observe)+ 线程/触发器 + would_accept/rejected/accepted 账本
@@ -83,9 +83,10 @@ def main() -> None:
     workspaces = WorkspaceManager(workspace_root)
     memory = MemoryStore(memory_dir)
 
-    # —— 1. 工人池(dev_pool 预设 + reviewer) ——
+    # —— 1. 工人池(dev_pool 预设 + reviewer + org_demo 组织架构预设) ——
     from agentteam.v2.presets.dev_pool import WORKERS as DEV_WORKERS
-    for w in DEV_WORKERS:
+    from agentteam.v2.presets.org_demo import WORKERS as ORG_WORKERS
+    for w in [*DEV_WORKERS, *ORG_WORKERS]:
         workers.upsert(w)
     workers.upsert(WorkerDef(
         name="reviewer",
