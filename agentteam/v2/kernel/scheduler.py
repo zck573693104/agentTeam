@@ -163,8 +163,8 @@ class Scheduler:
                 raise ValueError(f"org node '{org_node}' not found")
             subtree = set(self.org_repo.subtree_ids(org_node))
             candidates = [w for w in candidates if w.org_node_id in subtree]
-            if not candidates:
-                raise ValueError(f"组织节点 '{org_node}' 子树下没有可派工人")
+            if not candidates or not any(w.enabled for w in candidates):
+                raise ValueError(f"组织节点 '{org_node}' 子树下没有已启用的工人")
         decision = self.router.decide(text, candidates,
                                       requested_worker=worker_name, repo_path=repo_path)
 
@@ -418,14 +418,15 @@ class Scheduler:
         return policy_version_for_pool([w.to_dict() for w in self.workers.list_all()])
 
     def _org_digest(self) -> str:
-        """P6: 组织架构摘要(Router prompt 注入;树小,每次现建)。"""
+        """P6: 组织架构摘要(Router prompt 注入;树小,每次现建)。停用成员带标记。"""
         if self.org_repo is None:
             return ""
         try:
             by_node: dict[str, list[str]] = {}
             for w in self.workers.list_all():
                 if w.org_node_id:
-                    by_node.setdefault(w.org_node_id, []).append(w.name)
+                    by_node.setdefault(w.org_node_id, []).append(
+                        w.name if w.enabled else f"{w.name}(停用)")
             lines: list[str] = []
 
             def walk(nodes: list, depth: int) -> None:
