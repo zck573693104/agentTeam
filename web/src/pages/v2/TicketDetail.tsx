@@ -13,6 +13,7 @@ import {
   type V2ChangeSet, type V2Event, type V2Message, type V2Session, type V2Ticket,
 } from "../../api/v2";
 import { PageHeader } from "../../components/PageHeader";
+import MiniMarkdown from "../../components/MiniMarkdown";
 
 const STATUS_COLOR: Record<string, string> = {
   pending: "var(--at-gray)", running: "var(--at-green)",
@@ -268,12 +269,25 @@ export default function V2TicketDetail() {
           {ticket.task}
         </div>
         {ticket.result && (
-          <div style={{
-            fontSize: 13, marginTop: 10, padding: 10, background: "var(--at-bg-deep)",
-            border: "1px solid var(--at-border)", whiteSpace: "pre-wrap", color: "var(--at-green)",
-          }}>
-            <b>结果:</b> {ticket.result}
-          </div>
+          ticket.result.trimStart().startsWith("#") ? (
+            /* 报告类结果(晨报/复盘 markdown) → 排版渲染 */
+            <div style={{
+              marginTop: 10, padding: "14px 16px", background: "var(--at-bg-panel)",
+              border: "1px solid var(--at-border)", borderRadius: 4,
+            }}>
+              <div className="at-stat-label" style={{ marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ color: "var(--at-amber)" }}>▤</span> REPORT
+              </div>
+              <MiniMarkdown source={ticket.result} />
+            </div>
+          ) : (
+            <div style={{
+              fontSize: 13, marginTop: 10, padding: 10, background: "var(--at-bg-deep)",
+              border: "1px solid var(--at-border)", whiteSpace: "pre-wrap", color: "var(--at-green)",
+            }}>
+              <b>结果:</b> {ticket.result}
+            </div>
+          )
         )}
       </div>
 
